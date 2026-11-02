@@ -33,13 +33,13 @@ repository = "https://github.com/your-org/hostwick"
 authors = ["Hostwick contributors"]
 
 [workspace.dependencies]
-hostwick-core = { path = "crates/hostwick-core" }
-hostwick-ssh = { path = "crates/hostwick-ssh" }
-hostwick-sftp = { path = "crates/hostwick-sftp" }
-hostwick-transfer = { path = "crates/hostwick-transfer" }
-hostwick-vault = { path = "crates/hostwick-vault" }
-hostwick-store = { path = "crates/hostwick-store" }
-hostwick-import = { path = "crates/hostwick-import" }
+hostwick-core = { path = "crates/hostwick-core", version = "0.1.0" }
+hostwick-ssh = { path = "crates/hostwick-ssh", version = "0.1.0" }
+hostwick-sftp = { path = "crates/hostwick-sftp", version = "0.1.0" }
+hostwick-transfer = { path = "crates/hostwick-transfer", version = "0.1.0" }
+hostwick-vault = { path = "crates/hostwick-vault", version = "0.1.0" }
+hostwick-store = { path = "crates/hostwick-store", version = "0.1.0" }
+hostwick-import = { path = "crates/hostwick-import", version = "0.1.0" }
 
 # `ring` instead of the default aws-lc-rs: no CMake/NASM needed on Windows.
 russh = { version = "0.65", default-features = false, features = ["flate2", "ring", "rsa"] }

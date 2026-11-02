@@ -2,6 +2,17 @@
 [advisories]
 version = 2
 yanked = "deny"
+# Flag unmaintained crates we depend on directly. Transitive ones (mostly in
+# the GPU UI stack: instant, paste, rustybuzz, ttf-parser, zbus/zvariant, ...)
+# are tracked upstream and reviewed when bumping gpui-kit.
+unmaintained = "workspace"
+ignore = [
+    # rsa "Marvin" timing side channel: no fixed `rsa` release exists yet. It
+    # needs many precise timing measurements of private-key operations; here
+    # RSA keys only sign SSH auth challenges on the user's own machine. Drop
+    # this once russh/ssh-key move to a fixed rsa release.
+    { id = "RUSTSEC-2023-0071", reason = "no fix available; local-only signing; see comment" },
+]
 
 [licenses]
 version = 2
