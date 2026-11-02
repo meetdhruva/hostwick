@@ -52,6 +52,23 @@ pub trait Interaction: Send + Sync {
     fn banner(&self, _text: &str) {}
     /// Non-fatal problem worth showing (e.g. "key x.ppk: wrong passphrase").
     fn notice(&self, _text: &str) {}
+    /// Whether a password or key passphrase worked. `saved`: it came from
+    /// [`Credentials`] rather than a prompt. A UI can offer to remember a
+    /// typed secret once it is known to be right, and stop using a saved one
+    /// that went stale. After a saved secret is rejected the auth chain asks
+    /// once through [`password`](Self::password) /
+    /// [`key_passphrase`](Self::key_passphrase) instead of giving up.
+    fn secret_outcome(&self, _secret: SecretUse<'_>, _saved: bool, _accepted: bool) {}
+}
+
+/// Which secret an [`Interaction::secret_outcome`] is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretUse<'a> {
+    /// Password for `user@host`: a login password, or a proxy password when
+    /// `host` is `proxy NAME` (as passed to [`Interaction::password`]).
+    Password { user: &'a str, host: &'a str },
+    /// Passphrase of a private key file.
+    KeyPassphrase(&'a Path),
 }
 
 /// Lookup of stored secrets (the vault) by credential id.

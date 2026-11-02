@@ -29,7 +29,7 @@ pub use exec::ExecOutput;
 pub use exec_stream::{ExecStream, ExitStatus, wait_exit};
 pub use forward::ForwardHandle;
 pub use interaction::{
-    Credentials, HostKeyDecision, HostKeyInfo, HostKeyStatus, Interaction, NoCredentials,
+    Credentials, HostKeyDecision, HostKeyInfo, HostKeyStatus, Interaction, NoCredentials, SecretUse,
 };
 pub use known_hosts::{KnownHostEntry, KnownHostMarker, KnownHosts};
 pub use pool::ConnectionPool;

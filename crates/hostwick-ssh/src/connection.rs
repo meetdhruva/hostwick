@@ -144,11 +144,7 @@ impl Connection {
         // The proxy (first hop only) runs before the timed handshake: it may
         // prompt for the proxy password, and has per-step timeouts of its own.
         let proxied = match (&via, &profile.proxy) {
-            (None, Some(spec)) => {
-                let creds = proxy_credentials(spec, ctx).await;
-                tracing::info!(proxy = %spec.to_url(), %host, port, "connecting through proxy");
-                Some(proxy::connect(spec, &creds, host, port, ctx.connect_timeout).await?)
-            }
+            (None, Some(spec)) => Some(connect_via_proxy(spec, ctx, host, port).await?),
             _ => None,
         };
 
@@ -296,39 +292,68 @@ pub async fn connect_via_proxy(
     host: &str,
     port: u16,
 ) -> Result<tokio::net::TcpStream, SshError> {
-    let creds = proxy_credentials(spec, ctx).await;
+    let (creds, saved) = proxy_credentials(spec, ctx).await;
     tracing::info!(proxy = %spec.to_url(), %host, port, "connecting through proxy");
-    proxy::connect(spec, &creds, host, port, ctx.connect_timeout).await
+    let res = proxy::connect(spec, &creds, host, port, ctx.connect_timeout).await;
+    if let (Some(user), Some(_)) = (&creds.user, &creds.password) {
+        // Only a verdict on the password itself: a refused or unreachable
+        // proxy says nothing about it.
+        let verdict = match &res {
+            Ok(_) => Some(true),
+            Err(SshError::Proxy { reason, .. })
+                if reason.contains("rejected the") || reason.contains("requires a password") =>
+            {
+                Some(false)
+            }
+            Err(_) => None,
+        };
+        if let Some(accepted) = verdict {
+            let proxy_host = format!("proxy {}", spec.host);
+            ctx.interaction.secret_outcome(
+                crate::SecretUse::Password {
+                    user,
+                    host: &proxy_host,
+                },
+                saved,
+                accepted,
+            );
+        }
+    }
+    res
 }
 
 /// The proxy user and password: the vault entry, else a prompt (only when a
-/// proxy user is set; SOCKS4 has no password).
+/// proxy user is set; SOCKS4 has no password). Also whether the password
+/// came from the vault.
 async fn proxy_credentials(
     spec: &hostwick_core::ProxySpec,
     ctx: &ConnectContext,
-) -> ProxyCredentials {
+) -> (ProxyCredentials, bool) {
     let Some(user) = spec.user.clone().filter(|u| !u.is_empty()) else {
-        return ProxyCredentials::default();
+        return (ProxyCredentials::default(), false);
     };
-    let password = if spec.kind == hostwick_core::ProxyKind::Socks4 {
-        None
+    let (password, saved) = if spec.kind == hostwick_core::ProxyKind::Socks4 {
+        (None, false)
     } else {
         match spec
             .password_credential
             .as_deref()
             .and_then(|c| ctx.credentials.get(c))
         {
-            Some(p) => Some(p),
+            Some(p) => (Some(p), true),
             None => {
                 let proxy_host = format!("proxy {}", spec.host);
-                ctx.interaction.password(&user, &proxy_host).await
+                (ctx.interaction.password(&user, &proxy_host).await, false)
             }
         }
     };
-    ProxyCredentials {
-        user: Some(user),
-        password,
-    }
+    (
+        ProxyCredentials {
+            user: Some(user),
+            password,
+        },
+        saved,
+    )
 }
 
 /// russh client config from a profile: keepalive, and algorithm policy.

@@ -10,7 +10,7 @@ use russh::keys::{Algorithm, Certificate, HashAlg, PrivateKey, PrivateKeyWithHas
 
 use crate::gssapi::{self, GssAuthError, KerberosAuth};
 use crate::handler::ClientHandler;
-use crate::interaction::{Credentials, Interaction};
+use crate::interaction::{Credentials, Interaction, SecretUse};
 use crate::known_hosts::fingerprint;
 use crate::{SshError, agent};
 
@@ -330,13 +330,27 @@ pub(crate) async fn load_key(
     match russh::keys::decode_secret_key(&text, None) {
         Ok(k) => Ok(k),
         Err(russh::keys::Error::KeyIsEncrypted) => {
-            let pass = match passphrase_credential.and_then(|c| ctx.credentials.get(c)) {
-                Some(p) => Some(p),
-                None => ctx.interaction.key_passphrase(&path).await,
-            };
-            let pass = pass.ok_or_else(|| key_err("passphrase required".into()))?;
-            russh::keys::decode_secret_key(&text, Some(pass.expose_secret()))
-                .map_err(|e| key_err(e.to_string()))
+            let used = SecretUse::KeyPassphrase(&path);
+            // A saved passphrase first; if it no longer fits (the key was
+            // re-encrypted), ask once instead of failing.
+            if let Some(saved) = passphrase_credential.and_then(|c| ctx.credentials.get(c)) {
+                match russh::keys::decode_secret_key(&text, Some(saved.expose_secret())) {
+                    Ok(k) => {
+                        ctx.interaction.secret_outcome(used, true, true);
+                        return Ok(k);
+                    }
+                    Err(_) => ctx.interaction.secret_outcome(used, true, false),
+                }
+            }
+            let pass = ctx
+                .interaction
+                .key_passphrase(&path)
+                .await
+                .ok_or_else(|| key_err("passphrase required".into()))?;
+            let res = russh::keys::decode_secret_key(&text, Some(pass.expose_secret()))
+                .map_err(|e| key_err(e.to_string()));
+            ctx.interaction.secret_outcome(used, false, res.is_ok());
+            res
         }
         Err(e) => Err(key_err(e.to_string())),
     }
@@ -354,28 +368,38 @@ async fn load_ppk(
         reason,
     };
     let encrypted = !text.lines().any(|l| l.trim() == "Encryption: none");
-    let passphrase = if encrypted {
-        let pass = match passphrase_credential.and_then(|c| ctx.credentials.get(c)) {
-            Some(p) => Some(p),
-            None => ctx.interaction.key_passphrase(path).await,
-        };
-        Some(
-            pass.ok_or_else(|| key_err("passphrase required".into()))?
-                .expose_secret()
-                .to_owned(),
-        )
-    } else {
-        None
+    let decode = |passphrase: Option<String>| {
+        PrivateKey::from_ppk(text, passphrase).map_err(|e| {
+            let msg = e.to_string();
+            if encrypted && msg.to_lowercase().contains("mac") {
+                key_err("wrong passphrase".into())
+            } else {
+                key_err(msg)
+            }
+        })
     };
-    let wrong_pass = encrypted;
-    PrivateKey::from_ppk(text, passphrase).map_err(|e| {
-        let msg = e.to_string();
-        if wrong_pass && msg.to_lowercase().contains("mac") {
-            key_err("wrong passphrase".into())
-        } else {
-            key_err(msg)
+    if !encrypted {
+        return decode(None);
+    }
+    let used = SecretUse::KeyPassphrase(path);
+    if let Some(saved) = passphrase_credential.and_then(|c| ctx.credentials.get(c)) {
+        match decode(Some(saved.expose_secret().to_owned())) {
+            Ok(k) => {
+                ctx.interaction.secret_outcome(used, true, true);
+                return Ok(k);
+            }
+            // Stale saved passphrase: ask once below.
+            Err(_) => ctx.interaction.secret_outcome(used, true, false),
         }
-    })
+    }
+    let pass = ctx
+        .interaction
+        .key_passphrase(path)
+        .await
+        .ok_or_else(|| key_err("passphrase required".into()))?;
+    let res = decode(Some(pass.expose_secret().to_owned()));
+    ctx.interaction.secret_outcome(used, false, res.is_ok());
+    res
 }
 
 async fn try_key_file(
@@ -514,16 +538,47 @@ async fn try_password(
     ctx: &AuthCtx<'_>,
     credential: Option<&str>,
 ) -> Result<Step, SshError> {
-    let pass = match credential.and_then(|c| ctx.credentials.get(c)) {
-        Some(p) => Some(p),
-        None => ctx.interaction.password(ctx.user, ctx.host).await,
+    let used = SecretUse::Password {
+        user: ctx.user,
+        host: ctx.host,
     };
-    let Some(pass) = pass else {
+    let accepted = |r: &AuthResult| {
+        matches!(
+            r,
+            AuthResult::Success
+                | AuthResult::Failure {
+                    partial_success: true,
+                    ..
+                }
+        )
+    };
+    if let Some(saved) = credential.and_then(|c| ctx.credentials.get(c)) {
+        let res = handle
+            .authenticate_password(ctx.user, saved.expose_secret().to_owned())
+            .await?;
+        let ok = accepted(&res);
+        ctx.interaction.secret_outcome(used, true, ok);
+        if ok {
+            return Ok(step(res));
+        }
+        // The saved password is stale (changed on the server): ask once
+        // rather than moving on as if password auth were impossible.
+        let Some(pass) = ctx.interaction.password(ctx.user, ctx.host).await else {
+            return Ok(step(res));
+        };
+        let res = handle
+            .authenticate_password(ctx.user, pass.expose_secret().to_owned())
+            .await?;
+        ctx.interaction.secret_outcome(used, false, accepted(&res));
+        return Ok(step(res));
+    }
+    let Some(pass) = ctx.interaction.password(ctx.user, ctx.host).await else {
         return Ok(Step::Continue { remaining: None });
     };
     let res = handle
         .authenticate_password(ctx.user, pass.expose_secret().to_owned())
         .await?;
+    ctx.interaction.secret_outcome(used, false, accepted(&res));
     Ok(step(res))
 }
 
