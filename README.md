@@ -34,7 +34,7 @@ app — built to replace Solar-PuTTY, PuTTY and WinSCP on Windows, macOS and Lin
 crates/
   hostwick-core      domain types (profiles, targets, forwards, backoff) — no I/O
   hostwick-ssh       connection, auth chain, known_hosts, shell/exec, forwards, pool
-  hostwick-sftp      RemoteFs port + SFTP and local-disk adapters
+  hostwick-sftp      RemoteFs port + SFTP (also via sudo), SCP and local-disk adapters
   hostwick-transfer  transfer engine: resume, retry, concurrency, rate limit, sync plan
   hostwick-vault     encrypted credential vault (Argon2id + XChaCha20-Poly1305)
   hostwick-store     SQLite profile store with migrations; app paths; portable mode
@@ -191,6 +191,10 @@ Like WinSCP's *Synchronize* and *Keep remote directory up to date*:
 
 - One-way, either direction, files compared by size and modification time
   (copies keep timestamps, so a second run is a no-op).
+- `--both` (WinSCP "Both"): the newer copy of each file wins in either
+  direction and nothing is ever deleted. A file whose timestamps match but
+  whose sizes differ was changed on both sides: it is reported as a conflict,
+  never guessed at. `-n` prints the plan instead.
 - `--delete` mirrors: removes destination files and folders missing from the
   source. Without it nothing on the destination is ever deleted.
 - `--exclude` globs (`*.tmp`, `.git`, `build/out/*`); excluded files are
@@ -199,9 +203,8 @@ Like WinSCP's *Synchronize* and *Keep remote directory up to date*:
   works identically on every OS and on network drives; when the source is
   local, sub-second timestamps catch even same-size edits. Errors such as a
   dropped connection are reported and retried, never fatal.
-- In the desktop app: **Files → Keep up to date…**, pick a local folder; it
-  uploads changes into the current remote folder until you press **Stop sync**
-  (never deletes remote files).
+- In the desktop app: **Synchronize…** in the file browser (preview as a
+  checklist, then run), and **Keep up to date…**.
 
 ## Desktop app
 
@@ -220,7 +223,46 @@ open terminal. Host-key, password, passphrase and MFA prompts appear as dialogs.
 | Saved host | Open terminal, Open files, Edit…, Duplicate, Copy address, Delete… |
 | Tab | Reconnect, Duplicate, Open files/terminal, Close, Close others, Close all |
 | Terminal | Copy, Paste, Select all, Clear scrollback, Log session to file… / Stop, Open files, Duplicate, Reconnect |
-| File | Open, Download…, Rename…, Copy path, Upload here…, New folder…, Refresh, Delete… |
+| File | Open, Edit (F4), Upload/Download (F5), Move (F6), Rename… (F2), Delete…, New folder… (F7), New symlink…, Copy path, Refresh, Properties (Alt+Enter) |
+
+**File browser** (WinSCP Commander style): this computer on the left, the
+server on the right (*Hide local* gives a single remote pane; the local folder
+is remembered per host).
+
+- Sortable columns (click a header), multi-selection (click, Ctrl/⌘+click,
+  Shift+click, Ctrl+A) and keys: Enter open, Backspace up, F5 copy to the other
+  side, F6 move, F2 rename, F4 edit, F7 new folder, Del delete, Ctrl+R refresh,
+  Tab switch side, Alt+Enter properties, arrows/Home/End/PageUp/PageDown.
+- **Drag and drop** rows between the panes to copy them, onto a folder row to
+  copy (or, within one side, move) into it, and drop files and folders from
+  your file manager onto either side. Dragging *out* to the file manager works
+  for local rows on macOS and Wayland; remote rows (and X11/Windows) cannot be
+  dragged out — use Download.
+- **Edit in your editor** (F4 or right-click → Edit): the file is downloaded to
+  a temporary folder under its own name and opened with *Settings → External
+  editor* (`{file}` is replaced by the path, otherwise appended; empty = the
+  system's default app). Every save is uploaded — changes are detected by
+  content hash, not timestamps, so editors that save by rename and time-zone
+  differences do not matter. If the server copy changed meanwhile you choose:
+  *Overwrite*, *Download theirs* or *Save as copy*. Uploads write into the
+  existing file, so its owner and permissions stay. The **Edits** button lists
+  open files with their state (watching, uploading, uploaded 12:01, error) and
+  stops watching; temporary copies are removed when the tab closes.
+- **Properties**: type, size and *Calculate* for folders (computed on the
+  server with `find` when possible), modified time, owner/group (names and
+  numeric ids, editable), permissions as checkboxes kept in step with an octal
+  field (plus setuid/setgid/sticky), *Apply to everything inside* (files keep
+  their execute bits), SHA-256 on demand (`sha256sum` on the server when
+  available), symlink target. *New symlink…* creates links.
+- **Root**: *Reopen as root* runs the server's `sftp-server` through
+  `sudo -u root` (or the host's sudo user). Passwordless sudo and sudo with a
+  password both work — the password is asked for in a dialog (or taken from
+  the vault) and fed to sudo only after its prompt appears; wrong password,
+  "not in sudoers" and `requiretty` are reported as such. A red **ROOT** badge
+  marks the elevated side. Hosts with *sudo* enabled open elevated.
+- **Servers without SFTP** (routers, ESXi, busybox): with the file protocol on
+  *Auto* the browser falls back to SCP and shell commands (`ls`, `mv`, `chmod`
+  …); everything above works except resuming interrupted transfers.
 
 Prefer PuTTY's "right-click pastes"? Settings → Right-click → *Paste (PuTTY)*.
 
@@ -303,6 +345,8 @@ cargo test --workspace     # unit + integration tests
 scripts/e2e.sh             # starts sshd on 127.0.0.1:2222, runs the e2e suite
 scripts/e2e-net.sh         # sshd on :2223 (+ KDC, Xvfb, agent, tinyproxy, dante):
                            # proxies, X11/agent forwarding, certificates, FIDO, Kerberos
+scripts/e2e-files.sh       # sshd on :2230/:2231 (SCP only) with sudo users: sudo SFTP
+                           # (password, NOPASSWD, refusals), SCP, properties, two-way sync
 # `hostwick script` and the --json outputs against any OpenSSH server:
 HOSTWICK_TOOLS_E2E_PORT=2250 HOSTWICK_TOOLS_E2E_USER=me HOSTWICK_TOOLS_E2E_KEY=~/.ssh/test_key \
   HOSTWICK_TOOLS_E2E_HOST_PUB=/etc/ssh/ssh_host_ed25519_key.pub \
@@ -331,12 +375,15 @@ connection sharing, and a pipelined 24 MiB SFTP round trip.
 
 ## Known gaps / roadmap
 
-- Two-way sync (WinSCP "Both") and remote-side change detection finer than
-  one second (SFTP reports whole seconds).
+- Remote-side change detection finer than one second (SFTP reports whole
+  seconds).
+- Dragging remote files out of the window to the OS file manager (GPUI can
+  only hand over files that already exist on disk; local rows work on macOS
+  and Wayland).
 
 - The desktop app does not yet unlock the vault (the CLI does); it prompts.
 - Terminal mouse reporting (for `htop`/`mc` mouse clicks) and OSC 52 clipboard.
-- Legacy SCP (servers without SFTP), FTP/S3 adapters behind `RemoteFs`.
+- FTP/S3 adapters behind `RemoteFs`.
 - Native file pickers (upload/download in the desktop app) were not exercised
   headless; the transfer engine behind them is tested.
 - Installers (MSI/DMG), code signing and signed auto-update.

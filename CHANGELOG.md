@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+**File manager**
+- Two-pane commander (local | remote, WinSCP style) with sortable columns, multi-selection, keyboard operation (F2/F4/F5/F6/F7, Del, Enter, Backspace, Tab, Ctrl+A, Ctrl+R, Alt+Enter) and a single-pane mode; the local folder is remembered per host.
+- Drag and drop between panes, onto folders, and from the OS file manager onto either pane (local rows can also be dragged out on macOS/Wayland).
+- Edit in an external editor: download to a per-tab temp folder, upload on every save (content hash, not timestamps; rename-on-save editors work), conflict prompt (overwrite / download theirs / save as copy) when the server copy changed, "Edits" list with status and stop, clean-up when the tab closes. Uploads keep the file's owner and permissions.
+- Properties dialog: permissions as checkboxes + octal (with recursive apply), owner/group by id with names, folder size, SHA-256, symlink target; New symlink.
+- sudo: browse as root (or another user) through `sudo sftp-server`, with passwordless sudo *and* sudo passwords (prompted or from the vault); wrong password, not in sudoers and requiretty are reported clearly. The sftp-server path is detected from sshd_config or the usual locations.
+- SCP fallback for servers without SFTP (busybox, routers, ESXi): listings from `ls -la` (GNU, BSD/macOS and busybox formats), operations via quoted shell commands, contents via `scp -f`/`-t`; copies restart instead of resuming.
+- Synchronize dialog: local→remote, remote→local or both (newer wins, never deletes, conflicts reported), optional mirror delete, excludes, a reviewable checklist with totals, conflicts settled per file; runs through the transfer queue. "Keep up to date" starts from the same dialog.
+- CLI: `hostwick sync --both` and script `sync both`; `cp`/`sync` honor the host's file protocol and sudo settings.
+
 **Networking**
 - Outbound proxy for the first hop: SOCKS5 (with user/password, host names resolved by the proxy), SOCKS4/4a and HTTP `CONNECT` (Basic auth). Password from the vault or a prompt; clear errors such as `proxy 10.0.0.1:1080 refused: connection not allowed by ruleset`.
 - X11 forwarding (`hostwick ssh -X`), OpenSSH-style untrusted: fake cookie on the server, real one (from `xauth`) only locally; `$DISPLAY`, `unix:N`, `host:N`, macOS launchd sockets, and `localhost:0` (VcXsrv/Xming) on Windows. A missing X server is reported once and the session carries on.
