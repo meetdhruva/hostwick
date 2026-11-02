@@ -28,6 +28,7 @@ hostwick-transfer.workspace = true
 hostwick-store.workspace = true
 hostwick-vault.workspace = true
 hostwick-import.workspace = true
+hostwick-term.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 futures.workspace = true
@@ -41,6 +42,7 @@ serde_json.workspace = true
 uuid.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 tracing-appender = "0.2"
+regex = "1"
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -10,8 +10,10 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::{CursorShape, Rgb};
 use gpui_kit::*;
 
+use alacritty_terminal::term::search::Match;
+
 use super::colors::{self, BACKGROUND, CURSOR, FOREGROUND, SELECTION};
-use super::{GridSize, Layout, TerminalView};
+use super::{GridSize, Layout, SearchPaint, TerminalView};
 
 pub struct TerminalElement {
     view: Entity<TerminalView>,
@@ -40,10 +42,31 @@ struct Style {
 }
 
 struct Snapshot {
-    /// Per row: (char, style, bg) per cell column.
-    rows: Vec<Vec<(char, Style, Rgb)>>,
+    /// Per row: one cell per column.
+    rows: Vec<Vec<Cell>>,
     cursor: Option<(usize, usize, CursorShape)>,
 }
+
+#[derive(Clone, Copy)]
+struct Cell {
+    ch: char,
+    style: Style,
+    bg: Rgb,
+    /// Selection, search match or cursor: keyword highlighting keeps off.
+    marked: bool,
+}
+
+/// Search match backgrounds.
+const MATCH_BG: Rgb = Rgb {
+    r: 0x6b,
+    g: 0x55,
+    b: 0x12,
+};
+const FOCUSED_BG: Rgb = Rgb {
+    r: 0xf0,
+    g: 0xa0,
+    b: 0x20,
+};
 
 pub struct Frame {
     lines: Vec<(Pixels, ShapedLine)>,
@@ -57,7 +80,7 @@ fn rgb_hsla(c: Rgb) -> Hsla {
 }
 
 impl TerminalElement {
-    fn snapshot(view: &TerminalView, focused: bool) -> Snapshot {
+    fn snapshot(view: &mut TerminalView, focused: bool, search: Option<&SearchPaint>) -> Snapshot {
         let term = view.shared.term.lock();
         let content = term.renderable_content();
         let offset = content.display_offset as i32;
@@ -69,7 +92,13 @@ impl TerminalElement {
             underline: false,
             strike: false,
         };
-        let mut grid = vec![vec![(' ', default_style, BACKGROUND); cols]; rows];
+        let blank = Cell {
+            ch: ' ',
+            style: default_style,
+            bg: BACKGROUND,
+            marked: false,
+        };
+        let mut grid = vec![vec![blank; cols]; rows];
         let selection = content.selection;
         let cursor_point = content.cursor.point;
         let cursor_shape = content.cursor.shape;
@@ -97,19 +126,23 @@ impl TerminalElement {
             if flags.contains(Flags::HIDDEN) {
                 fg = bg;
             }
+            let mut marked = flags.contains(Flags::HIDDEN);
             if selection.is_some_and(|s| s.contains(indexed.point)) {
                 bg = SELECTION;
+                marked = true;
             }
             let is_cursor = indexed.point == cursor_point && offset == 0;
             if is_cursor && focused && cursor_shape == CursorShape::Block {
                 bg = CURSOR;
                 fg = BACKGROUND;
+                marked = true;
             }
             // Wide-char spacers stay as blanks so later columns keep aligned.
-            let blank = flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+            let spacer = flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
                 || cell.c == '\0'
                 || cell.c == '\t';
-            let ch = if blank { ' ' } else { cell.c };
+            let ch = if spacer { ' ' } else { cell.c };
             let style = Style {
                 fg,
                 bold: flags.contains(Flags::BOLD),
@@ -117,14 +150,98 @@ impl TerminalElement {
                 underline: flags.intersects(Flags::ALL_UNDERLINES),
                 strike: flags.contains(Flags::STRIKEOUT),
             };
-            grid[row as usize][column.0] = (ch, style, bg);
+            grid[row as usize][column.0] = Cell {
+                ch,
+                style,
+                bg,
+                marked,
+            };
         }
-
         let cursor = (offset == 0 && cursor_shape != CursorShape::Hidden).then(|| {
             let row = cursor_point.line.0.max(0) as usize;
             (row, cursor_point.column.0, cursor_shape)
         });
+        drop(term);
+
+        // Search matches (under the selection, over everything else).
+        if let Some(sp) = search {
+            for m in &sp.matches {
+                let is_focused = sp.focused.as_ref() == Some(m);
+                for_each_cell(m, offset, rows, cols, |r, c| {
+                    let cell = &mut grid[r][c];
+                    if cell.bg == SELECTION || (cell.bg == CURSOR && cell.marked) {
+                        return;
+                    }
+                    cell.marked = true;
+                    if is_focused {
+                        cell.bg = FOCUSED_BG;
+                        cell.style.fg = BACKGROUND;
+                    } else {
+                        cell.bg = MATCH_BG;
+                    }
+                });
+            }
+            // The focused match may be outside the scan (e.g. wraps from
+            // above): paint it too.
+            if let Some(f) = &sp.focused
+                && !sp.matches.contains(f)
+            {
+                for_each_cell(f, offset, rows, cols, |r, c| {
+                    let cell = &mut grid[r][c];
+                    cell.marked = true;
+                    cell.bg = FOCUSED_BG;
+                    cell.style.fg = BACKGROUND;
+                });
+            }
+        }
+
+        // Keyword highlighting: foreground only, plain-background cells only.
+        if !view.highlighter.is_empty() {
+            let h = view.highlighter.clone();
+            let mut text = String::with_capacity(cols);
+            for row in grid.iter_mut() {
+                text.clear();
+                text.extend(row.iter().map(|c| c.ch));
+                for span in view.row_cache.get(&h, &text).iter() {
+                    for cell in row.iter_mut().take(span.end).skip(span.start) {
+                        if !cell.marked && cell.bg == BACKGROUND {
+                            cell.style.fg = span.color;
+                        }
+                    }
+                }
+            }
+        }
         Snapshot { rows: grid, cursor }
+    }
+}
+
+/// Visit the on-screen cells of a match (it may span several rows).
+fn for_each_cell(
+    m: &Match,
+    offset: i32,
+    rows: usize,
+    cols: usize,
+    mut f: impl FnMut(usize, usize),
+) {
+    let (start, end) = (*m.start(), *m.end());
+    for line in start.line.0..=end.line.0 {
+        let r = line + offset;
+        if r < 0 || r as usize >= rows {
+            continue;
+        }
+        let c0 = if line == start.line.0 {
+            start.column.0
+        } else {
+            0
+        };
+        let c1 = if line == end.line.0 {
+            end.column.0
+        } else {
+            cols.saturating_sub(1)
+        };
+        for c in c0..=c1.min(cols.saturating_sub(1)) {
+            f(r as usize, c);
+        }
     }
 }
 
@@ -186,7 +303,10 @@ impl Element for TerminalElement {
         self.view
             .update(cx, |v, _| v.set_size(GridSize { cols, rows }, layout));
 
-        let snap = Self::snapshot(self.view.read(cx), focused);
+        let snap = self.view.update(cx, |v, _| {
+            let search = v.search_paint();
+            Self::snapshot(v, focused, search.as_ref())
+        });
 
         let bold = Font {
             weight: FontWeight::BOLD,
@@ -209,9 +329,9 @@ impl Element for TerminalElement {
             // Backgrounds: merge runs of equal color, skip the default.
             let mut c = 0;
             while c < row.len() {
-                let bg = row[c].2;
+                let bg = row[c].bg;
                 let start = c;
-                while c < row.len() && row[c].2 == bg {
+                while c < row.len() && row[c].bg == bg {
                     c += 1;
                 }
                 if bg != BACKGROUND {
@@ -225,7 +345,7 @@ impl Element for TerminalElement {
                 }
             }
             // Text: one run per change of style; skip rows of pure blanks.
-            if row.iter().all(|(ch, ..)| *ch == ' ') {
+            if row.iter().all(|c| c.ch == ' ') {
                 continue;
             }
             let mut text = String::with_capacity(row.len());
@@ -255,17 +375,17 @@ impl Element for TerminalElement {
                     }),
                 });
             };
-            for (ch, style, _) in row {
+            for cell in row {
                 let before = text.len();
-                text.push(*ch);
+                text.push(cell.ch);
                 let added = text.len() - before;
                 match current.as_mut() {
-                    Some((s, len)) if s == style => *len += added,
+                    Some((s, len)) if *s == cell.style => *len += added,
                     _ => {
                         if let Some((s, len)) = current.take() {
                             flush(&mut runs, s, len);
                         }
-                        current = Some((*style, added));
+                        current = Some((cell.style, added));
                     }
                 }
             }

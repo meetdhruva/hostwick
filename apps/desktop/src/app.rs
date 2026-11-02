@@ -212,7 +212,7 @@ impl HostwickApp {
         let id = self.next_tab;
         self.next_tab += 1;
         let title: SharedString = match kind {
-            TabKind::Terminal => profile.name.clone().into(),
+            TabKind::Terminal => crate::terminal::tab_title(&profile).into(),
             TabKind::Files => format!("Files: {}", profile.name).into(),
         };
         self.tabs.push(Tab {
@@ -254,6 +254,7 @@ impl HostwickApp {
                                 let sub = cx.subscribe_in(&view, window, Self::on_terminal_event);
                                 app._subs.push(sub);
                                 app.auto_session_log(&profile_for_log, &view, cx);
+                                view.update(cx, |v, cx| v.attach_profile(&profile_for_log, cx));
                                 view.read(cx).focus_handle(cx).focus(window, cx);
                                 TabBody::Terminal(view)
                             }
@@ -328,9 +329,10 @@ impl HostwickApp {
                 }
             }
             TerminalEvent::UserInput(_) => {}
-            TerminalEvent::TitleChanged | TerminalEvent::Exited | TerminalEvent::LoggingChanged => {
-                cx.notify()
-            }
+            TerminalEvent::TitleChanged
+            | TerminalEvent::Exited
+            | TerminalEvent::LoggingChanged
+            | TerminalEvent::CwdChanged(_) => cx.notify(),
             TerminalEvent::Reconnect => {
                 if let Some(ix) = tab_ix {
                     self.reconnect_tab(ix, window, cx);

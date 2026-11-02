@@ -13,13 +13,14 @@ use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use futures::channel::mpsc::UnboundedSender;
 use futures::channel::oneshot;
-use hostwick_core::{AuthMethod, HostProfile, SecretString, Target};
+use hostwick_core::{AuthMethod, HostProfile, Protocol, SecretString, Target};
 use hostwick_sftp::{RemoteFs, SudoError};
 use hostwick_ssh::{
     ConnectContext, Connection, ConnectionPool, HostKeyDecision, HostKeyInfo, Interaction,
-    KnownHosts, NoCredentials, PtyOptions, ShellSession,
+    KnownHosts, NoCredentials, PtyOptions,
 };
 use hostwick_store::{AppPaths, SqliteStore};
+use hostwick_term::{TerminalSession, telnet};
 use hostwick_transfer::{EngineConfig, TransferEngine};
 
 /// A question the SSH layer needs answered by the person.
@@ -181,12 +182,39 @@ impl Backend {
             .await?)
     }
 
+    /// Open the host's terminal over its protocol: an SSH shell (plus its
+    /// saved forwards), a telnet connection (through the host's proxy, if
+    /// any) or a local serial port.
     pub async fn open_shell(
         self: Arc<Self>,
         profile: HostProfile,
         cols: u32,
         rows: u32,
-    ) -> Result<ShellSession> {
+    ) -> Result<TerminalSession> {
+        match &profile.protocol {
+            Protocol::Ssh => {}
+            Protocol::Telnet => {
+                let opts = telnet::TelnetOptions::from_profile(&profile, cols, rows);
+                let session = match &profile.proxy {
+                    Some(spec) => {
+                        let tcp = hostwick_ssh::connect_via_proxy(
+                            spec,
+                            &self.context(),
+                            &opts.host,
+                            opts.port,
+                        )
+                        .await?;
+                        telnet::tune_socket(&tcp, opts.keepalive);
+                        telnet::start(tcp, &opts)
+                    }
+                    None => telnet::connect(&opts).await?,
+                };
+                return Ok(session);
+            }
+            Protocol::Serial(settings) => {
+                return Ok(hostwick_term::serial::open(&profile.host, settings).await?);
+            }
+        }
         let conn = self.connection(&profile).await?;
         let pty = PtyOptions {
             term: profile.term.clone(),
@@ -204,13 +232,20 @@ impl Backend {
                 Err(e) => tracing::warn!(error = %e, "could not start saved forward"),
             }
         }
-        Ok(shell)
+        Ok(shell.into())
     }
 
     /// The file browser's remote side: the profile's file protocol, elevated
     /// through sudo when the profile says so. If sudo fails the browser
     /// still opens, unelevated, with the reason in `notice`.
     pub async fn open_files(self: Arc<Self>, profile: HostProfile) -> Result<FilesSession> {
+        if profile.protocol != Protocol::Ssh {
+            anyhow::bail!(
+                "Files need SSH: {} is a {} connection, which cannot transfer files.",
+                profile.name,
+                profile.protocol.label().to_lowercase()
+            );
+        }
         if profile.sudo.enabled {
             match self.clone().open_remote(profile.clone(), true).await {
                 Ok(s) => return Ok(s),
