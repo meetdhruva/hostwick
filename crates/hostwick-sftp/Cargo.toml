@@ -23,6 +23,11 @@ async-trait.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
+hex.workspace = true
+rand.workspace = true
+tokio-util = { workspace = true, features = ["io"] }
+sha2 = "0.10"
+md5 = { package = "md-5", version = "0.10" }
 
 [dev-dependencies]
 anyhow.workspace = true

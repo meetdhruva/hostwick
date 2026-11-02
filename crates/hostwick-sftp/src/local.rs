@@ -66,8 +66,22 @@ fn entry_from(name: String, path: String, md: &std::fs::Metadata) -> Entry {
         use std::os::unix::fs::PermissionsExt;
         Some(md.permissions().mode() & 0o7777)
     };
+    // Windows has only a read-only flag: report it as 0o444 / 0o644.
     #[cfg(not(unix))]
-    let permissions = None;
+    let permissions = Some(
+        if md.permissions().readonly() {
+            0o444
+        } else {
+            0o644
+        } | if ft.is_dir() { 0o111 } else { 0 },
+    );
+    #[cfg(unix)]
+    let (uid, gid) = {
+        use std::os::unix::fs::MetadataExt;
+        (Some(md.uid()), Some(md.gid()))
+    };
+    #[cfg(not(unix))]
+    let (uid, gid) = (None, None);
     let since_epoch = md
         .modified()
         .ok()
@@ -82,7 +96,25 @@ fn entry_from(name: String, path: String, md: &std::fs::Metadata) -> Entry {
         permissions,
         owner: None,
         group: None,
+        uid,
+        gid,
     }
+}
+
+fn blocking_err(e: tokio::task::JoinError) -> FsError {
+    FsError::Io(std::io::Error::other(e))
+}
+
+/// Name for an id from a `name:x:id:…` file (`/etc/passwd`, `/etc/group`).
+#[cfg(unix)]
+fn id_name(file: &str, id: u32) -> Option<String> {
+    let text = std::fs::read_to_string(file).ok()?;
+    text.lines().find_map(|l| {
+        let mut f = l.split(':');
+        let name = f.next()?;
+        let _ = f.next();
+        (f.next()?.parse::<u32>().ok()? == id).then(|| name.to_owned())
+    })
 }
 
 fn base_name(path: &Path) -> String {
@@ -164,6 +196,113 @@ impl RemoteFs for LocalFs {
         .await
         .map_err(|e| FsError::Io(std::io::Error::other(e)))??;
         Ok(())
+    }
+
+    fn protocol(&self) -> String {
+        "local".into()
+    }
+
+    async fn set_permissions(&self, path: &str, mode: u32) -> Result<(), FsError> {
+        let p = self.resolve(path);
+        tokio::task::spawn_blocking(move || {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode & 0o7777))
+            }
+            #[cfg(not(unix))]
+            {
+                // Best effort: no write bit for anyone → read-only.
+                let mut perms = std::fs::metadata(&p)?.permissions();
+                perms.set_readonly(mode & 0o222 == 0);
+                std::fs::set_permissions(&p, perms)
+            }
+        })
+        .await
+        .map_err(blocking_err)??;
+        Ok(())
+    }
+
+    async fn set_owner(
+        &self,
+        path: &str,
+        uid: Option<u32>,
+        gid: Option<u32>,
+    ) -> Result<(), FsError> {
+        #[cfg(unix)]
+        {
+            let p = self.resolve(path);
+            tokio::task::spawn_blocking(move || std::os::unix::fs::lchown(p, uid, gid))
+                .await
+                .map_err(blocking_err)??;
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (uid, gid);
+            Err(FsError::Unsupported(format!(
+                "{path}: owners cannot be changed on this system"
+            )))
+        }
+    }
+
+    async fn symlink(&self, target: &str, link: &str) -> Result<(), FsError> {
+        let l = self.resolve(link);
+        let target = target.to_owned();
+        tokio::task::spawn_blocking(move || {
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(&target, &l)
+            }
+            #[cfg(windows)]
+            {
+                let resolved = l
+                    .parent()
+                    .map(|d| d.join(&target))
+                    .unwrap_or_else(|| PathBuf::from(&target));
+                if resolved.is_dir() {
+                    std::os::windows::fs::symlink_dir(&target, &l)
+                } else {
+                    std::os::windows::fs::symlink_file(&target, &l)
+                }
+            }
+            #[cfg(not(any(unix, windows)))]
+            {
+                let _ = (target, l);
+                Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+            }
+        })
+        .await
+        .map_err(blocking_err)??;
+        Ok(())
+    }
+
+    async fn read_link(&self, path: &str) -> Result<String, FsError> {
+        let t = tokio::fs::read_link(self.resolve(path)).await?;
+        Ok(t.to_string_lossy().into_owned())
+    }
+
+    async fn lookup_ids(
+        &self,
+        uid: Option<u32>,
+        gid: Option<u32>,
+    ) -> (Option<String>, Option<String>) {
+        #[cfg(unix)]
+        {
+            tokio::task::spawn_blocking(move || {
+                (
+                    uid.and_then(|u| id_name("/etc/passwd", u)),
+                    gid.and_then(|g| id_name("/etc/group", g)),
+                )
+            })
+            .await
+            .unwrap_or((None, None))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (uid, gid);
+            (None, None)
+        }
     }
 
     async fn canonicalize(&self, path: &str) -> Result<String, FsError> {

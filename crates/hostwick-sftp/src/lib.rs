@@ -1,12 +1,19 @@
 //! Remote filesystem port and its adapters.
 //!
 //! [`RemoteFs`] is the port the transfer engine and the file browser use.
-//! [`SftpFs`] is the SFTP adapter; [`LocalFs`] serves the local pane and makes
-//! the transfer engine testable without a server. SCP or S3 adapters can be
-//! added later behind the same trait.
+//! [`SftpFs`] is the SFTP adapter (optionally elevated through `sudo`),
+//! [`ScpFs`] the fallback for servers without SFTP, and [`LocalFs`] serves the
+//! local pane and makes the transfer engine testable without a server.
+//! [`open_remote_fs`] picks the right one for a host profile.
 
+mod factory;
 mod local;
+mod ls;
+mod remote_cmd;
+mod scp;
 mod sftp;
+pub mod shell;
+mod sudo;
 
 use std::pin::Pin;
 
@@ -14,8 +21,12 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 
+pub use factory::{open_remote_fs, open_remote_fs_with};
 pub use local::{LocalFs, path_to_slash};
+pub use ls::{LsFlavor, parse_ls_line, parse_ls_output};
+pub use scp::ScpFs;
 pub use sftp::{SftpFs, SftpOptions};
+pub use sudo::{SudoError, parse_sftp_subsystem};
 
 pub type BoxRead = Pin<Box<dyn AsyncRead + Send>>;
 pub type BoxWrite = Pin<Box<dyn AsyncWrite + Send>>;
@@ -46,6 +57,11 @@ pub struct Entry {
     pub permissions: Option<u32>,
     pub owner: Option<String>,
     pub group: Option<String>,
+    /// Numeric owner, when the server reports it.
+    #[serde(default)]
+    pub uid: Option<u32>,
+    #[serde(default)]
+    pub gid: Option<u32>,
 }
 
 impl Entry {
@@ -53,6 +69,39 @@ impl Entry {
         self.kind == EntryKind::Dir
     }
 }
+
+/// Checksum algorithms for [`RemoteFs::checksum`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HashAlgo {
+    Sha256,
+    Md5,
+}
+
+impl HashAlgo {
+    /// Length of the lowercase hex digest.
+    pub fn hex_len(self) -> usize {
+        match self {
+            Self::Sha256 => 64,
+            Self::Md5 => 32,
+        }
+    }
+}
+
+/// What [`RemoteFs::disk_usage`] found under a path.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskUsage {
+    /// Sum of regular file sizes (apparent size, like WinSCP's "Calculate").
+    pub bytes: u64,
+    pub files: u64,
+    /// Directories below the path (the path itself not counted).
+    pub dirs: u64,
+    /// False when the walk stopped at [`DISK_USAGE_CAP`] entries.
+    pub complete: bool,
+}
+
+/// Entries the default [`RemoteFs::disk_usage`] walk visits before giving up.
+pub const DISK_USAGE_CAP: u64 = 2_000_000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FsError {
@@ -64,6 +113,12 @@ pub enum FsError {
     Remote { path: String, message: String },
     #[error("request timed out: {0}")]
     Timeout(String),
+    /// The operation is not available with this protocol or server (e.g.
+    /// resuming over SCP, owners on Windows).
+    #[error("not supported: {0}")]
+    Unsupported(String),
+    #[error(transparent)]
+    Sudo(#[from] SudoError),
     #[error("SSH: {0}")]
     Ssh(#[from] hostwick_ssh::SshError),
     #[error(transparent)]
@@ -74,6 +129,11 @@ impl FsError {
     pub fn is_not_found(&self) -> bool {
         matches!(self, Self::NotFound(_))
             || matches!(self, Self::Io(e) if e.kind() == std::io::ErrorKind::NotFound)
+    }
+
+    pub fn is_unsupported(&self) -> bool {
+        matches!(self, Self::Unsupported(_))
+            || matches!(self, Self::Io(e) if e.kind() == std::io::ErrorKind::Unsupported)
     }
 }
 
@@ -97,6 +157,72 @@ pub trait RemoteFs: Send + Sync {
     async fn set_modified(&self, path: &str, unix_secs: u64) -> Result<(), FsError>;
     /// Absolute form of `path` (`.` resolves to the login directory).
     async fn canonicalize(&self, path: &str) -> Result<String, FsError>;
+
+    /// Short description for the UI, e.g. `SFTP`, `SFTP (sudo root)`, `SCP`.
+    fn protocol(&self) -> String {
+        "SFTP".into()
+    }
+
+    /// [`RemoteFs::open_write`] when the final size is known in advance.
+    /// Protocols that must announce the size up front (SCP) need it; others
+    /// ignore it.
+    async fn open_write_sized(
+        &self,
+        path: &str,
+        offset: u64,
+        _size: u64,
+    ) -> Result<BoxWrite, FsError> {
+        self.open_write(path, offset).await
+    }
+
+    /// `chmod`: the lower 12 bits of `mode` (`0o7777`).
+    async fn set_permissions(&self, path: &str, _mode: u32) -> Result<(), FsError> {
+        Err(FsError::Unsupported(format!(
+            "{path}: changing permissions"
+        )))
+    }
+
+    /// `chown` by number. `None` keeps the current value.
+    async fn set_owner(
+        &self,
+        path: &str,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
+    ) -> Result<(), FsError> {
+        Err(FsError::Unsupported(format!("{path}: changing the owner")))
+    }
+
+    /// Create a symbolic link at `link` pointing to `target` (`ln -s target link`).
+    async fn symlink(&self, _target: &str, link: &str) -> Result<(), FsError> {
+        Err(FsError::Unsupported(format!("{link}: symbolic links")))
+    }
+
+    /// Target of a symbolic link, as stored (may be relative).
+    async fn read_link(&self, path: &str) -> Result<String, FsError> {
+        Err(FsError::Unsupported(format!("{path}: reading links")))
+    }
+
+    /// User and group names for numeric ids, when the system can tell.
+    async fn lookup_ids(
+        &self,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
+    ) -> (Option<String>, Option<String>) {
+        (None, None)
+    }
+
+    /// Lowercase hex digest of the file's contents. The default streams the
+    /// file through the hasher; adapters may compute it on the server.
+    async fn checksum(&self, path: &str, algo: HashAlgo) -> Result<String, FsError> {
+        stream_checksum(self, path, algo).await
+    }
+
+    /// Total size and counts under `path` (recursive, symlinks not
+    /// followed). The default walks the tree with [`RemoteFs::list_dir`] and
+    /// stops after [`DISK_USAGE_CAP`] entries; abort the task to cancel.
+    async fn disk_usage(&self, path: &str) -> Result<DiskUsage, FsError> {
+        walk_disk_usage(self, path).await
+    }
 
     /// `mkdir -p`.
     async fn mkdir_all(&self, path: &str) -> Result<(), FsError> {
@@ -138,6 +264,83 @@ pub trait RemoteFs: Send + Sync {
         buf.truncate(filled);
         Ok(buf)
     }
+}
+
+/// [`RemoteFs::checksum`] by reading the whole file.
+pub async fn stream_checksum<F: RemoteFs + ?Sized>(
+    fs: &F,
+    path: &str,
+    algo: HashAlgo,
+) -> Result<String, FsError> {
+    use md5::Digest as _;
+    use tokio::io::AsyncReadExt;
+    let mut r = fs.open_read(path, 0).await?;
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut sha = sha2::Sha256::new();
+    let mut md5 = md5::Md5::new();
+    loop {
+        let n = r.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        match algo {
+            HashAlgo::Sha256 => sha.update(&buf[..n]),
+            HashAlgo::Md5 => md5.update(&buf[..n]),
+        }
+    }
+    Ok(match algo {
+        HashAlgo::Sha256 => hex::encode(sha.finalize()),
+        HashAlgo::Md5 => hex::encode(md5.finalize()),
+    })
+}
+
+/// [`RemoteFs::disk_usage`] by walking the tree.
+pub async fn walk_disk_usage<F: RemoteFs + ?Sized>(
+    fs: &F,
+    path: &str,
+) -> Result<DiskUsage, FsError> {
+    let mut u = DiskUsage {
+        complete: true,
+        ..Default::default()
+    };
+    match fs.stat(path).await? {
+        None => return Err(FsError::NotFound(path.to_owned())),
+        Some(e) if !e.is_dir() => {
+            u.files = 1;
+            u.bytes = e.size;
+            return Ok(u);
+        }
+        Some(_) => {}
+    }
+    let mut stack = vec![path.to_owned()];
+    let mut seen = 0u64;
+    while let Some(dir) = stack.pop() {
+        let entries = match fs.list_dir(&dir).await {
+            Ok(e) => e,
+            // An unreadable subfolder should not hide everything else.
+            Err(FsError::PermissionDenied(_)) if dir != path => continue,
+            Err(e) => return Err(e),
+        };
+        for e in entries {
+            seen += 1;
+            if seen > DISK_USAGE_CAP {
+                u.complete = false;
+                return Ok(u);
+            }
+            match e.kind {
+                EntryKind::Dir => {
+                    u.dirs += 1;
+                    stack.push(e.path);
+                }
+                EntryKind::File => {
+                    u.files += 1;
+                    u.bytes += e.size;
+                }
+                EntryKind::Symlink | EntryKind::Other => u.files += 1,
+            }
+        }
+    }
+    Ok(u)
 }
 
 /// Join POSIX paths without doubling slashes.
