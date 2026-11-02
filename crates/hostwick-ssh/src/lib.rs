@@ -12,6 +12,7 @@ mod auth;
 mod connection;
 mod error;
 mod exec;
+mod exec_stream;
 mod forward;
 mod gssapi;
 mod handler;
@@ -25,6 +26,7 @@ mod x11;
 pub use connection::{ConnectContext, Connection};
 pub use error::SshError;
 pub use exec::ExecOutput;
+pub use exec_stream::{ExecStream, ExitStatus, wait_exit};
 pub use forward::ForwardHandle;
 pub use interaction::{
     Credentials, HostKeyDecision, HostKeyInfo, HostKeyStatus, Interaction, NoCredentials,
