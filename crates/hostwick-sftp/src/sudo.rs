@@ -24,8 +24,8 @@ use hostwick_ssh::{Connection, ExecStream, ExitStatus};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, watch};
 
-use crate::FsError;
 use crate::shell::quote;
+use crate::{FsError, remote_cmd};
 
 /// Where distributions install OpenSSH's `sftp-server`, most likely first.
 pub const SFTP_SERVER_CANDIDATES: &[&str] = &[
@@ -99,9 +99,11 @@ pub async fn detect_sftp_server(conn: &Connection, configured: &str) -> Result<S
     if !configured.trim().is_empty() {
         return Ok(configured.trim().to_owned());
     }
-    let cfg = conn
-        .exec("cat /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null")
-        .await?;
+    let cfg = remote_cmd::sh(
+        conn,
+        "cat /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null",
+    )
+    .await?;
     let from_config = parse_sftp_subsystem(&cfg.stdout_lossy());
     let mut candidates: Vec<String> = Vec::new();
     if let Some(c) = &from_config
@@ -118,7 +120,7 @@ pub async fn detect_sftp_server(conn: &Connection, configured: &str) -> Result<S
             .collect::<Vec<_>>()
             .join(" ")
     );
-    let out = conn.exec(&script).await?;
+    let out = remote_cmd::sh(conn, &script).await?;
     let found = out
         .stdout_lossy()
         .lines()
@@ -329,7 +331,7 @@ pub(crate) enum Probe {
 }
 
 pub(crate) async fn probe(conn: &Connection, cmd: &SudoCommand) -> Result<Probe, FsError> {
-    let out = tokio::time::timeout(STEP_TIMEOUT, conn.exec(&cmd.noninteractive()))
+    let out = tokio::time::timeout(STEP_TIMEOUT, remote_cmd::sh(conn, &cmd.noninteractive()))
         .await
         .map_err(|_| SudoError::Timeout(STEP_TIMEOUT.as_secs()))??;
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
@@ -363,7 +365,7 @@ pub(crate) async fn validate(
     password: &SecretString,
 ) -> Result<(), FsError> {
     let marker = new_marker();
-    let stream = conn.open_exec_stream(&cmd.with_password(&marker)).await?;
+    let stream = remote_cmd::sh_stream(conn, &cmd.with_password(&marker)).await?;
     let (mut stdio, mut stderr, mut exit) = stream.into_parts();
     let mut seen = Stderr::default();
     wait_for_prompt(&mut stderr, &mut exit, &mut seen, &marker, 1, &cmd.server).await?;
@@ -407,10 +409,15 @@ pub(crate) async fn start(
 ) -> Result<(ExecStream, Option<String>), FsError> {
     let password = match password {
         Some(p) if probe(conn, cmd).await? == Probe::NeedsPassword => p,
-        _ => return Ok((conn.open_exec_stream(&cmd.noninteractive()).await?, None)),
+        _ => {
+            return Ok((
+                remote_cmd::sh_stream(conn, &cmd.noninteractive()).await?,
+                None,
+            ));
+        }
     };
     let marker = new_marker();
-    let mut stream = conn.open_exec_stream(&cmd.with_password(&marker)).await?;
+    let mut stream = remote_cmd::sh_stream(conn, &cmd.with_password(&marker)).await?;
     let mut seen = Stderr::default();
     wait_for_prompt(
         &mut stream.stderr,

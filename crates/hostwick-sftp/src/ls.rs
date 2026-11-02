@@ -59,11 +59,72 @@ impl LsLine {
 /// offset in seconds (for formats without a time zone); `now` is used to
 /// pick the year of `Nov  2 18:38`-style dates.
 pub fn parse_ls_output(text: &str, dir: &str, tz_offset: i64, now: u64) -> Vec<Entry> {
+    parse_ls_output_with(text, dir, tz_offset, now, false)
+}
+
+/// [`parse_ls_output`] for `ls -b` output (`escaped`): names (and link
+/// targets) are written with C-style escapes, so a line break in a name
+/// cannot start a fake line; they are decoded here.
+pub fn parse_ls_output_with(
+    text: &str,
+    dir: &str,
+    tz_offset: i64,
+    now: u64,
+    escaped: bool,
+) -> Vec<Entry> {
     text.lines()
         .filter_map(|l| parse_ls_line(l, tz_offset, now))
+        .map(|mut l| {
+            if escaped {
+                l.name = decode_ls_escapes(&l.name);
+                l.link_target = l.link_target.as_deref().map(decode_ls_escapes);
+            }
+            l
+        })
         .filter(|l| l.name != "." && l.name != "..")
         .map(|l| l.into_entry(dir))
         .collect()
+}
+
+/// Undo `ls -b` / `--quoting-style=escape`: `\ooo` octal bytes, `\n`,
+/// `\t` and friends, and `\X` for any other character `X` (GNU writes
+/// `\ ` for a space and `\\` for a backslash).
+pub fn decode_ls_escapes(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'\\' || i + 1 == b.len() {
+            out.push(b[i]);
+            i += 1;
+            continue;
+        }
+        let c = b[i + 1];
+        if (b'0'..=b'7').contains(&c) {
+            let mut v: u32 = 0;
+            let mut j = i + 1;
+            while j < b.len() && j < i + 4 && (b'0'..=b'7').contains(&b[j]) {
+                v = v * 8 + u32::from(b[j] - b'0');
+                j += 1;
+            }
+            out.push(u8::try_from(v & 0xff).unwrap_or(0));
+            i = j;
+            continue;
+        }
+        out.push(match c {
+            b'n' => b'\n',
+            b't' => b'\t',
+            b'r' => b'\r',
+            b'a' => 0x07,
+            b'b' => 0x08,
+            b'f' => 0x0c,
+            b'v' => 0x0b,
+            b'e' => 0x1b,
+            other => other,
+        });
+        i += 2;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Parse one `ls -l` line. `None` for anything that is not an entry.
@@ -286,10 +347,18 @@ fn tz_token(s: &str) -> Option<i64> {
     if b.len() != 5 || !(b[0] == b'+' || b[0] == b'-') {
         return None;
     }
-    let h: i64 = s[1..3].parse().ok()?;
-    let m: i64 = s[3..5].parse().ok()?;
-    let off = h * 3600 + m * 60;
+    if !b[1..].iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let digit = |i: usize| i64::from(b[i] - b'0');
+    let off = (digit(1) * 10 + digit(2)) * 3600 + (digit(3) * 10 + digit(4)) * 60;
     Some(if b[0] == b'-' { -off } else { off })
+}
+
+/// Dates outside this range are not real `ls` output; refusing them also
+/// keeps the calendar arithmetic far from overflow.
+fn plausible(y: i64, d: u32) -> bool {
+    (1..=9999).contains(&y) && (1..=31).contains(&d)
 }
 
 /// The date at the start of `t`: `(unix seconds, tokens used)`.
@@ -305,6 +374,7 @@ fn parse_date(t: &[(usize, &str)], tz: i64, now: u64) -> Option<(Option<u64>, us
         && fits(5)
         && let (Some(mo), Ok(d), Some(secs), Ok(y)) =
             (month(mo), d.parse::<u32>(), hms(tm), y.parse::<i64>())
+        && plausible(y, d)
     {
         let local = days_from_civil(y, mo, d) * 86_400 + secs;
         return Some((to_unix(local, tz), 5));
@@ -316,6 +386,7 @@ fn parse_date(t: &[(usize, &str)], tz: i64, now: u64) -> Option<(Option<u64>, us
         && let (Some(mo), Ok(d), Some(secs), Ok(y)) =
             (month(mo), d.parse::<u32>(), hms(tm), y.parse::<i64>())
         && y > 1900
+        && plausible(y, d)
     {
         let local = days_from_civil(y, mo, d) * 86_400 + secs;
         return Some((to_unix(local, tz), 4));
@@ -330,6 +401,9 @@ fn parse_date(t: &[(usize, &str)], tz: i64, now: u64) -> Option<(Option<u64>, us
         let y: i64 = parts.next()?.parse().ok()?;
         let mo: u32 = parts.next()?.parse().ok()?;
         let d: u32 = parts.next()?.parse().ok()?;
+        if !plausible(y, d) {
+            return None;
+        }
         let local = days_from_civil(y, mo, d) * 86_400 + secs;
         if let Some(off) = tok(2).and_then(tz_token)
             && fits(3)
@@ -344,6 +418,7 @@ fn parse_date(t: &[(usize, &str)], tz: i64, now: u64) -> Option<(Option<u64>, us
     if let (Some(mo), Some(d), Some(x)) = (tok(0), tok(1), tok(2))
         && fits(3)
         && let (Some(mo), Ok(d)) = (month(mo), d.parse::<u32>())
+        && (1..=31).contains(&d)
     {
         if let Some(secs) = hms(x) {
             let now_local = i64::try_from(now).unwrap_or(i64::MAX / 2) + tz;
@@ -357,7 +432,9 @@ fn parse_date(t: &[(usize, &str)], tz: i64, now: u64) -> Option<(Option<u64>, us
             }
             return Some((to_unix(local, tz), 3));
         }
-        if let Ok(y) = x.parse::<i64>() {
+        if let Ok(y) = x.parse::<i64>()
+            && plausible(y, d)
+        {
             let local = days_from_civil(y, mo, d) * 86_400;
             return Some((to_unix(local, tz), 3));
         }
@@ -382,6 +459,94 @@ mod tests {
 
     fn p(line: &str) -> LsLine {
         parse_ls_line(line, 0, NOW).unwrap_or_else(|| panic!("no parse: {line:?}"))
+    }
+
+    /// Escaped (`ls -b`) names decode; a line break in a name stays in the
+    /// name instead of starting a fake line.
+    #[test]
+    fn escaped_names() {
+        assert_eq!(
+            decode_ls_escapes(r"a\ b\\c\nd\303\274\t"),
+            "a b\\c\nd\u{fc}\t"
+        );
+        assert_eq!(decode_ls_escapes("plain"), "plain");
+        assert_eq!(decode_ls_escapes("trailing\\"), "trailing\\");
+        let text = "-rw-r--r-- 1 a b 2 1700000000 x\\n-rw-r--r--\\ 1\\ a\\ b\\ 5\\ 1700000000\\ ..\n\
+                    lrwxrwxrwx 1 a b 3 1700000000 my\\ link -> tar\\ get\n";
+        let e = parse_ls_output_with(text, "/d", 0, NOW, true);
+        assert_eq!(e.len(), 2, "{e:?}");
+        assert_eq!(e[0].name, "x\n-rw-r--r-- 1 a b 5 1700000000 ..");
+        assert_eq!(e[1].name, "my link");
+    }
+
+    /// Server output must never panic the parser: random bytes, random
+    /// UTF-8, and lines assembled from ls-like pieces.
+    #[test]
+    fn never_panics_on_garbage() {
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let pieces = [
+            "-rw-r--r--",
+            "drwxr-xr-x",
+            "lrwxrwxrwx",
+            "crw-rw----",
+            "1",
+            "0",
+            "root",
+            "a",
+            "5",
+            "1,",
+            "3",
+            "Nov",
+            "Wed",
+            "2",
+            "18:38",
+            "18:38:00",
+            "18:38:00.123",
+            "2026",
+            "99999999999999999999",
+            "-99999999999",
+            "2024-01-01",
+            "9999-99-99",
+            "+0100",
+            "+1\u{e9}2",
+            "-\u{e9}12",
+            "1700000000",
+            "\u{e9}",
+            "->",
+            "name",
+            " ",
+            "\t",
+            "\u{1f600}",
+            "total",
+            "",
+        ];
+        for _ in 0..20_000 {
+            let n = (next() % 12) as usize;
+            let line: Vec<&str> = (0..n)
+                .map(|_| pieces[(next() % pieces.len() as u64) as usize])
+                .collect();
+            let line = line.join(" ");
+            let _ = parse_ls_line(&line, 3600, NOW);
+            let _ = parse_ls_output_with(&line, "/", -3600, NOW, true);
+            let bytes: Vec<u8> = (0..(next() % 64)).map(|_| next() as u8).collect();
+            let s = String::from_utf8_lossy(&bytes);
+            let _ = parse_ls_line(&s, 0, NOW);
+            let _ = decode_ls_escapes(&s);
+            let chars: String = (0..(next() % 40))
+                .filter_map(|_| char::from_u32((next() % 0x2_0000) as u32))
+                .collect();
+            let _ = parse_ls_line(&format!("-rw-r--r-- 1 a b 5 {chars}"), 0, NOW);
+            let _ = tz_token(&chars);
+        }
+        // The two cases that used to panic.
+        let _ = parse_ls_line("-rw-r--r-- 1 a b 5 2024-01-01 10:00 +1\u{e9}2 name", 0, NOW);
+        let _ = parse_ls_line("-rw-r--r-- 1 a b 5 Nov 2 99999999999999999 name", 0, NOW);
     }
 
     #[test]

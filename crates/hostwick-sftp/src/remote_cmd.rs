@@ -3,10 +3,21 @@
 //! when the tool is missing or its output looks wrong, so callers fall back
 //! to the protocol.
 
-use hostwick_ssh::Connection;
+use hostwick_ssh::{Connection, ExecOutput, ExecStream, SshError};
 
-use crate::shell::path_arg;
+use crate::shell::{path_arg, portable};
 use crate::{DiskUsage, FsError, HashAlgo};
+
+/// Run a POSIX `sh` script on the server, whatever the login shell is
+/// (see [`portable`]). Every helper command goes through here.
+pub(crate) async fn sh(conn: &Connection, script: &str) -> Result<ExecOutput, SshError> {
+    conn.exec(&portable(script)).await
+}
+
+/// [`sh`] with the script's stdin/stdout as a byte stream.
+pub(crate) async fn sh_stream(conn: &Connection, script: &str) -> Result<ExecStream, SshError> {
+    conn.open_exec_stream(&portable(script)).await
+}
 
 /// Hex digest computed on the server (`sha256sum`, `shasum`, `md5sum`, `md5`).
 pub(crate) async fn checksum(conn: &Connection, path: &str, algo: HashAlgo) -> Option<String> {
@@ -17,7 +28,7 @@ pub(crate) async fn checksum(conn: &Connection, path: &str, algo: HashAlgo) -> O
         ),
         HashAlgo::Md5 => format!("md5sum {p} 2>/dev/null || md5 -q {p} 2>/dev/null"),
     };
-    let out = conn.exec(&cmd).await.ok()?;
+    let out = sh(conn, &cmd).await.ok()?;
     parse_digest(&out.stdout_lossy(), algo)
 }
 
@@ -37,7 +48,7 @@ pub(crate) async fn disk_usage(conn: &Connection, path: &str) -> Option<DiskUsag
          awk 'BEGIN{{f=0;d=0;b=0}} $1==\"d\"{{d++;next}} $1==\"f\"{{f++;b+=$2;next}} {{f++}} END{{printf \"%d %d %.0f\\n\", f, d, b}}'; \
          [ -d {p} ] && find {p} -maxdepth 0 -printf ok 2>/dev/null"
     );
-    let out = conn.exec(&cmd).await.ok()?;
+    let out = sh(conn, &cmd).await.ok()?;
     parse_du(&out.stdout_lossy())
 }
 
@@ -74,7 +85,7 @@ pub(crate) async fn lookup_ids(
         q("passwd", "/etc/passwd", uid),
         q("group", "/etc/group", gid)
     );
-    let Ok(out) = conn.exec(&cmd).await else {
+    let Ok(out) = sh(conn, &cmd).await else {
         return (None, None);
     };
     let text = out.stdout_lossy();
@@ -87,7 +98,7 @@ pub(crate) async fn lookup_ids(
 
 /// Run a command that should succeed silently; its stderr becomes the error.
 pub(crate) async fn run(conn: &Connection, path: &str, cmd: &str) -> Result<(), FsError> {
-    let out = conn.exec(cmd).await?;
+    let out = sh(conn, cmd).await?;
     if out.exit_status == Some(0) {
         return Ok(());
     }

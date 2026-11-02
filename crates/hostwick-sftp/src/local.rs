@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use tokio::io::AsyncSeekExt;
 
-use crate::{BoxRead, BoxWrite, Entry, EntryKind, FsError, RemoteFs, join, sort_entries};
+use crate::{BoxRead, BoxWrite, Entry, EntryKind, FsError, Listing, RemoteFs, join, sort_entries};
 
 /// The local disk behind the [`RemoteFs`] port.
 ///
@@ -136,6 +136,33 @@ impl RemoteFs for LocalFs {
         }
         sort_entries(&mut out);
         Ok(out)
+    }
+
+    /// Local names come from this computer's own file system: nothing to
+    /// filter.
+    async fn list_dir_checked(&self, path: &str) -> Result<Listing, FsError> {
+        Ok(Listing {
+            entries: self.list_dir(path).await?,
+            skipped: Vec::new(),
+        })
+    }
+
+    async fn lstat(&self, path: &str) -> Result<Option<Entry>, FsError> {
+        let p = self.resolve(path);
+        match tokio::fs::symlink_metadata(&p).await {
+            Ok(md) => Ok(Some(entry_from(base_name(&p), path.to_owned(), &md))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn rename_replace(&self, from: &str, to: &str) -> Result<(), FsError> {
+        // rename(2) / MoveFileEx(REPLACE_EXISTING): atomic replace.
+        Ok(tokio::fs::rename(self.resolve(from), self.resolve(to)).await?)
+    }
+
+    async fn hard_link(&self, target: &str, link: &str) -> Result<(), FsError> {
+        Ok(tokio::fs::hard_link(self.resolve(target), self.resolve(link)).await?)
     }
 
     async fn stat(&self, path: &str) -> Result<Option<Entry>, FsError> {

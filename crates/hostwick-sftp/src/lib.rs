@@ -9,6 +9,7 @@
 mod factory;
 mod local;
 mod ls;
+mod names;
 mod remote_cmd;
 mod scp;
 mod sftp;
@@ -23,7 +24,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 pub use factory::{open_remote_fs, open_remote_fs_with};
 pub use local::{LocalFs, path_to_slash};
-pub use ls::{LsFlavor, parse_ls_line, parse_ls_output};
+pub use ls::{LsFlavor, decode_ls_escapes, parse_ls_line, parse_ls_output};
+pub use names::{Listing, check_name, filter_listing, join_checked, unsafe_name_reason};
 pub use scp::ScpFs;
 pub use sftp::{SftpFs, SftpOptions};
 pub use sudo::{SudoError, parse_sftp_subsystem};
@@ -117,6 +119,10 @@ pub enum FsError {
     /// resuming over SCP, owners on Windows).
     #[error("not supported: {0}")]
     Unsupported(String),
+    /// A name from the server that is not usable as one path component
+    /// here (`..`, a path separator, a drive prefix, …).
+    #[error("{name}: unsafe file name ({reason})")]
+    UnsafeName { name: String, reason: &'static str },
     #[error(transparent)]
     Sudo(#[from] SudoError),
     #[error("SSH: {0}")]
@@ -143,8 +149,26 @@ pub trait RemoteFs: Send + Sync {
     /// Directory listing, sorted directories-first then by name. Excludes `.`
     /// and `..`.
     async fn list_dir(&self, path: &str) -> Result<Vec<Entry>, FsError>;
-    /// `Ok(None)` if the path does not exist.
+    /// [`RemoteFs::list_dir`] without entries whose names are unsafe to use
+    /// as a path component here (see [`unsafe_name_reason`]), which are
+    /// returned separately so the caller can tell the person.
+    async fn list_dir_checked(&self, path: &str) -> Result<Listing, FsError> {
+        Ok(filter_listing(path, self.list_dir(path).await?))
+    }
+    /// `Ok(None)` if the path does not exist. Follows symbolic links.
     async fn stat(&self, path: &str) -> Result<Option<Entry>, FsError>;
+    /// Like [`RemoteFs::stat`] but does not follow a final symbolic link
+    /// (`lstat`). The default looks the name up in its folder's listing.
+    async fn lstat(&self, path: &str) -> Result<Option<Entry>, FsError> {
+        let trimmed = path.trim_end_matches('/');
+        let name = trimmed.rsplit('/').next().unwrap_or(trimmed);
+        let dir = parent(trimmed);
+        Ok(self
+            .list_dir(&dir)
+            .await?
+            .into_iter()
+            .find(|e| e.name == name))
+    }
     async fn mkdir(&self, path: &str) -> Result<(), FsError>;
     async fn remove_file(&self, path: &str) -> Result<(), FsError>;
     async fn remove_dir(&self, path: &str) -> Result<(), FsError>;
@@ -195,6 +219,18 @@ pub trait RemoteFs: Send + Sync {
     /// Create a symbolic link at `link` pointing to `target` (`ln -s target link`).
     async fn symlink(&self, _target: &str, link: &str) -> Result<(), FsError> {
         Err(FsError::Unsupported(format!("{link}: symbolic links")))
+    }
+
+    /// Create a hard link at `link` to the existing file `target`.
+    async fn hard_link(&self, _target: &str, link: &str) -> Result<(), FsError> {
+        Err(FsError::Unsupported(format!("{link}: hard links")))
+    }
+
+    /// Rename `from` to `to`, replacing `to` if it exists. Atomic where the
+    /// protocol allows; the default never loses data either way (see
+    /// [`swap_replace`]).
+    async fn rename_replace(&self, from: &str, to: &str) -> Result<(), FsError> {
+        swap_replace(self, from, to).await
     }
 
     /// Target of a symbolic link, as stored (may be relative).
@@ -264,6 +300,33 @@ pub trait RemoteFs: Send + Sync {
         buf.truncate(filled);
         Ok(buf)
     }
+}
+
+/// Replace `to` with `from` using only plain renames: `to` is first moved
+/// aside, then `from` takes its place, then the old copy is removed. If the
+/// second step fails the old file is put back. At every moment the data
+/// exists under one of the three names; `to` is missing only between the two
+/// renames.
+pub async fn swap_replace<F: RemoteFs + ?Sized>(
+    fs: &F,
+    from: &str,
+    to: &str,
+) -> Result<(), FsError> {
+    if fs.stat(to).await?.is_none() {
+        return fs.rename(from, to).await;
+    }
+    let aside = format!("{to}.hostwick-old-{:08x}", rand::random::<u32>());
+    fs.rename(to, &aside).await?;
+    if let Err(e) = fs.rename(from, to).await {
+        if let Err(back) = fs.rename(&aside, to).await {
+            tracing::error!(error = %back, %aside, %to, "could not restore the original file");
+        }
+        return Err(e);
+    }
+    if let Err(e) = fs.remove_file(&aside).await {
+        tracing::warn!(error = %e, %aside, "could not remove the replaced file");
+    }
+    Ok(())
 }
 
 /// [`RemoteFs::checksum`] by reading the whole file.

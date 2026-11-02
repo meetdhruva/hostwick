@@ -454,3 +454,95 @@ async fn local_properties() {
         assert_eq!(u.as_deref(), Some("root"));
     }
 }
+
+/// Hostile file names on a real server, over SCP (escaped `ls`) and SFTP:
+/// a line break cannot fake a listing line, backslash names are skipped
+/// (they climb out of folders on Windows), and a name crafted to break
+/// out of fish's quoting is just a name to every helper command.
+#[tokio::test]
+async fn hostile_names_over_scp_and_sftp() {
+    let e = require_env!();
+    for port in [e.nosftp_port, e.port] {
+        let conn = connect(&e, "hwfiles3", port).await;
+        let p = profile(&e, "hwfiles3", port);
+        let fs = open_remote_fs(&conn, &p, None).await.unwrap();
+        let home = fs.canonicalize(".").await.unwrap();
+        let dir = format!("{home}/hostile-{port}");
+        let fake = "x\n-rw-r--r-- 1 a b 5 1700000000 fake";
+        let fishy = "\\';touch PWNED;#";
+        let backslash = "..\\..\\evil.bat";
+        let setup = format!(
+            "rm -rf {d}; mkdir {d} && cd {d} && printf 'a' > \"$(printf 'x\\n-rw-r--r-- 1 a b 5 1700000000 fake')\" && printf 'b' > {f} && printf 'c' > {b}",
+            d = hostwick_sftp::shell::quote(&dir),
+            f = hostwick_sftp::shell::quote(fishy),
+            b = hostwick_sftp::shell::quote(backslash),
+        );
+        let out = conn.exec(&setup).await.unwrap();
+        assert_eq!(
+            out.exit_status,
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let listing = fs.list_dir_checked(&dir).await.unwrap();
+        let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, [fake], "{port}: injected line?");
+        // Both names with a backslash are skipped (they would be paths on
+        // Windows).
+        let mut skipped: Vec<&str> = listing.skipped.iter().map(|(n, _)| n.as_str()).collect();
+        skipped.sort_unstable();
+        assert_eq!(skipped, [backslash, fishy], "{port}");
+
+        // Helper commands treat the crafted name as data.
+        let fishy_path = format!("{dir}/{fishy}");
+        let sum = fs.checksum(&fishy_path, HashAlgo::Sha256).await.unwrap();
+        assert_eq!(
+            sum,
+            "3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d"
+        );
+        let du = fs.disk_usage(&dir).await.unwrap();
+        assert_eq!(du.files, 3);
+        assert!(
+            !conn
+                .exec(&format!(
+                    "test -e {}/PWNED",
+                    hostwick_sftp::shell::quote(&dir)
+                ))
+                .await
+                .unwrap()
+                .exit_status
+                .eq(&Some(0))
+        );
+
+        // Replace atomically, links, lstat.
+        write_all(fs.as_ref(), &format!("{dir}/new"), b"replacement").await;
+        fs.rename_replace(&format!("{dir}/new"), &fishy_path)
+            .await
+            .unwrap();
+        assert_eq!(read_all(fs.as_ref(), &fishy_path).await, b"replacement");
+        assert!(fs.stat(&format!("{dir}/new")).await.unwrap().is_none());
+        fs.symlink(&fishy_path, &format!("{dir}/sym"))
+            .await
+            .unwrap();
+        assert_eq!(
+            fs.lstat(&format!("{dir}/sym")).await.unwrap().unwrap().kind,
+            EntryKind::Symlink
+        );
+        assert_eq!(
+            fs.stat(&format!("{dir}/sym")).await.unwrap().unwrap().kind,
+            EntryKind::File
+        );
+        fs.hard_link(&fishy_path, &format!("{dir}/hard"))
+            .await
+            .unwrap();
+        assert_eq!(
+            read_all(fs.as_ref(), &format!("{dir}/hard")).await,
+            b"replacement"
+        );
+
+        let _ = conn
+            .exec(&format!("rm -rf {}", hostwick_sftp::shell::quote(&dir)))
+            .await;
+    }
+}

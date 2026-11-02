@@ -7,10 +7,11 @@ use russh_sftp::client::{Config, SftpSession, error::Error as SftpError};
 use russh_sftp::protocol::{FileAttributes, FileType, OpenFlags, StatusCode};
 use tokio::io::{AsyncRead, AsyncSeekExt, AsyncWrite};
 
+use crate::shell::path_arg;
 use crate::sudo::{self, SudoCommand};
 use crate::{
-    BoxRead, BoxWrite, DiskUsage, Entry, EntryKind, FsError, HashAlgo, RemoteFs, join, remote_cmd,
-    sort_entries,
+    BoxRead, BoxWrite, DiskUsage, Entry, EntryKind, FsError, HashAlgo, Listing, RemoteFs,
+    filter_listing, join, remote_cmd, sort_entries,
 };
 
 /// Throughput knobs. The defaults keep 64 requests in flight per open file,
@@ -239,12 +240,16 @@ fn file_name(path: &str) -> String {
 #[async_trait]
 impl RemoteFs for SftpFs {
     async fn list_dir(&self, path: &str) -> Result<Vec<Entry>, FsError> {
+        Ok(self.list_dir_checked(path).await?.entries)
+    }
+
+    async fn list_dir_checked(&self, path: &str) -> Result<Listing, FsError> {
         let rd = self
             .session
             .read_dir(path)
             .await
             .map_err(|e| map_err(path, e))?;
-        let mut out: Vec<Entry> = rd
+        let out: Vec<Entry> = rd
             .filter(|e| {
                 let n = e.file_name();
                 n != "." && n != ".."
@@ -254,8 +259,19 @@ impl RemoteFs for SftpFs {
                 to_entry(name.clone(), join(path, &name), &e.metadata())
             })
             .collect();
-        sort_entries(&mut out);
-        Ok(out)
+        let mut listing = filter_listing(path, out);
+        sort_entries(&mut listing.entries);
+        Ok(listing)
+    }
+
+    async fn lstat(&self, path: &str) -> Result<Option<Entry>, FsError> {
+        match self.session.symlink_metadata(path).await {
+            Ok(attrs) => Ok(Some(to_entry(file_name(path), path.to_owned(), &attrs))),
+            Err(e) => match map_err(path, e) {
+                FsError::NotFound(_) => Ok(None),
+                other => Err(other),
+            },
+        }
     }
 
     async fn stat(&self, path: &str) -> Result<Option<Entry>, FsError> {
@@ -394,6 +410,34 @@ impl RemoteFs for SftpFs {
             .set_metadata(path, attrs)
             .await
             .map_err(|e| map_err(path, e))
+    }
+
+    async fn rename_replace(&self, from: &str, to: &str) -> Result<(), FsError> {
+        // SFTP v3 rename never replaces, and russh-sftp does not expose
+        // `posix-rename@openssh.com`. As the login user, `mv -f` (rename(2))
+        // is atomic; elevated sessions swap with plain renames instead.
+        if let Some(conn) = self.helper_conn() {
+            let cmd = format!("mv -f {} {}", path_arg(from), path_arg(to));
+            match remote_cmd::run(conn, from, &cmd).await {
+                Ok(()) => return Ok(()),
+                Err(e) => tracing::debug!(error = %e, "mv -f failed; swapping with renames"),
+            }
+        }
+        crate::swap_replace(self, from, to).await
+    }
+
+    async fn hard_link(&self, target: &str, link: &str) -> Result<(), FsError> {
+        match self
+            .session
+            .hardlink(target.to_owned(), link.to_owned())
+            .await
+        {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(FsError::Unsupported(
+                "this server does not support hard links (use ln -s)".into(),
+            )),
+            Err(e) => Err(map_err(link, e)),
+        }
     }
 
     async fn symlink(&self, target: &str, link: &str) -> Result<(), FsError> {

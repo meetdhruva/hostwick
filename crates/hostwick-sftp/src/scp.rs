@@ -22,10 +22,13 @@ use tokio::io::{
 };
 use tokio::sync::{OnceCell, watch};
 
-use crate::ls::{LsFlavor, parse_ls_line, parse_ls_output};
+use crate::ls::{LsFlavor, parse_ls_line, parse_ls_output_with};
 use crate::remote_cmd::{self, command_error};
 use crate::shell::{path_arg, quote};
-use crate::{BoxRead, BoxWrite, DiskUsage, Entry, FsError, HashAlgo, RemoteFs, join, sort_entries};
+use crate::{
+    BoxRead, BoxWrite, DiskUsage, Entry, FsError, HashAlgo, Listing, RemoteFs, filter_listing,
+    join, sort_entries,
+};
 
 type BoxFuture = Pin<Box<dyn Future<Output = io::Result<()>> + Send>>;
 
@@ -40,8 +43,9 @@ pub struct ScpFs {
 
 struct Inner {
     conn: Connection,
-    /// `ls` options this server understands, found on first listing.
-    ls: OnceCell<(LsFlavor, &'static str)>,
+    /// `ls` options this server understands, found on first listing, and
+    /// whether it escapes names (`-b`).
+    ls: OnceCell<(LsFlavor, &'static str, bool)>,
     /// Server UTC offset (seconds), for `ls` dates without a time zone.
     tz: OnceCell<i64>,
 }
@@ -53,6 +57,14 @@ fn now() -> u64 {
         .unwrap_or(0)
 }
 
+/// `("e", "")` or `("", " --time-style=+%s")`: short letters and long option.
+fn split_opts(opts: &'static str) -> (&'static str, String) {
+    match opts.strip_prefix(' ') {
+        Some(long) => ("", format!(" {long}")),
+        None => (opts, String::new()),
+    }
+}
+
 fn base_name(path: &str) -> String {
     let t = path.trim_end_matches('/');
     t.rsplit('/').next().unwrap_or(t).to_owned()
@@ -61,9 +73,11 @@ fn base_name(path: &str) -> String {
 impl ScpFs {
     /// Check that the server has a shell with `scp` and `ls`.
     pub async fn open(conn: &Connection) -> Result<Self, FsError> {
-        let out = conn
-            .exec("command -v scp >/dev/null 2>&1 || which scp >/dev/null 2>&1 || type scp >/dev/null 2>&1")
-            .await?;
+        let out = remote_cmd::sh(
+            conn,
+            "command -v scp >/dev/null 2>&1 || which scp >/dev/null 2>&1 || type scp >/dev/null 2>&1",
+        )
+        .await?;
         if out.exit_status != Some(0) {
             return Err(FsError::Unsupported(
                 "the server offers neither SFTP nor scp".into(),
@@ -82,33 +96,48 @@ impl ScpFs {
         &self.inner.conn
     }
 
-    async fn ls_style(&self) -> (LsFlavor, &'static str) {
+    async fn ls_style(&self) -> (LsFlavor, &'static str, bool) {
         *self
             .inner
             .ls
             .get_or_init(|| async {
-                // Most precise first; keep the first whose output parses with
-                // the expected date shape.
-                for (flavor, opts, tokens) in [
-                    (LsFlavor::Epoch, " --time-style=+%s", 1),
-                    (LsFlavor::Full, "e", 5),
-                    (LsFlavor::Full, "T", 4),
-                ] {
-                    let cmd = format!("LC_ALL=C ls -lad{opts} /");
-                    if let Ok(out) = self.conn().exec(&cmd).await
-                        && out.exit_status == Some(0)
-                        && let Some(l) = out
-                            .stdout_lossy()
-                            .lines()
-                            .find_map(|l| parse_ls_line(l, 0, now()))
-                        && l.date_tokens == tokens
-                    {
-                        return (flavor, opts);
-                    }
-                }
-                (LsFlavor::Plain, "")
+                let (flavor, opts) = self.probe_ls().await;
+                // `-b` (GNU, BSD, macOS) writes unusual characters in names
+                // as C escapes, so a line break in a file name cannot fake
+                // another line of the listing. Busybox may not have it.
+                let (letters, long) = split_opts(opts);
+                let cmd = format!("LC_ALL=C ls -ladb{letters}{long} /");
+                let escaped = matches!(
+                    remote_cmd::sh(self.conn(), &cmd).await,
+                    Ok(out) if out.exit_status == Some(0)
+                        && out.stdout_lossy().lines().any(|l| parse_ls_line(l, 0, now()).is_some())
+                );
+                (flavor, opts, escaped)
             })
             .await
+    }
+
+    async fn probe_ls(&self) -> (LsFlavor, &'static str) {
+        // Most precise first; keep the first whose output parses with
+        // the expected date shape.
+        for (flavor, opts, tokens) in [
+            (LsFlavor::Epoch, " --time-style=+%s", 1),
+            (LsFlavor::Full, "e", 5),
+            (LsFlavor::Full, "T", 4),
+        ] {
+            let cmd = format!("LC_ALL=C ls -lad{opts} /");
+            if let Ok(out) = remote_cmd::sh(self.conn(), &cmd).await
+                && out.exit_status == Some(0)
+                && let Some(l) = out
+                    .stdout_lossy()
+                    .lines()
+                    .find_map(|l| parse_ls_line(l, 0, now()))
+                && l.date_tokens == tokens
+            {
+                return (flavor, opts);
+            }
+        }
+        (LsFlavor::Plain, "")
     }
 
     async fn tz_offset(&self, flavor: LsFlavor) -> i64 {
@@ -119,16 +148,18 @@ impl ScpFs {
             .inner
             .tz
             .get_or_init(|| async {
-                let Ok(out) = self.conn().exec("date +%z").await else {
+                let Ok(out) = remote_cmd::sh(self.conn(), "date +%z").await else {
                     return 0;
                 };
                 let s = out.stdout_lossy();
                 let s = s.trim();
                 let b = s.as_bytes();
-                if b.len() == 5 && (b[0] == b'+' || b[0] == b'-') {
-                    let h: i64 = s[1..3].parse().unwrap_or(0);
-                    let m: i64 = s[3..5].parse().unwrap_or(0);
-                    let off = h * 3600 + m * 60;
+                if b.len() == 5
+                    && (b[0] == b'+' || b[0] == b'-')
+                    && b[1..].iter().all(u8::is_ascii_digit)
+                {
+                    let d = |i: usize| i64::from(b[i] - b'0');
+                    let off = (d(1) * 10 + d(2)) * 3600 + (d(3) * 10 + d(4)) * 60;
                     if b[0] == b'-' { -off } else { off }
                 } else {
                     0
@@ -138,25 +169,44 @@ impl ScpFs {
     }
 
     /// `ls` with the server's best options. `extra`: more flags (`d`, `L`, `n`).
-    async fn ls(&self, path: &str, extra: &str) -> Result<(String, LsFlavor, i64), FsError> {
-        let (flavor, opts) = self.ls_style().await;
+    async fn ls(&self, path: &str, extra: &str) -> Result<(String, LsFlavor, i64, bool), FsError> {
+        let (flavor, opts, escaped) = self.ls_style().await;
         let tz = self.tz_offset(flavor).await;
-        let (letters, long) = match opts.strip_prefix(' ') {
-            Some(long) => ("", format!(" {long}")),
-            None => (opts, String::new()),
-        };
-        let cmd = format!("LC_ALL=C ls -la{extra}{letters}{long} {}", path_arg(path));
-        let out = self.conn().exec(&cmd).await?;
+        let (letters, long) = split_opts(opts);
+        let b = if escaped { "b" } else { "" };
+        let cmd = format!(
+            "LC_ALL=C ls -la{extra}{b}{letters}{long} {}",
+            path_arg(path)
+        );
+        let out = remote_cmd::sh(self.conn(), &cmd).await?;
         if out.exit_status != Some(0) {
             return Err(command_error(path, &String::from_utf8_lossy(&out.stderr)));
         }
-        Ok((out.stdout_lossy(), flavor, tz))
+        Ok((out.stdout_lossy(), flavor, tz, escaped))
+    }
+
+    async fn stat_with(&self, path: &str, flags: &str) -> Result<Option<Entry>, FsError> {
+        match self.ls(path, flags).await {
+            Ok((out, _, tz, _)) => {
+                Ok(out
+                    .lines()
+                    .find_map(|l| parse_ls_line(l, tz, now()))
+                    .map(|l| {
+                        let mut e = l.into_entry("");
+                        e.name = base_name(path);
+                        e.path = path.to_owned();
+                        e
+                    }))
+            }
+            Err(e) if e.is_not_found() => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Start an `scp -f` / `scp -t` exchange.
     async fn start(&self, mode: &str, path: &str) -> Result<ScpSession, FsError> {
         let cmd = format!("scp {mode} {}", path_arg(path));
-        let stream = self.conn().open_exec_stream(&cmd).await?;
+        let stream = remote_cmd::sh_stream(self.conn(), &cmd).await?;
         let (stdio, stderr, exit) = stream.into_parts();
         let (rd, wr) = tokio::io::split(stdio);
         Ok(ScpSession {
@@ -270,34 +320,29 @@ fn unsupported_offset(path: &str) -> FsError {
 #[async_trait]
 impl RemoteFs for ScpFs {
     async fn list_dir(&self, path: &str) -> Result<Vec<Entry>, FsError> {
+        Ok(self.list_dir_checked(path).await?.entries)
+    }
+
+    async fn list_dir_checked(&self, path: &str) -> Result<Listing, FsError> {
         // A trailing slash lists the target of a symlinked directory.
         let target = if path.ends_with('/') {
             path.to_owned()
         } else {
             format!("{path}/")
         };
-        let (out, _, tz) = self.ls(&target, "").await?;
-        let mut entries = parse_ls_output(&out, path, tz, now());
-        sort_entries(&mut entries);
-        Ok(entries)
+        let (out, _, tz, escaped) = self.ls(&target, "").await?;
+        let mut listing =
+            filter_listing(path, parse_ls_output_with(&out, path, tz, now(), escaped));
+        sort_entries(&mut listing.entries);
+        Ok(listing)
+    }
+
+    async fn lstat(&self, path: &str) -> Result<Option<Entry>, FsError> {
+        self.stat_with(path, "dn").await
     }
 
     async fn stat(&self, path: &str) -> Result<Option<Entry>, FsError> {
-        match self.ls(path, "dLn").await {
-            Ok((out, _, tz)) => {
-                Ok(out
-                    .lines()
-                    .find_map(|l| parse_ls_line(l, tz, now()))
-                    .map(|l| {
-                        let mut e = l.into_entry("");
-                        e.name = base_name(path);
-                        e.path = path.to_owned();
-                        e
-                    }))
-            }
-            Err(e) if e.is_not_found() => Ok(None),
-            Err(e) => Err(e),
-        }
+        self.stat_with(path, "dLn").await
     }
 
     async fn mkdir(&self, path: &str) -> Result<(), FsError> {
@@ -380,7 +425,12 @@ impl RemoteFs for ScpFs {
                 use rand::Rng as _;
                 rand::thread_rng().r#gen::<u64>()
             }));
-        let file = tokio::fs::File::create(&spool).await?;
+        // Private (0600) and never an existing file or link.
+        let mut o = tokio::fs::OpenOptions::new();
+        o.write(true).create_new(true);
+        #[cfg(unix)]
+        o.mode(0o600);
+        let file = o.open(&spool).await?;
         Ok(Box::pin(SpoolWriter {
             file: Some(file),
             spool,
@@ -427,7 +477,7 @@ impl RemoteFs for ScpFs {
             "p={p}; if [ -d \"$p\" ]; then cd \"$p\" && pwd -P; \
              else cd \"$(dirname \"$p\")\" && pwd -P && basename \"$p\"; fi"
         );
-        let out = self.conn().exec(&cmd).await?;
+        let out = remote_cmd::sh(self.conn(), &cmd).await?;
         if out.exit_status != Some(0) {
             return Err(command_error(path, &String::from_utf8_lossy(&out.stderr)));
         }
@@ -465,16 +515,24 @@ impl RemoteFs for ScpFs {
         remote_cmd::run(self.conn(), path, &cmd).await
     }
 
+    async fn rename_replace(&self, from: &str, to: &str) -> Result<(), FsError> {
+        // rename(2) replaces atomically.
+        let cmd = format!("mv -f {} {}", path_arg(from), path_arg(to));
+        remote_cmd::run(self.conn(), from, &cmd).await
+    }
+
+    async fn hard_link(&self, target: &str, link: &str) -> Result<(), FsError> {
+        let cmd = format!("ln {} {}", path_arg(target), path_arg(link));
+        remote_cmd::run(self.conn(), link, &cmd).await
+    }
+
     async fn symlink(&self, target: &str, link: &str) -> Result<(), FsError> {
         let cmd = format!("ln -s -- {} {}", quote(target), path_arg(link));
         remote_cmd::run(self.conn(), link, &cmd).await
     }
 
     async fn read_link(&self, path: &str) -> Result<String, FsError> {
-        let out = self
-            .conn()
-            .exec(&format!("readlink {}", path_arg(path)))
-            .await?;
+        let out = remote_cmd::sh(self.conn(), &format!("readlink {}", path_arg(path))).await?;
         if out.exit_status != Some(0) {
             return Err(command_error(path, &String::from_utf8_lossy(&out.stderr)));
         }
