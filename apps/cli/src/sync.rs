@@ -1,5 +1,5 @@
 //! `hostwick sync` — WinSCP's "Synchronize" and "Keep remote directory up to
-//! date", for either direction.
+//! date", for either direction, or both (`--both`).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,7 +8,8 @@ use anyhow::{Result, bail};
 use clap::Args;
 use hostwick_sftp::{LocalFs, RemoteFs};
 use hostwick_transfer::{
-    EngineConfig, SyncMode, SyncOptions, SyncReport, TransferEngine, sync_once, watch,
+    ActionKind, EngineConfig, PlanOptions, SyncDirection, SyncMode, SyncOptions, SyncPlan,
+    SyncReport, TransferEngine, build_plan, execute_plan, sync_once, watch,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -21,8 +22,12 @@ pub struct SyncArgs {
     #[command(flatten)]
     conn: ConnOpts,
     /// Delete destination files that are not in the source (mirror).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "both")]
     delete: bool,
+    /// Two-way: the newer copy of each file wins, in either direction; never
+    /// deletes. Files changed on both sides are reported, not copied.
+    #[arg(long, conflicts_with = "watch")]
+    both: bool,
     /// Keep running and sync whenever the source changes (Ctrl+C to stop).
     #[arg(short = 'w', long)]
     watch: bool,
@@ -91,8 +96,118 @@ fn print_report(r: &SyncReport, dry_run: bool) {
     }
 }
 
+fn print_plan(plan: &SyncPlan) {
+    for it in &plan.items {
+        let path = if it.is_dir {
+            format!("{}/", it.rel_path)
+        } else {
+            it.rel_path.clone()
+        };
+        let what = match it.kind {
+            ActionKind::Conflict => "CONFLICT",
+            k => k.label(),
+        };
+        println!("{what:<14} {path}  ({})", it.reason.describe());
+    }
+}
+
+/// `--both`: plan, show, run.
+async fn run_both(
+    a: &SyncArgs,
+    local: Arc<dyn RemoteFs>,
+    local_root: String,
+    remote: Arc<dyn RemoteFs>,
+    remote_root: String,
+) -> Result<i32> {
+    let plan = build_plan(
+        local.as_ref(),
+        &local_root,
+        remote.as_ref(),
+        &remote_root,
+        PlanOptions {
+            direction: SyncDirection::Both,
+            delete: false,
+            excludes: a.exclude.clone(),
+        },
+    )
+    .await?;
+    let conflicts = plan
+        .items
+        .iter()
+        .filter(|i| i.kind == ActionKind::Conflict)
+        .count();
+    if a.dry_run {
+        if a.json {
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+        } else if plan.is_empty() {
+            eprintln!("up to date");
+        } else {
+            print_plan(&plan);
+        }
+        return Ok(0);
+    }
+    let engine = TransferEngine::new(EngineConfig {
+        max_concurrent: a.parallel.max(1),
+        rate_limit: a.limit.map(|k| k * 1024),
+        ..Default::default()
+    });
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        stop.cancel();
+    });
+    let report = execute_plan(&engine, local, remote, &plan, |_, _| true, &cancel).await;
+    if a.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "local": local_root,
+                "remote": remote_root,
+                "report": report,
+                "conflicts": plan.items.iter().filter(|i| i.kind == ActionKind::Conflict).map(|i| &i.rel_path).collect::<Vec<_>>(),
+            }))?
+        );
+    } else {
+        for p in &report.uploaded {
+            println!("uploaded     {p}");
+        }
+        for p in &report.downloaded {
+            println!("downloaded   {p}");
+        }
+        for it in plan.items.iter().filter(|i| i.kind == ActionKind::Conflict) {
+            eprintln!("CONFLICT     {}: {}", it.rel_path, it.reason.describe());
+        }
+        for (p, e) in &report.failed {
+            eprintln!("FAILED       {p}: {e}");
+        }
+        eprintln!("{} ({})", report.summary(), human(report.bytes));
+    }
+    Ok(
+        if report.failed.is_empty() && conflicts == 0 && !report.cancelled {
+            0
+        } else {
+            1
+        },
+    )
+}
+
 pub async fn run(app: &App, a: SyncArgs) -> Result<i32> {
     let local: Arc<dyn RemoteFs> = Arc::new(LocalFs::system());
+    if a.both {
+        let (l, host, path) = match (parse_loc(&a.src), parse_loc(&a.dst)) {
+            (Loc::Local(l), Loc::Remote { host, path })
+            | (Loc::Remote { host, path }, Loc::Local(l)) => (l, host, path),
+            _ => bail!("exactly one side must be remote (HOST:PATH)"),
+        };
+        let remote = open_remote(app, &host, &a.conn).await?;
+        let remote_root = if path.is_empty() { ".".into() } else { path };
+        let remote_root = remote
+            .canonicalize(&remote_root)
+            .await
+            .unwrap_or(remote_root);
+        return run_both(&a, local, absolute_local(&l)?, remote, remote_root).await;
+    }
     let (src, src_root, dst, dst_root) = match (parse_loc(&a.src), parse_loc(&a.dst)) {
         (Loc::Local(l), Loc::Remote { host, path }) => {
             let remote = open_remote(app, &host, &a.conn).await?;

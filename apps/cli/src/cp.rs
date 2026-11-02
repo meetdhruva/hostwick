@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
-use hostwick_sftp::{LocalFs, RemoteFs, SftpFs, SftpOptions, path_to_slash};
+use hostwick_sftp::{LocalFs, RemoteFs, path_to_slash};
 use hostwick_transfer::{
     EngineConfig, ExistingPolicy, Job, TransferEngine, TransferEvent, TransferState,
 };
@@ -107,11 +107,49 @@ pub(crate) async fn open_remote(
     opts: &ConnOpts,
 ) -> Result<Arc<dyn RemoteFs>> {
     let profile = app.resolve(host, opts)?;
-    let conn = app.connect(&profile).await?;
-    let fs = SftpFs::open(&conn, &SftpOptions::default())
+    let ctx = app.context(&profile)?;
+    let conn = hostwick_ssh::Connection::connect(&profile, &ctx)
         .await
-        .context("starting SFTP")?;
-    Ok(Arc::new(fs))
+        .with_context(|| format!("connecting to {}", profile.path()))?;
+    // Saved sudo password: its own credential, else the login password's.
+    let mut saved = profile
+        .sudo
+        .password_credential
+        .as_deref()
+        .or_else(|| {
+            profile.auth.iter().find_map(|a| match a {
+                hostwick_core::AuthMethod::Password { credential } => credential.as_deref(),
+                _ => None,
+            })
+        })
+        .and_then(|id| ctx.credentials.get(id));
+    let batch = app.policy.batch;
+    let who = format!("{}@{}", profile.user_or_local(), profile.host);
+    let sudo = profile.sudo.enabled.then_some(&profile.sudo);
+    let fs = hostwick_sftp::open_remote_fs_with(&conn, profile.file_protocol, sudo, |why| {
+        let from_vault = saved.take();
+        let who = who.clone();
+        async move {
+            if let Some(p) = from_vault {
+                return Some(p);
+            }
+            if batch {
+                return None;
+            }
+            if why.is_some() {
+                eprintln!("sudo: wrong password, try again");
+            }
+            tokio::task::spawn_blocking(move || {
+                crate::tty::read_secret(&format!("[sudo] password for {who}: ")).ok()
+            })
+            .await
+            .ok()
+            .flatten()
+        }
+    })
+    .await
+    .context("opening the remote file system")?;
+    Ok(fs)
 }
 
 pub async fn run(app: &App, a: CpArgs) -> Result<i32> {

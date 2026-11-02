@@ -1192,10 +1192,8 @@ impl Runner<'_> {
             // WinSCP: "remote" updates the remote side from the local one.
             "remote" => (self.local.clone(), local_dir, fs, remote_dir),
             "local" => (fs, remote_dir, self.local.clone(), local_dir),
-            "both" => {
-                bail!("two-way sync is not supported yet; use `sync local` and `sync remote`")
-            }
-            other => bail!("sync {other}: expected `local` or `remote`"),
+            "both" => return self.sync_both(fs, local_dir, remote_dir, &p).await,
+            other => bail!("sync {other}: expected `local`, `remote` or `both`"),
         };
         match src.stat(&src_root).await? {
             Some(e) if e.is_dir() => {}
@@ -1234,6 +1232,80 @@ impl Runner<'_> {
             human(r.bytes),
             r.deleted.len(),
             r.failed.len()
+        );
+        if !r.failed.is_empty() {
+            bail!("{} file(s) failed to sync", r.failed.len());
+        }
+        Ok(())
+    }
+}
+
+impl Runner<'_> {
+    /// WinSCP `synchronize both`: newer wins each way, nothing deleted,
+    /// conflicts reported.
+    async fn sync_both(
+        &mut self,
+        fs: Arc<dyn RemoteFs>,
+        local_dir: String,
+        remote_dir: String,
+        p: &Parsed,
+    ) -> Result<()> {
+        if p.has(&["--delete", "-delete", "-mirror"]) {
+            bail!("sync both never deletes; drop --delete");
+        }
+        let plan = hostwick_transfer::build_plan(
+            self.local.as_ref(),
+            &local_dir,
+            fs.as_ref(),
+            &remote_dir,
+            hostwick_transfer::PlanOptions {
+                direction: hostwick_transfer::SyncDirection::Both,
+                delete: false,
+                excludes: p.multi.iter().map(|(_, v)| v.clone()).collect(),
+            },
+        )
+        .await?;
+        let conflicts: Vec<_> = plan
+            .items
+            .iter()
+            .filter(|i| i.kind == hostwick_transfer::ActionKind::Conflict)
+            .collect();
+        if p.has(&["-n", "--dry-run", "-preview"]) {
+            for it in &plan.items {
+                eprintln!(
+                    "would {:<14} {}",
+                    it.kind.label().to_lowercase(),
+                    it.rel_path
+                );
+            }
+            return Ok(());
+        }
+        let engine = TransferEngine::new(EngineConfig::default());
+        let r = hostwick_transfer::execute_plan(
+            &engine,
+            self.local.clone(),
+            fs,
+            &plan,
+            |_, _| true,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        for f in &r.uploaded {
+            eprintln!("uploaded     {f}");
+        }
+        for f in &r.downloaded {
+            eprintln!("downloaded   {f}");
+        }
+        for c in &conflicts {
+            eprintln!("CONFLICT     {}: {}", c.rel_path, c.reason.describe());
+        }
+        for (f, e) in &r.failed {
+            eprintln!("FAILED       {f}: {e}");
+        }
+        eprintln!(
+            "sync both {local_dir} ⇄ {remote_dir}: {} ({})",
+            r.summary(),
+            human(r.bytes)
         );
         if !r.failed.is_empty() {
             bail!("{} file(s) failed to sync", r.failed.len());

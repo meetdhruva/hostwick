@@ -123,6 +123,12 @@ impl App {
                     .as_ref()
                     .and_then(|x| x.password_credential.as_deref()),
             )
+            .chain(
+                p.sudo
+                    .password_credential
+                    .as_deref()
+                    .filter(|_| p.sudo.enabled),
+            )
             .collect();
         if ids.is_empty() || !self.paths.vault.exists() {
             return Ok(VaultCredentials(HashMap::new()));
