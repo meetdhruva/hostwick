@@ -268,8 +268,9 @@ impl HighlightRule {
                 "#ff5f5f",
             ),
             r(r"(?i)\b(warn|warning|deprecated)\b", "#ffaf00"),
+            // `\b` cannot follow `)`, so "active (running)" sits outside it.
             r(
-                r"(?i)\b(ok|success|succeeded|passed|active \(running\))\b",
+                r"(?i)\b(ok|success|succeeded|passed)\b|\bactive \(running\)",
                 "#5fd75f",
             ),
         ]
