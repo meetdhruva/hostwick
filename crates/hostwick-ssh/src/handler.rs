@@ -69,6 +69,20 @@ impl client::Handler for ClientHandler {
             PublicKeyOrCertificate::Certificate(cert) => PublicKey::from(cert.public_key().clone()),
         };
 
+        if let Some(kh) = &self.known_hosts
+            && kh.is_revoked(&self.host, self.port, &key).unwrap_or(false)
+        {
+            let text = format!(
+                "the host key of {}:{} ({}) is marked @revoked in {}; refusing to connect",
+                self.host,
+                self.port,
+                fingerprint(&key),
+                kh.path().display()
+            );
+            tracing::warn!("{text}");
+            self.interaction.notice(&text);
+            return self.reject();
+        }
         let status = match &self.known_hosts {
             Some(kh) => match kh.check(&self.host, self.port, &key) {
                 Ok(s) => s,
@@ -96,9 +110,7 @@ impl client::Handler for ClientHandler {
             HostKeyDecision::AcceptAndRemember => {
                 if let Some(kh) = &self.known_hosts {
                     let saved = match status {
-                        HostKeyStatus::Changed { line } => {
-                            kh.replace(line, &self.host, self.port, &key)
-                        }
+                        HostKeyStatus::Changed { .. } => kh.replace(&self.host, self.port, &key),
                         _ => kh.learn(&self.host, self.port, &key),
                     };
                     if let Err(e) = saved {

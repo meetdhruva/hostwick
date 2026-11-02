@@ -68,6 +68,8 @@ struct Recorder {
     passwords: Vec<(String, String)>,
     password_prompts: Mutex<Vec<(String, String)>>,
     notices: Mutex<Vec<String>>,
+    /// `(user@host, saved, accepted)` for every password tried.
+    outcomes: Mutex<Vec<(String, bool, bool)>>,
 }
 
 impl Recorder {
@@ -105,6 +107,14 @@ impl Interaction for Recorder {
     fn notice(&self, text: &str) {
         eprintln!("notice: {text}");
         self.notices.lock().unwrap().push(text.to_owned());
+    }
+    fn secret_outcome(&self, s: hostwick_ssh::SecretUse<'_>, saved: bool, accepted: bool) {
+        if let hostwick_ssh::SecretUse::Password { user, host } = s {
+            self.outcomes
+                .lock()
+                .unwrap()
+                .push((format!("{user}@{host}"), saved, accepted));
+        }
     }
 }
 
@@ -302,6 +312,49 @@ async fn http_proxy_with_prompted_password_and_jump_host() {
         err.to_string().contains("rejected the credentials for `u`"),
         "{err}"
     );
+}
+
+/// The target's saved password is never sent to a jump host: the jump host
+/// is asked for its own (labelled with its name) and the hop still works
+/// with the key.
+#[tokio::test]
+async fn jump_host_never_gets_the_targets_saved_password() {
+    let e = require!();
+    let mut p = profile(
+        &e,
+        "127.0.0.1",
+        vec![
+            AuthMethod::Password {
+                credential: Some("host:target:password".into()),
+            },
+            key(&e, "client_key"),
+        ],
+    );
+    p.jump = vec![hostwick_core::Endpoint {
+        host: "localhost".into(),
+        port: e.port,
+        user: None,
+    }];
+    let ix = Arc::new(Recorder::default());
+    let creds = Arc::new(OneSecret(
+        "host:target:password".into(),
+        "TARGET-ONLY-SECRET".into(),
+    ));
+    let conn = Connection::connect(&p, &ctx_with(ix.clone(), creds))
+        .await
+        .unwrap();
+    assert_eq!(run(&conn, "echo via-jump").await.0.trim(), "via-jump");
+    let outcomes = ix.outcomes.lock().unwrap().clone();
+    assert!(
+        !outcomes
+            .iter()
+            .any(|(who, saved, _)| who.ends_with("@localhost") && *saved),
+        "saved target password sent to the jump host: {outcomes:?}"
+    );
+    // Any password question for the jump host names the jump host.
+    for (_, host) in ix.password_prompts.lock().unwrap().iter() {
+        assert!(host == "localhost" || host == "127.0.0.1", "{host}");
+    }
 }
 
 #[tokio::test]

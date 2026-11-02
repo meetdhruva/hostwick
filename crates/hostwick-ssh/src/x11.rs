@@ -1,10 +1,16 @@
-//! X11 forwarding, the way OpenSSH's untrusted `ssh -X` does it.
+//! X11 forwarding, the way PuTTY and OpenSSH's *trusted* `ssh -Y` do it.
 //!
 //! The server gets a random *fake* MIT-MAGIC-COOKIE-1. Each X11 channel the
 //! server opens back to us starts with the X client's connection-setup
 //! packet carrying that fake cookie; we check it, swap in the local X
 //! server's *real* cookie (from `xauth list`), and from then on just pump
 //! bytes both ways. The real cookie never leaves this machine.
+//!
+//! This is not OpenSSH's untrusted `ssh -X` mode (which asks the X server
+//! for a restricted cookie through the SECURITY extension): forwarded
+//! clients get full access to the local display, so anyone who controls the
+//! server can read keystrokes and take screenshots. Only forward X11 to
+//! servers you trust.
 
 use std::path::PathBuf;
 use std::sync::Arc;

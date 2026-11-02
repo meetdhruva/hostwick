@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use hostwick_core::{Backoff, ForwardSpec, HostProfile};
+use hostwick_core::{AuthMethod, Backoff, ForwardSpec, HostProfile};
 use russh::client::{self, Handle, Msg};
 use russh::keys::Algorithm;
 use russh::{Channel, ChannelStream, Disconnect, Preferred, kex};
@@ -70,6 +70,7 @@ impl Connection {
     pub async fn connect(profile: &HostProfile, ctx: &ConnectContext) -> Result<Self, SshError> {
         let user = profile.user_or_local();
         let mut via: Option<Connection> = None;
+        let hop_methods = jump_auth(&profile.auth);
         for hop in &profile.jump {
             let hop_user = hop.user.clone().unwrap_or_else(|| user.clone());
             let conn = Self::connect_hop(
@@ -77,6 +78,7 @@ impl Connection {
                 hop.port,
                 &hop_user,
                 profile,
+                &hop_methods,
                 ctx,
                 via.take(),
                 false,
@@ -84,7 +86,17 @@ impl Connection {
             .await?;
             via = Some(conn);
         }
-        Self::connect_hop(&profile.host, profile.port, &user, profile, ctx, via, true).await
+        Self::connect_hop(
+            &profile.host,
+            profile.port,
+            &user,
+            profile,
+            &profile.auth,
+            ctx,
+            via,
+            true,
+        )
+        .await
     }
 
     /// [`Connection::connect`] with exponential backoff on transient errors
@@ -109,11 +121,13 @@ impl Connection {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn connect_hop(
         host: &str,
         port: u16,
         user: &str,
         profile: &HostProfile,
+        methods: &[AuthMethod],
         ctx: &ConnectContext,
         via: Option<Connection>,
         // The destination (not a jump host): only it gets X11/agent forwarding.
@@ -195,7 +209,7 @@ impl Connection {
             interaction: ctx.interaction.as_ref(),
             credentials: ctx.credentials.as_ref(),
         };
-        authenticate(&mut handle, &profile.auth, &auth_ctx).await?;
+        authenticate(&mut handle, methods, &auth_ctx).await?;
         tracing::info!(%label, "connected");
 
         Ok(Self {
@@ -281,6 +295,22 @@ impl Connection {
             .disconnect(Disconnect::ByApplication, "bye", "en")
             .await;
     }
+}
+
+/// The target's auth methods as used for a jump host: the same order, but
+/// never the target's saved password (a jump host is another server and
+/// must not learn it; its own password is asked for, labelled with its
+/// name) and never Kerberos ticket delegation. Agent, key files (with their
+/// passphrases, which unlock the local file) and keyboard-interactive stay.
+pub(crate) fn jump_auth(methods: &[AuthMethod]) -> Vec<AuthMethod> {
+    methods
+        .iter()
+        .map(|m| match m {
+            AuthMethod::Password { .. } => AuthMethod::Password { credential: None },
+            AuthMethod::Gssapi { .. } => AuthMethod::Gssapi { delegate: false },
+            other => other.clone(),
+        })
+        .collect()
 }
 
 /// A TCP connection to `host:port` through `spec`, with the same
@@ -388,6 +418,35 @@ pub(crate) fn client_config(profile: &HostProfile) -> client::Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A jump host never gets the target's saved password or a delegated
+    /// Kerberos ticket.
+    #[test]
+    fn jump_hops_drop_target_secrets() {
+        let key = AuthMethod::KeyFile {
+            path: "/k".into(),
+            passphrase_credential: Some("key:/k".into()),
+        };
+        let target = vec![
+            AuthMethod::Agent,
+            key.clone(),
+            AuthMethod::Gssapi { delegate: true },
+            AuthMethod::Password {
+                credential: Some("host:1:password".into()),
+            },
+            AuthMethod::KeyboardInteractive,
+        ];
+        assert_eq!(
+            jump_auth(&target),
+            vec![
+                AuthMethod::Agent,
+                key,
+                AuthMethod::Gssapi { delegate: false },
+                AuthMethod::Password { credential: None },
+                AuthMethod::KeyboardInteractive,
+            ]
+        );
+    }
 
     #[test]
     fn legacy_algorithms_are_opt_in() {

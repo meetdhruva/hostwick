@@ -39,7 +39,19 @@ impl KnownHosts {
         match russh::keys::check_known_hosts_path(host, port, key, &self.path) {
             Ok(true) => Ok(HostKeyStatus::Known),
             Ok(false) => Ok(HostKeyStatus::Unknown),
-            Err(russh::keys::Error::KeyChanged { line }) => Ok(HostKeyStatus::Changed { line }),
+            // russh's number skips comment lines; report the real line.
+            Err(russh::keys::Error::KeyChanged { line }) => {
+                let key_type = key.algorithm().as_str().to_owned();
+                let real = self
+                    .entries_for(host, port)
+                    .ok()
+                    .and_then(|v| {
+                        v.into_iter()
+                            .find(|e| e.marker.is_none() && e.key_type == key_type)
+                    })
+                    .map_or(line, |e| e.line);
+                Ok(HostKeyStatus::Changed { line: real })
+            }
             Err(e) => Err(SshError::KnownHosts(e.to_string())),
         }
     }
@@ -52,17 +64,69 @@ impl KnownHosts {
             .map_err(|e| SshError::KnownHosts(e.to_string()))
     }
 
-    /// Replace the key recorded on `line` (1-based, as reported by
-    /// [`HostKeyStatus::Changed`]) with `key`.
-    pub fn replace(
-        &self,
-        line: usize,
-        host: &str,
-        port: u16,
-        key: &PublicKey,
-    ) -> Result<(), SshError> {
-        self.rewrite(|n, _| if n == line { Edit::Drop } else { Edit::Keep })?;
+    /// Trust `key` for `host` on `port` in place of the key of the same
+    /// type recorded before (after the person accepted a changed key).
+    ///
+    /// Entries are found by host name and key type, not by the line number
+    /// russh reports (it does not count comment lines, so it can point at
+    /// another host's entry). On a line listing several hosts only this host
+    /// is dropped; `@cert-authority` and `@revoked` lines are kept.
+    pub fn replace(&self, host: &str, port: u16, key: &PublicKey) -> Result<(), SshError> {
+        let names = host_names(host, port);
+        let key_type = key.algorithm().as_str().to_owned();
+        self.rewrite(|_, line| {
+            let Some((marker, patterns, rest)) = split_line(line) else {
+                return Edit::Keep;
+            };
+            if marker.is_some() || rest.split_whitespace().next() != Some(key_type.as_str()) {
+                return Edit::Keep;
+            }
+            let pats: Vec<&str> = patterns.split(',').collect();
+            let keep: Vec<&str> = pats
+                .iter()
+                .copied()
+                .filter(|p| !pattern_names_host(p, &names))
+                .collect();
+            if keep.len() == pats.len() {
+                Edit::Keep
+            } else if keep.is_empty() {
+                Edit::Drop
+            } else {
+                Edit::Replace(format!("{} {rest}", keep.join(",")))
+            }
+        })?;
         self.learn(host, port, key)
+    }
+
+    /// Whether `key` is listed on an `@revoked` line that applies to `host`
+    /// on `port` (exact, hashed or wildcard pattern). russh ignores these
+    /// lines, so the handler checks this first and refuses such a key.
+    pub fn is_revoked(&self, host: &str, port: u16, key: &PublicKey) -> Result<bool, SshError> {
+        let text = match std::fs::read_to_string(&self.path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e.into()),
+        };
+        let blob = key
+            .to_bytes()
+            .map_err(|e| SshError::KnownHosts(e.to_string()))?;
+        let names = host_names(host, port);
+        Ok(text.lines().any(|line| {
+            let Some((Some(KnownHostMarker::Revoked), patterns, rest)) = split_line(line) else {
+                return false;
+            };
+            let Some(data) = rest.split_whitespace().nth(1) else {
+                return false;
+            };
+            B64.decode(data).is_ok_and(|b| b == blob)
+                && patterns.split(',').any(|p| {
+                    // Wildcards also match the bare name on any port: a
+                    // revocation is better applied too widely than missed.
+                    pattern_names_host(p, &names)
+                        || names.iter().any(|n| glob(p, n))
+                        || glob(p, host)
+                })
+        }))
     }
 
     /// Every host-key line, in file order. A missing file has no entries.
@@ -365,6 +429,23 @@ fn pattern_names_host(pattern: &str, names: &[String]) -> bool {
     }
 }
 
+/// OpenSSH wildcard pattern (`*`, `?`), case-insensitive. Negated
+/// patterns (`!host`) never match here.
+fn glob(pattern: &str, name: &str) -> bool {
+    fn go(p: &[u8], n: &[u8]) -> bool {
+        match (p.first(), n.first()) {
+            (None, None) => true,
+            (Some(b'*'), _) => go(&p[1..], n) || (!n.is_empty() && go(p, &n[1..])),
+            (Some(b'?'), Some(_)) => go(&p[1..], &n[1..]),
+            (Some(a), Some(b)) if a.eq_ignore_ascii_case(b) => go(&p[1..], &n[1..]),
+            _ => false,
+        }
+    }
+    !pattern.starts_with('!')
+        && pattern.contains(['*', '?'])
+        && go(pattern.as_bytes(), name.as_bytes())
+}
+
 pub fn fingerprint(key: &PublicKey) -> String {
     key.fingerprint(HashAlg::Sha256).to_string()
 }
@@ -400,13 +481,75 @@ mod tests {
         let HostKeyStatus::Changed { line } = status else {
             panic!("expected Changed, got {status:?}")
         };
-        kh.replace(line, "srv", 22, &k2)
-            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(line > 0);
+        kh.replace("srv", 22, &k2).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(kh.check("srv", 22, &k2).ok(), Some(HostKeyStatus::Known));
         assert!(matches!(
             kh.check("srv", 22, &k1),
             Ok(HostKeyStatus::Changed { .. })
         ));
+    }
+
+    /// russh numbers lines without counting comments; accepting a changed
+    /// key used to delete whatever line that number pointed at.
+    #[test]
+    fn replace_keeps_other_hosts_when_comments_come_first() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let path = dir.path().join("known_hosts");
+        std::fs::write(
+            &path,
+            format!("# managed by ansible\n# BEGIN\nother ssh-ed25519 {K1}\nsrv,10.0.0.9 ssh-ed25519 {K1}\n"),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let kh = KnownHosts::new(&path);
+        let k2 = key(K2);
+        assert!(matches!(
+            kh.check("srv", 22, &k2),
+            Ok(HostKeyStatus::Changed { .. })
+        ));
+        kh.replace("srv", 22, &k2).unwrap_or_else(|e| panic!("{e}"));
+        let after = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            after.starts_with("# managed by ansible\n# BEGIN\n"),
+            "{after}"
+        );
+        assert!(
+            after.contains(&format!("other ssh-ed25519 {K1}")),
+            "{after}"
+        );
+        assert!(
+            after.contains(&format!("10.0.0.9 ssh-ed25519 {K1}")),
+            "{after}"
+        );
+        assert_eq!(kh.check("srv", 22, &k2).ok(), Some(HostKeyStatus::Known));
+        assert_eq!(
+            kh.check("other", 22, &key(K1)).ok(),
+            Some(HostKeyStatus::Known)
+        );
+        assert_eq!(
+            kh.check("10.0.0.9", 22, &key(K1)).ok(),
+            Some(HostKeyStatus::Known)
+        );
+    }
+
+    #[test]
+    fn revoked_keys_are_recognised() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let path = dir.path().join("known_hosts");
+        std::fs::write(
+            &path,
+            format!("@revoked * ssh-ed25519 {K1}\n@revoked web* ssh-ed25519 {K2}\n"),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let kh = KnownHosts::new(&path);
+        assert!(kh.is_revoked("anything", 22, &key(K1)).unwrap_or(false));
+        assert!(kh.is_revoked("web01", 2222, &key(K2)).unwrap_or(false));
+        assert!(!kh.is_revoked("db", 22, &key(K2)).unwrap_or(true));
+        assert!(
+            !KnownHosts::new(dir.path().join("none"))
+                .is_revoked("h", 22, &key(K1))
+                .unwrap_or(true)
+        );
     }
 
     fn hashed(salt: &[u8], name: &str) -> String {
