@@ -142,7 +142,29 @@ struct SshArgs {
     command: Vec<String>,
 }
 
+/// `hostwick hosts list | head` closes our stdout early. Rust then panics
+/// in `println!`; exit quietly instead, like other Unix tools.
+fn quiet_broken_pipe() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info.payload();
+        let msg = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        // os error 32: EPIPE (Unix); 232: pipe is being closed (Windows).
+        if msg.starts_with("failed printing to std")
+            && (msg.contains("os error 32)") || msg.contains("os error 232)"))
+        {
+            std::process::exit(0);
+        }
+        default_hook(info);
+    }));
+}
+
 fn main() {
+    quiet_broken_pipe();
     let cli = Cli::parse();
     init_logging(cli.verbose);
     let runtime = match tokio::runtime::Builder::new_multi_thread()

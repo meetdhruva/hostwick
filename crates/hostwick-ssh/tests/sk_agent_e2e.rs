@@ -11,6 +11,7 @@
 //! see `scripts/e2e-net.sh`. Its own test binary because it points
 //! `SSH_AUTH_SOCK` at the fake agent.
 #![allow(clippy::unwrap_used, clippy::expect_used, unsafe_code)]
+#![cfg(unix)]
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
