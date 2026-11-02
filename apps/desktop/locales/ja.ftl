@@ -1,0 +1,818 @@
+# Hostwick desktop：日本語。
+#
+# en.ftl（原文）からの翻訳です。キーと変数（{ $name }）は変更しません。製品名や
+# プロトコル名（SSH、SFTP、SCP、sudo、Kerberos、PuTTY、WinSCP、X11、SOCKS）は訳しません。
+
+## General
+
+error-internal = 内部エラー：{ $error }
+
+## Main window
+
+sidebar-search-placeholder = ホストを検索
+split-only-terminals = 分割できるのはターミナルのタブだけです。
+files-follow-no-folder = ターミナルがまだ現在のフォルダーを通知していません。ファイルブラウザーをターミナルに追従させるには、「ホストの編集 → ターミナル」で「シェル統合」をオンにしてください（bash と zsh）。
+host-copy-name = { $name }（コピー）
+size-b = B
+size-kib = KiB
+size-mib = MiB
+size-gib = GiB
+size-tib = TiB
+protocol-ssh = SSH
+protocol-telnet = Telnet
+protocol-serial = シリアル
+sidebar-vault-unlocked-tooltip = 保存済みパスワードのロックは解除されています — クリックでロック
+sidebar-settings-tooltip = 設定（{ $keys }）
+sidebar-open-terminal = ターミナル
+sidebar-open-files = ファイル
+sidebar-edit-host = ホストを編集
+sidebar-delete-host = ホストを削除
+sidebar-new-host = 新しいホスト…
+tab-files-title = ファイル：{ $name }
+broadcast = ブロードキャスト
+broadcast-on = ブロードキャスト：オン
+broadcast-tooltip = 開いているすべてのターミナルにキー入力を送信（{ $keys }）
+shortcut-new-host = 新しいホスト
+shortcut-duplicate-tab = タブを複製
+shortcut-close-pane = ペイン/タブを閉じる
+shortcut-reconnect = 再接続
+shortcut-next-tab = 次のタブ
+shortcut-split-right = 右に分割
+shortcut-split-down = 下に分割
+shortcut-move-between-panes = ペイン間を移動
+shortcut-broadcast = ブロードキャスト
+shortcut-find = 検索
+shortcut-settings = 設定
+empty-title = 開いているセッションはありません
+empty-hint-connect = ホストをダブルクリックするか、クイック接続欄に user@host と入力してください。
+empty-hint-menus = ホスト、タブ、ファイル、ターミナルを右クリックすると、その他の操作が表示されます。
+empty-hint-import = 左下の「インポート…」から ~/.ssh/config、PuTTY、WinSCP、Solar-PuTTY の設定を取り込めます。
+pane-connecting = { $host } に接続しています…
+pane-retry = 再試行
+transfer-progress = { $done } / { $total } — { $rate }/s
+transfer-done = 完了 — { $size }
+transfer-skipped = スキップしました
+transfer-cancelled = キャンセルしました
+transfer-failed = 失敗：{ $error }
+transfer-cancel = キャンセル
+transfers-title = 転送 — { $count } 件実行中
+transfers-clear = 完了分を消去
+
+## Common buttons
+
+button-cancel = キャンセル
+button-delete = 削除
+button-ok = OK
+button-save = 保存
+button-close = 閉じる
+button-browse = 参照…
+
+## Menus, import
+
+host-delete-title = ホストの削除
+host-delete-confirm = 保存済みのホスト「{ $name }」を削除しますか？
+sidebar-import = インポート…
+sidebar-tools = ツール
+import-no-home = ホームフォルダーがありません
+import-pick-putty = PuTTY の .reg エクスポート
+import-pick-solar = Solar-PuTTY のエクスポート（.json）
+import-pick-winscp = WinSCP.ini
+import-failed = インポートに失敗しました：{ $error }
+import-summary = 追加 { $added } 件、更新 { $updated } 件、注意 { $notes } 件
+import-done = インポートしました：{ $summary }
+import-report-title = インポート結果
+import-report-attention = 要確認（{ $count }）
+import-report-added = 追加（{ $count }）
+import-report-updated = 更新（{ $count }）
+import-report-note = 「要確認」に表示されたホストも、注記でスキップと書かれていない限りインポートされています。ホストを右クリック → 編集… で調整できます。
+import-menu-ssh-config = OpenSSH ~/.ssh/config
+import-menu-putty-registry = PuTTY（このコンピューターに保存されたセッション）
+import-menu-winscp-registry = WinSCP（このコンピューターに保存されたサイト）
+import-menu-putty-file = PuTTY の .reg エクスポート…
+import-menu-winscp-file = WinSCP.ini ファイル…
+import-menu-solar-file = Solar-PuTTY の .json エクスポート…
+menu-open-terminal = ターミナルを開く
+menu-open-files = ファイルを開く（SFTP）
+menu-edit = 編集…
+menu-duplicate = 複製
+menu-copy-address = アドレスをコピー
+menu-delete = 削除…
+menu-reconnect = 再接続
+menu-split-right = 右に分割
+menu-split-down = 下に分割
+menu-send-break = Break を送信
+menu-follow-terminal = ターミナルのフォルダーに追従
+menu-close = 閉じる
+menu-close-others = 他を閉じる
+menu-close-all = すべて閉じる
+tools-generate-key = 鍵を生成…
+tools-inspect-key = 鍵の確認・変換…
+tools-known-hosts = 既知のホスト…
+tools-saved-passwords = 保存済みパスワード…
+tools-settings-sync = 設定の同期…
+button-continue = 続行
+
+## Connection prompts
+
+notice-connection-title = 接続
+hostkey-changed-title = ホスト鍵が変更されています！
+hostkey-unknown-title = 不明なホスト
+hostkey-changed-body = 警告：{ $host } のホスト鍵が変更されています。
+
+    誰かが接続を傍受している（中間者攻撃）可能性があります。サーバーが再インストールされただけの場合もあります。
+
+    新しい { $algorithm } 鍵：
+    { $fingerprint }
+
+    鍵の変更が意図的なものだと確認できた場合にのみ続行してください。
+hostkey-unknown-body = { $host } への初めての接続です。
+
+    { $algorithm } 鍵のフィンガープリント：
+    { $fingerprint }
+
+    信頼する前に、サーバー管理者に確認してください。
+hostkey-reject = 拒否
+hostkey-trust-once = 今回のみ信頼
+hostkey-replace = 保存済みの鍵を置き換える
+hostkey-trust-remember = 信頼して記憶
+remember-hint-unlocked = パスワード保管庫に暗号化して保存されます。
+remember-hint-locked = 保管庫のマスターパスワードを求められます。
+remember-hint-create = マスターパスワードで保護された保管庫を作成します。
+prompt-server-auth-title = サーバー認証
+prompt-password-title = { $user }@{ $host } のパスワード
+prompt-password-label = パスワード
+prompt-passphrase-title = { $path } のパスフレーズ
+prompt-passphrase-label = パスフレーズ
+prompt-sudo-title = { $who } の sudo パスワード
+prompt-sudo-wrong-title = パスワードが違います。{ $who } の sudo パスワード
+secret-rejected-password = 保存済みのパスワードは受け付けられませんでした。現在のパスワードを入力してください。
+secret-rejected-proxy = 保存済みのプロキシパスワードは受け付けられませんでした。現在のパスワードを入力してください。
+secret-rejected-passphrase = 保存済みのパスフレーズは受け付けられませんでした。現在のパスフレーズを入力してください。
+secret-rejected-sudo = sudo は保存済みのパスワードを受け付けませんでした。
+secret-update-password = 保存済みのパスワードを更新
+secret-update-proxy = 保存済みのプロキシパスワードを更新
+secret-update-passphrase = 保存済みのパスフレーズを更新
+secret-update-sudo = 保存済みの sudo パスワードを更新
+secret-remember-password = パスワードを記憶
+secret-remember-proxy = プロキシパスワードを記憶
+secret-remember-passphrase = パスフレーズを記憶
+secret-remember-sudo = sudo パスワードを記憶
+vault-reason-host = { $name } には保存済みのパスワードがあります。マスターパスワードでロックを解除してください。
+vault-reason-store = このパスワードを保存するには、保存済みパスワードのロックを解除してください。
+vault-reason-create = 保存済みパスワード用の保管庫を作成します。保管庫は 1 つのマスターパスワードで保護され、マスターパスワード自体はどこにも保存されません。
+notice-not-saved-locked = 保存されていません：保管庫がロックされています。
+notice-save-password-failed = パスワードを保存できませんでした：{ $error }
+notice-update-host-failed = { $name } を更新できませんでした：{ $error }
+files-need-ssh = ファイル機能には SSH が必要です：{ $name } は { $protocol } 接続のため、ファイルを転送できません。
+files-root-failed = root として開けませんでした：{ $error }
+
+## Settings sync
+
+sync-no-changes = こちらでの変更はありません
+sync-added = { $count } 件追加
+sync-updated = { $count } 件更新
+sync-removed = { $count } 件削除
+sync-settings-updated = 設定を更新しました
+sync-mode-sync = 同期
+sync-mode-push = プッシュ
+sync-mode-pull = プル
+sync-summary = { $mode }：{ $count } 件のホストが同期済み、{ $changes }
+sync-file-updated = 同期ファイルを更新しました
+vault-reason-sync-startup = 設定を同期するには、保存済みパスワードのロックを解除してください（同期パスフレーズがそこに保存されています）。
+vault-reason-sync = 設定を同期するには、保存済みパスワードのロックを解除してください。
+sync-no-folder = まず「設定 → 設定の同期」で同期フォルダーを選択してください。
+sync-no-passphrase = 同期パスフレーズが保存されていません — 「設定 → 設定の同期」で設定してください
+sync-passphrase-title = 設定の同期パスフレーズ
+sync-passphrase-label = 同期パスフレーズ
+sync-passphrase-wrong-title = 同期パスフレーズが違います — 他のコンピューターで使っているものを入力してください
+sync-wrong-passphrase = 同期パスフレーズが違います
+sync-last-failed = 失敗：{ $error }
+sync-done = 設定の同期 — { $summary }
+sync-failed = 設定の同期に失敗しました：{ $error }
+
+## Password vault
+
+cred-sync-passphrase = 設定の同期パスフレーズ
+cred-login-password = ログインパスワード
+cred-sudo-password = sudo パスワード
+cred-proxy-password = プロキシパスワード
+cred-key-passphrase = { $file } のパスフレーズ
+cred-key-unused = 鍵のパスフレーズ — { $path }（どのホストでも未使用）
+cred-host-deleted = 未使用（ホストは削除済み）
+strength-too-short = 短すぎます — 8 文字以上にしてください
+strength-strong-passphrase = 強力なパスフレーズ
+strength-weak = 弱い — 長いほど安全です（複数の単語がおすすめ）
+strength-fair = 普通
+strength-strong = 強い
+vault-locked-error = 保管庫はロックされています
+vault-current-wrong = 現在のマスターパスワードが違います。
+vault-current-master = 現在のマスターパスワード
+vault-master = マスターパスワード
+vault-new-master = 新しいマスターパスワード
+vault-repeat = もう一度入力
+vault-enter-password = パスワードを入力してください。
+vault-too-weak = 8 文字以上にしてください — 関連のない単語をいくつか並べるのがおすすめです。
+vault-mismatch = パスワードが一致しません。
+vault-wrong-master = マスターパスワードが違います。
+vault-strength-empty = 8 文字以上。関連のない単語をいくつか並べるのがおすすめです。
+vault-never-stored = マスターパスワードはどこにも保存されません。忘れると、保存済みのパスワードは復元できません。
+vault-unlocking = ロックを解除しています…
+vault-encrypting = 暗号化しています…
+vault-path = 保管庫：{ $path }（hostwick コマンドと共通）
+vault-title-unlock = 保存済みパスワードのロック解除
+vault-title-create = パスワード保管庫の作成
+vault-title-change = マスターパスワードの変更
+vault-not-now = 後で
+vault-unlock = ロック解除
+vault-create = 保管庫を作成
+vault-change = 変更
+
+## Host editor
+
+form-forward-needs-spec = `{ $token }` にはポートの指定が必要です
+form-jump-invalid = 踏み台ホスト `{ $host }`：{ $error }
+form-port-invalid = { $field } は 1 から 65535 までの数値にしてください
+form-baud-invalid = 速度（ボー）は 9600 や 115200 のような数値にしてください
+form-bits-invalid = データビットは 5–8、ストップビットは 1 または 2 にしてください
+host-section-general = 全般
+host-section-auth = 認証
+host-section-connection = 接続
+host-section-terminal = ターミナル
+host-section-files = ファイル
+host-section-advanced = 詳細
+host-folder-placeholder = prod/web（任意）
+host-host-placeholder = 10.0.0.5 または host.example.com
+host-user-placeholder = deploy（空欄 = ローカルのユーザー名）
+host-keepalive-placeholder = 秒、0 = オフ
+host-optional-placeholder = 任意
+host-x11-placeholder-windows = 空欄 = localhost:0（VcXsrv、Xming）
+host-x11-placeholder = 空欄 = $DISPLAY
+host-script-example = 例：
+host-snippets-empty = このホストのスニペットはありません。共通のスニペットは「設定 → スニペット」にあります。
+host-log-placeholder = 空欄 = オフ、例：&S-&Y&M&D-&T.log
+host-sftp-server-placeholder = 空欄 = 自動検出（/usr/lib/openssh/sftp-server など）
+host-error-no-device = シリアルポート（デバイス）を選択してください
+host-error-no-host = ホスト名またはアドレスを入力してください
+host-error-no-auth = ログイン方法を 1 つ以上選択してください
+host-error-forwards = ポート転送：{ $error }
+host-error-keepalive = キープアライブは秒単位（0 から 3600）で指定してください
+host-error-proxy-host = プロキシのホスト名を入力してください
+host-error-x11 = X11 ディスプレイ：{ $error }
+host-error-script = ログインスクリプト、{ $error }
+host-saved-forget-pending = 保存時に削除されます：{ $what }
+host-saved-locked = 保管庫に保存済み（ロック中）：{ $what }
+host-saved = 保管庫に保存済み：{ $what }
+host-saved-missing = 保管庫にないため、接続時に確認します：{ $what }
+host-saved-keep = 残す
+host-saved-forget = 削除
+host-what-password = パスワード
+host-what-key-passphrase = 鍵のパスフレーズ
+host-what-proxy-password = プロキシパスワード
+host-what-sudo-password = sudo パスワード
+host-pick-key = 秘密鍵（OpenSSH または .ppk）
+host-name = 名前
+host-folder = フォルダー
+host-protocol = プロトコル
+host-host = ホスト
+host-port = ポート
+host-user = ユーザー
+host-notes = メモ
+host-telnet-hint = Telnet はすべてを暗号化せずに送信します。信頼できるネットワーク上のネットワーク機器にのみ使用してください。ユーザー名はサーバーに求められたときに送信されます。
+host-ports-looking = 検索しています…
+host-ports-none = ポートが見つかりません
+host-ports-count = ポート（{ $count }）
+host-ports-none-menu = シリアルポートが見つかりません — デバイス名を入力してください
+host-device = ポート（デバイス）
+host-ports-refresh = シリアルポートを再検索
+host-device-hint-windows = COM3、COM4… 選択するか名前を入力してください。
+host-device-hint = /dev/ttyUSB0、/dev/ttyACM0、/dev/serial/by-id/… 選択するかパスを入力してください。
+host-baud = 速度（ボー）
+host-data-bits = データビット
+host-parity = パリティ
+host-parity-none = なし
+host-parity-odd = 奇数
+host-parity-even = 偶数
+host-stop-bits = ストップビット
+host-flow = フロー制御
+host-flow-none = なし
+host-serial-none-linux = ポートが見つかりません。USB アダプターは /dev/ttyUSB* として表示されます。dialout グループへの参加が必要な場合があります。
+host-serial-hint = ほとんどのコンソールは 9600 8N1 または 115200 8N1、フロー制御なしです。
+host-auth-not-ssh = Telnet とシリアル接続はターミナル内でログインします。ログインスクリプト（ターミナル）で自動化できます。
+host-key-files = 鍵ファイル
+host-keys-hint = OpenSSH または PuTTY の .ppk 鍵をカンマ区切りで指定します。鍵の隣にある証明書（id_ed25519-cert.pub）は自動的に使用されます。セキュリティキー（sk-…）はエージェント経由で使用します。
+host-auth-agent = SSH エージェントの鍵（Pageant、ssh-agent、1Password…）
+host-auth-password = パスワード
+host-auth-remember-hint = パスワードを求められたときに「パスワードを記憶」を選ぶと、次回から自動でログインします。
+host-auth-kbd = キーボードインタラクティブ（ワンタイムコード、MFA）
+host-auth-kerberos = Kerberos（シングルサインオン）
+host-auth-kerberos-forward = Kerberos チケットをサーバーに転送する
+host-auth-kerberos-hint-windows = Windows のドメインログオンを使用します。
+host-auth-kerberos-hint = kinit で取得したチケットを使用します（klist を参照）。チケットがない場合は次の方法を試します。
+host-auth-order = 試行順：Kerberos、エージェント、鍵ファイル、パスワード、キーボードインタラクティブ。
+host-connection-serial = シリアルはローカルデバイスです。プロキシ、踏み台、転送はありません。
+host-proxy = プロキシ
+host-proxy-none = なし
+host-proxy-host-port = プロキシのホスト / ポート
+host-proxy-port = プロキシのポート
+host-proxy-user = プロキシのユーザー
+host-proxy-password-hint = プロキシパスワードは接続時に確認します（「記憶」を選ぶと保存されます）。
+host-jump-hosts = 踏み台ホスト
+host-jump-hint = カンマ区切り、外側から順に（ssh -J と同じ）。
+host-forwards = ポート転送
+host-forwards-hint = L = ローカル → リモート、R = リモート → ローカル、D = SOCKS プロキシ。ターミナルと一緒に開始します。
+host-keepalive = キープアライブ（秒）
+host-agent-forwarding = SSH エージェントを転送する（サーバー上の git で自分の鍵を使う）
+host-agent-forwarding-hint = 信頼できるサーバーでのみ使用してください。接続中、そのサーバーの管理者はあなたの鍵を使用できます。
+host-x11 = X11 を転送する（リモートのグラフィカルアプリをここに表示）
+host-x11-display = X ディスプレイ
+host-x11-hint-windows = VcXsrv や Xming などの X サーバーを起動しておく必要があります。
+host-x11-hint-macos = XQuartz が必要です。
+host-x11-hint = デスクトップの X サーバー（または XWayland）を使用します。
+host-terminal-type = ターミナルの種類
+host-login-script = ログインスクリプト
+host-login-script-hint = ログイン後に入力するコマンドを 1 行に 1 つ。@wait テキスト でその出力を待ち（10 秒）、@wait 30000 テキスト でより長く待ち、@sleep 500 で一時停止します。# で始まる行はコメントです。
+host-shell-integration = シェル統合（bash、zsh）
+host-shell-integration-hint = ファイルブラウザーがターミナルのフォルダーに追従します（右クリック → ここでファイルを開く）。シェル起動時にプロンプトフックを目立たないように追加します。サーバーには何もインストールしません。
+host-snippets-title = このホストのスニペット
+host-session-log = セッションログ
+host-session-log-hint = トークン：&S セッション、&H ホスト、&P ポート、&U ユーザー、&Y&M&D 日付、&T 時刻。相対パスはログフォルダーに保存されます。
+host-raw-log = 生の出力を記録する（エスケープシーケンスを含む）
+host-files-not-ssh = ファイルブラウザーには SSH が必要です。
+host-file-protocol = ファイルプロトコル
+host-file-protocol-auto = 自動
+host-file-protocol-hint = 「自動」は SFTP を使用し、サーバーが対応していない場合（ルーター、ESXi、busybox）は SCP を使用します。
+host-sudo = ファイルブラウザーを root として開く（sudo）
+host-sudo-user = 実行ユーザー
+host-sudo-hint = パスワードなしの sudo と sudo パスワード（確認または保存済み）に対応します。ブラウザーの「root で開き直す」でいつでも切り替えられます。
+host-legacy = 古い機器のために古いアルゴリズムを許可する（ssh-rsa/SHA-1、古い鍵交換）
+host-legacy-hint = それらを必要とする古いスイッチ、ルーター、機器にのみ使用してください。
+host-id = ホスト ID：{ $id }
+host-title-edit = ホストの編集
+host-title-new = 新しいホスト
+loading = 読み込んでいます…
+
+## Settings
+
+settings-title = 設定
+settings-section-appearance = 外観
+settings-section-terminal = ターミナル
+settings-section-snippets = スニペット
+settings-section-connections = 接続
+settings-section-files = ファイル
+settings-section-logging = セッションログ
+settings-section-passwords = 保存済みパスワード
+settings-section-sync = 設定の同期
+settings-section-diagnostics = 診断
+settings-language = 言語
+settings-language-system = システムに従う（{ $language }）
+settings-language-hint = 保存するとすぐに適用されます。開いているダイアログは、開き直すまで元の言語のままです。
+settings-theme = テーマ
+settings-theme-dark = ダーク
+settings-theme-light = ライト
+settings-terminal-font = ターミナルのフォント
+settings-font-size = フォントサイズ
+settings-font-placeholder = 空欄 = システムの等幅フォント
+settings-font-hint = 保存すると、フォントの変更は開いているターミナルにも適用されます。
+settings-editor-placeholder = 空欄 = システムの既定のアプリ（例：code -w { "{file}" }）
+settings-auto-lock-placeholder = 0 = Hostwick を終了するまでロックしない
+settings-sync-folder-placeholder = OneDrive、Dropbox、iCloud Drive または git のフォルダー
+settings-sync-pass-saved = 保管庫に保存済み — 変更するには入力してください
+settings-sync-pass-placeholder = すべてのコンピューターで同じパスフレーズ
+settings-snippets-empty = スニペットはまだありません。スニペットは各ターミナルの上にボタンとして、また「右クリック → スニペット」に表示されます。
+settings-remove-failed = 削除できませんでした：{ $error }
+settings-error-font-size = ターミナル → フォントサイズは 6 から 48 までの数値にしてください
+settings-error-scrollback = ターミナル → スクロールバック行数は 100 から 1000000 までの整数にしてください
+settings-error-auto-lock = 保存済みパスワード → ロックまでの時間は分単位（0 から 1440）で指定してください
+settings-error-rules = ターミナル → { $error }
+settings-error-sync-folder = 設定の同期 → フォルダー { $folder } が存在しません
+settings-folder-missing = フォルダー { $folder } が存在しません。
+settings-sync-pass-short = 同期パスフレーズは 8 文字以上にしてください。
+settings-sync-pass-save-failed = パスフレーズを保存できませんでした：{ $error }
+vault-reason-sync-passphrase = 同期パスフレーズはパスワード保管庫に保存されます。
+settings-save-failed = 設定を保存できませんでした：{ $error }
+settings-scrollback = スクロールバック行数
+settings-right-click = 右クリック
+settings-right-click-menu = メニューを表示
+settings-right-click-paste = 貼り付け（PuTTY）
+settings-copy-on-select = 選択したテキストを自動でコピー
+settings-mouse = マウスのクリックとスクロールをプログラムに送る（htop、mc、vim）
+settings-mouse-hint = プログラムがマウスを使っているときは、Shift を押しながらテキストを選択します。
+settings-button-bar = ターミナルの上にスニペットのボタンバーを表示
+settings-highlighting = キーワードの強調表示
+settings-highlighting-hint = 画面上で一致したテキストに色を付けます。ルールが重なった場合は、上のルールが優先されます。
+settings-snippets-hint = すべてのターミナルで使用できます。ホストごとのスニペットは「ホストの編集 → ターミナル」で追加できます。
+settings-auto-reconnect = 接続が切れたら自動で再接続する
+settings-auto-reconnect-hint = SSH と Telnet：1、2、5、10 秒後、その後は 30 秒ごとに再試行し、スクロールバックは保持します。exit の後や、ログインまたはホスト鍵の失敗後には再接続しません。
+settings-restore-tabs = Hostwick の起動時にタブを開き直す
+settings-restore-tabs-hint = 分割されたペインとそのサイズも含みます。タブは最初に切り替えたときに接続します。
+settings-editor = 外部エディター
+settings-editor-pick = エディターのプログラム
+settings-editor-hint = 「編集」（F4）で使用します。{ "{file}" } はファイルのパスに置き換えられます。指定がない場合はパスが末尾に追加されます。エディターに待機オプションがあれば使用してください（code -w、subl -w）。
+settings-log-all = すべてのセッションをファイルに記録
+settings-log-folder = ログフォルダー
+settings-log-content = ログの内容
+settings-log-printable = 表示可能なテキスト
+settings-log-raw = 生データ（エスケープシーケンスを含む）
+settings-log-hint = ホスト固有のセッションログ設定（ホストの編集 → ターミナル）が優先されます。
+settings-log-level = アプリのログレベル
+settings-open-log-folder = ログフォルダーを開く
+settings-data-folder = データフォルダー：{ $path }
+settings-vault-none = 保管庫はまだありません。Hostwick がパスワードを求めたときに「記憶」を選ぶか、今すぐ作成してください。
+settings-vault-locked = ロック中です。ロックを解除するまで、保存済みのパスワードは使用されません。
+settings-vault-unlocked = このセッションではロックが解除されています。
+settings-vault-unlock = ロック解除…
+settings-vault-create = 保管庫を作成…
+settings-vault-lock = 今すぐロック
+settings-vault-change = マスターパスワードを変更…
+settings-vault-empty = まだ何も保存されていません。
+settings-vault-remove = 削除
+settings-auto-lock = ロックまでの時間（分）
+settings-auto-lock-hint = 何分間操作がなければ保存済みパスワードを再びロックするか。0 にすると Hostwick を終了するまでロックしません。
+settings-vault-file = Argon2id + XChaCha20-Poly1305 で暗号化され、{ $path } にあります — `hostwick vault` と同じ保管庫です。同期はされません。
+settings-sync-never = このコンピューターはまだ同期していません。
+settings-sync-intro = ホストと設定は、クラウドドライブや git で同期されるフォルダー内の 1 つの暗号化ファイルに保存されます。保存済みパスワードがこのコンピューターから出ることはありません。
+settings-sync-folder = フォルダー
+settings-sync-folder-pick = 同期フォルダー
+settings-sync-passphrase = パスフレーズ
+settings-sync-passphrase-hint = パスワード保管庫に保存されます。すべてのコンピューターで同じものを使用してください。
+settings-sync-auto = 起動時、変更後、および 5 分ごとに同期
+settings-sync-now = 今すぐ同期
+settings-sync-push = 同期ファイルを置き換える
+settings-sync-push-tooltip = 同期ファイルをこのコンピューターに合わせます（パスフレーズも変更されます）
+settings-sync-pull = このコンピューターの設定を置き換える
+settings-sync-pull-tooltip = このコンピューターのホストと設定を同期ファイルに合わせます
+settings-sync-last = 前回の同期
+
+## Snippet and highlight-rule editors
+
+snippet-label-placeholder = ボタンのラベル
+snippet-text-placeholder = 送信するテキスト（複数行は 1 回の貼り付けとして送信）
+snippet-press-enter = Enter を押す
+snippet-move-up = 上へ移動
+snippet-move-down = 下へ移動
+editor-remove = 削除
+snippet-add = スニペットを追加
+rule-error-empty = パターンが空です
+rule-error-color = 色は #ff8800 のような形式で指定してください（`{ $color }` は無効です）
+rule-error-regex = 正規表現が無効です
+rule-pattern-placeholder = 単語または正規表現
+rule-error = 強調表示 `{ $pattern }`：{ $error }
+rule-enabled = 有効
+rule-regex-on = 正規表現（クリックで通常の単語に変更）
+rule-regex-off = 通常の単語、大文字小文字を区別しない（クリックで正規表現に変更）
+rule-add = ルールを追加
+rule-defaults = 既定に戻す
+
+## Terminal
+
+script-timeout = 「{ $text }」を{ $after }待ちましたが、表示されませんでした
+script-session-ended = 先にセッションが終了しました
+search-too-complex = パターンが複雑すぎます
+term-exit-status = 終了しました（ステータス { $code }）
+term-exit-signal = シグナル { $signal } で終了しました
+term-connection-lost = 接続が切れました
+term-connection-closed = 接続が閉じられました
+term-reconnected-marker = { $time } に再接続しました
+term-reconnect-failed = 再接続に失敗しました：{ $error }
+term-break-failed = Break を送信できませんでした
+term-no-break = { $protocol } セッションには Break シグナルがありません
+term-script-not-run = ログインスクリプトは実行されませんでした：{ $error }
+term-script-stopped = スクリプトを停止しました：{ $error }
+search-placeholder = スクロールバックを検索
+search-no-results = 結果なし
+search-position = { $index } / { $total }
+search-matches = { $count } 件一致
+search-match-case = 大文字と小文字を区別
+search-regex = 正規表現
+search-older = 前の（古い）一致 — Enter、F3
+search-newer = 次の（新しい）一致 — Shift+Enter、Shift+F3
+search-close = 閉じる（Esc）
+term-reconnect-in = 接続が切れました{ $reason }。{ $seconds } 秒後に再接続します…
+term-reconnect-attempt = 再接続しています（{ $attempt } 回目）…
+term-log-badge = ログ
+term-reconnect-now = 今すぐ
+term-session-ended = セッションが終了しました — { $reason }。Enter で再接続します。
+term-menu-copy = コピー
+term-menu-paste = 貼り付け
+term-menu-select-all = すべて選択
+term-menu-find = 検索…
+term-menu-snippets = スニペット
+term-menu-copy-folder = 現在のフォルダーをコピー
+term-menu-stop-script = スクリプトを停止
+term-menu-clear = スクロールバックを消去
+term-menu-stop-log = セッションログを停止
+term-menu-start-log = セッションをファイルに記録…
+term-menu-files-here = ここでファイルを開く
+term-menu-duplicate = セッションを複製
+term-menu-reconnect-ended = 再接続（セッション終了）
+
+## File browser
+
+files-move = 移動
+files-upload = アップロード
+files-download = ダウンロード
+files-move-confirm = { $count ->
+    [1] 「{ $name }」を { $dir } に移動しますか？
+   *[other] { $count } 個の項目を { $dir } に移動しますか？
+}
+files-upload-confirm = { $count ->
+    [1] 「{ $name }」を { $dir } にアップロードしますか？
+   *[other] { $count } 個の項目を { $dir } にアップロードしますか？
+}
+files-download-confirm = { $count ->
+    [1] 「{ $name }」を { $dir } にダウンロードしますか？
+   *[other] { $count } 個の項目を { $dir } にダウンロードしますか？
+}
+files-same-place = { $name }：コピー元とコピー先が同じです
+files-not-removed = { $name }：コピーしましたが削除できませんでした：{ $error }
+files-pick-download = ここにダウンロード
+files-exists = 「{ $name }」は既に存在します
+files-delete-title = 削除
+files-delete-folder-confirm = フォルダー「{ $name }」とその中身をすべて完全に削除しますか？
+files-delete-file-confirm = ファイル「{ $name }」を完全に削除しますか？
+files-delete-many-confirm = { $count } 個の項目（フォルダーはその中身ごと）を完全に削除しますか？
+files-name-invalid = 「/」を含まない名前を入力してください
+files-new-folder = 新しいフォルダー
+files-create = 作成
+files-folder-name = フォルダー名
+files-rename = 名前の変更
+files-new-name = 新しい名前
+files-new-symlink = 新しいシンボリックリンク
+files-symlink-placeholder = ターゲット -> リンク名
+files-symlink-format = 「ターゲット -> リンク名」の形式で入力してください
+files-symlink-empty = ターゲットが空です
+edit-conflict-title = サーバー上で変更されています
+edit-conflict-body = 「{ $name }」は開いた後にサーバー上で変更されました。保存したバージョンをどうしますか？
+edit-conflict-later = 後で決める
+edit-conflict-theirs = サーバーの版をダウンロード
+edit-conflict-copy = コピーとして保存
+edit-conflict-overwrite = 上書き
+edit-editor-failed = エディター「{ $program }」を起動できませんでした：{ $error }
+keep-up-to-date = 最新の状態です
+keep-synced = { $count } 個のファイルを同期、{ $size }
+keep-failed = { $count } 件失敗
+keep-error = エラー（再試行中）：{ $error }
+keep-starting = 開始しています…
+keep-status = { $local } → { $remote } を最新に保っています：{ $status }
+edits = 編集
+edits-busy = 編集（{ $count }）：{ $status }
+edits-tooltip = エディターで開いているファイル。保存すると自動でアップロードされます
+edits-stop = 監視を停止
+edits-stop-all = すべての監視を停止
+files-hide-local = ローカルを隠す
+files-show-local = ローカルを表示
+files-local-tooltip = このコンピューターのファイルを表示または非表示
+files-upload-pick = アップロード…
+files-synchronize = 同期…
+files-synchronize-tooltip = フォルダーを比較し、変更内容を確認してから実行します
+files-keep-stop = 最新に保つのを停止
+files-keep = 最新に保つ…
+files-keep-tooltip = ローカルフォルダーの変更をリモートフォルダーに自動でアップロードします
+files-following = ターミナルに追従中
+files-follow = ターミナルに追従
+files-follow-tooltip = ターミナル「{ $terminal }」の現在のフォルダーを表示し、移動に合わせて追従します
+files-root-switching = 切り替えています…
+files-root-on = root：オン
+files-root-reopen = root で開き直す
+files-root-tooltip = sudo を使って root（またはホストの sudo ユーザー）としてサーバーを閲覧します
+files-path-placeholder = /パス
+files-this-computer = このコンピューター
+files-selected-of = { $count } 個中 { $selected } 個を選択（{ $size }）
+files-item-count = { $count } 個の項目
+files-selected = { $count } 個の項目
+files-root-badge = ROOT
+files-up-tooltip = 上へ（Backspace）
+files-refresh-tooltip = 更新（Ctrl+R）
+files-mkdir-tooltip = 新しいフォルダー（F7）
+files-col-name = 名前
+files-col-size = サイズ
+files-col-modified = 更新日時
+files-col-mode = 権限
+files-download-pick = ダウンロード…
+files-menu-open = 開く
+files-menu-edit = 編集
+files-menu-move = 反対側へ移動
+files-menu-rename = 名前の変更…
+files-menu-new-folder = 新しいフォルダー…
+files-menu-new-symlink = 新しいシンボリックリンク…
+files-menu-copy-path = パスをコピー
+files-menu-refresh = 更新
+files-menu-properties = プロパティ
+edit-status-downloading = ダウンロードしています…
+edit-status-watching = 監視中
+edit-status-uploading = アップロードしています…
+edit-status-uploaded = { $time } にアップロードしました
+edit-status-conflict = サーバー上で変更されています — 操作を待っています
+edit-status-error = エラー：{ $error }
+edit-gone = { $path }：存在しなくなりました
+edit-is-folder = { $path } はフォルダーです
+edit-missing-after-upload = { $path }：アップロード後に見つかりません
+edit-size-mismatch = { $path }：{ $uploaded } バイトをアップロードしましたが、サーバー上は { $server } バイトです
+edit-no-copy-name = コピーに使える名前がありません
+
+## File properties
+
+props-title = プロパティ
+props-applying = 適用しています…
+props-apply = 適用
+props-calculating = 計算しています…
+props-error = エラー：{ $error }
+props-usage = { $size }（{ $bytes } バイト）、ファイル { $files } 個、フォルダー { $folders } 個
+props-usage-partial = （途中で停止：項目が多すぎます）
+props-bad-id = 「{ $id }」は数値 ID ではありません
+props-bad-octal = 権限は 0644 のような 8 進数で指定してください
+props-kind-folder = フォルダー
+props-kind-file = ファイル
+props-kind-symlink = シンボリックリンク → { $target }
+props-kind-special = 特殊ファイル
+props-unknown-name = （不明な名前）
+props-not-reported = サーバーから提供されていません
+props-read = 読み取り
+props-write = 書き込み
+props-execute = 実行
+props-owner = 所有者
+props-group = グループ
+props-others = その他
+props-special = 特殊
+props-octal = 8 進数
+props-calculate = 計算
+props-size = { $size }（{ $bytes } バイト）
+props-location = 場所
+props-type = 種類
+props-checksum = チェックサム
+props-unknown = 不明
+props-permissions = 権限
+props-recursive = 中身すべてに適用する（ファイルは実行ビットを保持）
+
+## Synchronize dialog
+
+files-synchronize-title = 同期
+sync-keep = リモートを最新に保つ
+sync-keep-tooltip = ローカルフォルダーを監視し、すべての変更をアップロードします（ローカル → リモートのみ）
+sync-comparing = 比較しています…
+sync-preview = プレビュー
+sync-run-checked = 選択した項目を同期
+sync-exclude-placeholder = 例：.git、*.tmp、node_modules
+sync-choose-folders = 両方のフォルダーを選択してください
+sync-use-local = ローカルを使用
+sync-use-remote = リモートを使用
+sync-total-uploads = アップロード { $count } 件、{ $size }
+sync-total-downloads = ダウンロード { $count } 件、{ $size }
+sync-total-deletions = 削除 { $count } 件
+sync-total-conflicts = 競合 { $count } 件 — どちらかを選ぶか、そのままにしてください
+sync-in-sync = フォルダーは既に同期されています。
+sync-checked = 選択済み：{ $items }
+sync-local-folder = ローカルフォルダー
+sync-remote-folder = リモートフォルダー
+sync-direction = 方向
+sync-dir-up = ローカル → リモート
+sync-dir-down = リモート → ローカル
+sync-dir-both = 双方向（新しい方を優先）
+sync-mirror = コピー元にないファイルを削除する（ミラー）
+sync-exclude = 除外
+sync-comparing-folders = フォルダーを比較しています…
+sync-result = 同期：{ $summary }
+sync-running = 同期しています…
+sync-run-failed = 同期に失敗しました：{ $error }
+sync-kind-upload = アップロード
+sync-kind-download = ダウンロード
+sync-kind-delete-local = ローカルを削除
+sync-kind-delete-remote = リモートを削除
+sync-kind-conflict = 競合
+sync-kind-skip = スキップ
+sync-reason-new = 新規
+sync-reason-newer = より新しい
+sync-reason-size = サイズが異なる
+sync-reason-differs = 内容が異なる
+sync-reason-not-in-source = コピー元にない
+sync-reason-both-changed = 両方で変更（同時刻、サイズが異なる）
+sync-reason-unknown = 比較できません（タイムスタンプなし）
+sync-reason-destination-newer = コピー先の方が新しい
+sync-reason-new-folder = 新しいフォルダー
+sync-report-uploaded = { $count } 件アップロード
+sync-report-downloaded = { $count } 件ダウンロード
+sync-report-deleted = { $count } 件削除
+sync-report-folders = フォルダーを { $count } 個作成
+sync-report-failed = { $count } 件失敗
+sync-report-nothing = 何もする必要はありません
+
+## Key tools
+
+keyformat-openssh-hint = OpenSSH、Hostwick、Git、ほとんどのツールで使えます（.pub ファイルも書き出します）。
+keyformat-ppk3-hint = PuTTY 0.75 以降と WinSCP 用（Argon2 で保護）。
+keyformat-ppk2-hint = 古い PuTTY、WinSCP、FileZilla 用。
+key-fingerprint = フィンガープリント：{ $fingerprint }
+keygen-title = 鍵の生成
+keygen-generate = 生成
+keygen-passphrase-placeholder = パスフレーズ（推奨。空欄 = なし）
+keygen-repeat = もう一度入力
+keygen-mismatch = パスフレーズが一致しません。
+keygen-no-path = 鍵の保存先を選択してください。
+keygen-exists = { $path } は既に存在します。別の名前にするか、「上書き」を選択してください。
+keygen-used-in-host = { $name } は今後 { $path } でログインします。公開鍵をサーバーの ~/.ssh/authorized_keys に追加してください。
+keygen-ed25519-recommended = Ed25519（推奨）
+keygen-saved = { $file }（秘密鍵）と { $file }.pub を { $dir } に保存しました
+keygen-public-key = 公開鍵（~/.ssh/authorized_keys 用）：
+keygen-copy-public = 公開鍵をコピー
+keygen-use-in-host = ホストで使用…
+keygen-type = 種類
+keygen-comment = コメント
+keygen-format = 形式
+keygen-save-as = 保存先
+keygen-overwrite = 既存のファイルを上書きする
+keygen-generating-rsa = 生成しています… RSA 4096 は数秒かかることがあります。
+keygen-generating = 生成しています…
+keyconv-title = 鍵の確認・変換
+keyconv-path-placeholder = ~/.ssh/id_ed25519 または C:\keys\work.ppk
+keyconv-current-placeholder = 現在のパスフレーズ（ある場合）
+keyconv-new-placeholder = 新しいパスフレーズ（空欄 = なし）
+keyconv-repeat-placeholder = 新しいパスフレーズをもう一度
+keyconv-output = 出力ファイル
+keyconv-mismatch = 新しいパスフレーズが一致しません。
+keyconv-pass-changed = パスフレーズを変更しました（{ $format }）。
+keyconv-pass-removed = パスフレーズを削除しました（{ $format }）。
+keyconv-wrote = { $path } に書き出しました（{ $format }）。
+keyconv-needs-passphrase = この鍵にはパスフレーズがあります。「現在のパスフレーズ」に入力してください。
+keyconv-wrong-passphrase = パスフレーズが違います。
+keyconv-exists = { $path } は既に存在します。別の出力ファイルを選択してください。
+keyconv-key-file = 鍵ファイル
+keyconv-type-bits = { $kind } { $bits } ビット（{ $algorithm }）
+keyconv-protected = 保護
+keyconv-public-only = 公開鍵のみ
+keyconv-encrypted = はい、パスフレーズあり
+keyconv-no-passphrase = パスフレーズなし
+keyconv-fingerprint = フィンガープリント
+keyconv-inspect = 確認
+keyconv-current = 現在
+keyconv-new = 新しいパスフレーズ
+keyconv-change = パスフレーズを変更
+keyconv-convert-to = 変換先
+keyconv-convert = 変換
+keyconv-keeps-passphrase = 新しいパスフレーズを入力しない限り、現在のパスフレーズを保持します。
+keyconv-working = 処理しています…
+kh-title = 既知のホスト
+kh-search-placeholder = ホスト、鍵の種類、フィンガープリントで検索
+kh-forget-placeholder = ホスト または ホスト:ポート
+kh-nothing-matched = 一致するものがありません。ファイルは変更されていません。
+kh-removed = { $count } 個の鍵を削除しました。
+kh-type-host = ホスト名または ホスト:ポート を入力してください。
+kh-col-line = 行
+kh-col-hosts = ホスト
+kh-empty = 既知のホストはまだありません。サーバーを信頼すると鍵が追加されます。
+kh-no-match = 検索に一致するものがありません。
+kh-reload = 再読み込み
+kh-remove-selected = 選択項目を削除（{ $count }）
+kh-forget-host = ホストを削除
+kh-forget-button = そのホストの鍵をすべて削除
+kh-footer = { $path } — { $total } 件中 { $shown } 件を表示。名前でホストを削除すると、ハッシュ化された名前にも一致します。
+files-opening-root = root としてファイルを開いています
+files-opening = ファイルブラウザーを開いています
+
+## Keyboard and screen readers
+
+sidebar-vault-lock = 保存済みパスワードをロック
+sidebar-quick-connect = クイック接続（user@host:port、Enter）
+sidebar-hosts-label = 保存済みのホスト
+sidebar-hosts-keys = 矢印キーでホストを選択します。Enter でターミナル、Shift+Enter でファイル、F2 で編集、Delete で削除、Shift+F10 でメニューを開きます。
+tabs-label = 開いているセッション
+tabs-keys = 左右の矢印キーでタブを切り替えます。Enter でタブに入り、Delete で閉じ、Shift+F10 でメニューを開きます。Ctrl+F6 でホスト一覧、タブ、セッションの間を移動します。
+tab-state-not-connected = 未接続
+tab-state-connected = 接続済み
+tab-state-disconnected = 切断
+tab-spoken = { $title }、{ $state }、タブ { $count } 個中 { $index } 番目
+tab-close = { $title } を閉じる
+pane-divider = ペインの区切り
+
+## Proxy test
+
+vault-reason-proxy-test = 保存済みのプロキシパスワードを使うには、保存済みパスワードのロックを解除してください。
+proxy-test-closed = プロキシには接続できましたが、{ $target } がすぐに接続を閉じました。
+proxy-test-ok-ssh = プロキシ経由で { $target } に接続しました。サーバーの応答：{ $server }
+proxy-test-ok = プロキシ経由で { $target } に接続しました（SSH サーバーではありません）。
+proxy-test-ok-quiet = プロキシ経由で { $target } に接続しました（サーバーからはまだ何も送られていません）。
+proxy-test-read-failed = プロキシ経由で { $target } に接続しましたが、その後：{ $error }
+host-proxy-test = 接続をテスト
+host-proxy-testing = テストしています…
+host-proxy-test-tooltip = プロキシ経由でこのホストのポート（踏み台ホストがあれば最初の踏み台）に接続し、結果を報告します
+host-baud-common = よく使う速度
+dismiss = 閉じる
+term-no-output = まだ出力はありません。
+term-text-view-title = ターミナルの出力：{ $title }
+term-text-view-hint = 全 { $lines } 行。矢印キーで読み、Esc でターミナルに戻ります。
+term-a11y-label = ターミナル：{ $title }
+term-a11y-keys = 新しい出力は落ち着いた時点で読み上げられます。{ $read } で最新の出力をもう一度読み上げ、{ $view } ですべての出力をテキストで表示します。Ctrl+F6 でターミナルから移動します。
+term-menu-read-output = 最新の出力を読み上げる
+term-menu-text-view = 出力をテキストで表示…
+files-path-label = フォルダー：{ $side }
+files-list-label = { $side }：{ $dir }
+files-list-keys = 矢印キーで移動、Shift+矢印キーで選択範囲を拡大、Space で行を選択に追加または解除、Enter で開く、Backspace で上へ、F5 で反対側へコピー、F6 で移動、F2 で名前変更、Delete で削除、Alt+Enter でプロパティ、Tab で左右を切り替え、Shift+F10 でメニュー。
+files-kind-link = リンク
+a11y-sections = セクション
+a11y-section-problem = { $section }（要確認）
+kh-row-label = { $line } 行目：{ $hosts }
+rule-color = 色（#rrggbb）
+toast-info = 情報
+toast-success = 完了
+toast-warning = 警告
+toast-error = エラー
+toast-close = 通知を閉じる

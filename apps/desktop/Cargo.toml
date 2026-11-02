@@ -44,6 +44,12 @@ uuid.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 tracing-appender = "0.2"
 regex = "1"
+# Translations: Fluent messages (plurals, named placeholders) per language.
+fluent-bundle = "0.16"
+fluent-syntax = "0.12"
+unic-langid = "0.9"
+# The OS language, for "follow the system" in Settings → Appearance.
+sys-locale = "0.3"
 
 [dev-dependencies]
 tempfile.workspace = true
