@@ -1504,10 +1504,12 @@ impl HostwickApp {
                 };
                 if m.shift {
                     self.resize_focused(dir, cx);
+                    true
                 } else {
-                    self.move_focus(dir, window, cx);
+                    // No pane that way: the key goes to the shell (Alt+←/→
+                    // move by word in zsh/fish).
+                    self.move_focus(dir, window, cx)
                 }
-                true
             }
             "tab" if m.control => {
                 if !self.tabs.is_empty() {
