@@ -71,13 +71,28 @@ pub(crate) async fn copy_file(
     }
 
     let part = format!("{}{PART_SUFFIX}", s.dst_path);
-    let offset = resume_offset(s, &part, total).await?;
+    let mut offset = resume_offset(s, &part, total).await?;
+
+    let mut streams = None;
+    if offset < total || total == 0 {
+        streams = Some(match open_streams(s, &part, offset, total).await {
+            Ok(rw) => rw,
+            // SCP and friends move whole files only: start over.
+            Err(TransferError::Fs(e)) if offset > 0 && e.is_unsupported() => {
+                tracing::info!(
+                    path = s.dst_path,
+                    "cannot resume with this protocol; restarting"
+                );
+                offset = 0;
+                open_streams(s, &part, 0, total).await?
+            }
+            Err(e) => return Err(e),
+        });
+    }
     let mut done = offset;
     progress(done, total);
 
-    if done < total || total == 0 {
-        let mut reader = s.src.open_read(s.src_path, offset).await?;
-        let mut writer = s.dst.open_write(&part, offset).await?;
+    if let Some((mut reader, mut writer)) = streams {
         let mut buf = vec![0u8; CHUNK];
         let mut last_tick = tokio::time::Instant::now();
         loop {
@@ -132,8 +147,20 @@ pub(crate) async fn copy_file(
     })
 }
 
+async fn open_streams(
+    s: &CopySpec<'_>,
+    part: &str,
+    offset: u64,
+    total: u64,
+) -> Result<(hostwick_sftp::BoxRead, hostwick_sftp::BoxWrite), TransferError> {
+    let reader = s.src.open_read(s.src_path, offset).await?;
+    let writer = s.dst.open_write_sized(part, offset, total - offset).await?;
+    Ok((reader, writer))
+}
+
 /// Where to continue from: the length of an existing `.filepart`, if its last
-/// bytes match the source at the same offset; otherwise 0.
+/// bytes match the source at the same offset; otherwise 0 (also when either
+/// side cannot read at an offset).
 async fn resume_offset(s: &CopySpec<'_>, part: &str, total: u64) -> Result<u64, TransferError> {
     let Some(p) = s.dst.stat(part).await? else {
         return Ok(0);
@@ -143,10 +170,14 @@ async fn resume_offset(s: &CopySpec<'_>, part: &str, total: u64) -> Result<u64, 
     }
     let len = p.size.min(VERIFY_TAIL);
     let at = p.size - len;
-    let (a, b) = tokio::try_join!(
+    let (a, b) = match tokio::try_join!(
         s.dst.read_range(part, at, len as usize),
         s.src.read_range(s.src_path, at, len as usize),
-    )?;
+    ) {
+        Ok(ab) => ab,
+        Err(e) if e.is_unsupported() => return Ok(0),
+        Err(e) => return Err(e.into()),
+    };
     if a == b && a.len() as u64 == len {
         tracing::info!(
             path = s.dst_path,

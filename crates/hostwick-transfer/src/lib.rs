@@ -16,12 +16,17 @@
 
 mod copy;
 mod engine;
+mod plan;
 mod rate;
 mod sync;
 mod syncrun;
 
 pub use copy::{ExistingPolicy, PART_SUFFIX};
 pub use engine::{EngineConfig, Job, TransferEngine, TransferEvent, TransferId, TransferState};
+pub use plan::{
+    ActionKind, MTIME_SLACK, PlanItem, PlanOptions, PlanReport, PlanTotals, Reason, SyncDirection,
+    SyncPlan, Tree, build_plan, execute_plan, plan_trees, walk_tree,
+};
 pub use rate::RateLimiter;
 pub use sync::{FileInfo, SyncAction, SyncMode, plan_sync, walk};
 pub use syncrun::{SyncOptions, SyncReport, is_excluded, sync_once, watch};
