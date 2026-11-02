@@ -96,6 +96,109 @@ pub struct ProxySpec {
     pub password_credential: Option<String>,
 }
 
+impl ProxyKind {
+    /// Port used when a proxy URL has none.
+    pub fn default_port(self) -> u16 {
+        match self {
+            Self::Socks5 | Self::Socks4 => 1080,
+            Self::Http => 8080,
+        }
+    }
+
+    fn scheme(self) -> &'static str {
+        match self {
+            Self::Socks5 => "socks5",
+            Self::Socks4 => "socks4",
+            Self::Http => "http",
+        }
+    }
+}
+
+impl ProxySpec {
+    /// Parses `scheme://[user@]host[:port]` with scheme `socks5` (or
+    /// `socks5h`), `socks4` (or `socks4a`) or `http`. IPv6 hosts go in
+    /// brackets. Passwords are not accepted in the URL (they would end up in
+    /// shell history); they come from the vault or a prompt.
+    pub fn parse_url(url: &str) -> Result<Self, String> {
+        let url = url.trim();
+        let (scheme, rest) = url
+            .split_once("://")
+            .ok_or_else(|| format!("expected scheme://host:port, got `{url}`"))?;
+        let kind = match scheme.to_ascii_lowercase().as_str() {
+            "socks5" | "socks5h" | "socks" => ProxyKind::Socks5,
+            "socks4" | "socks4a" => ProxyKind::Socks4,
+            "http" => ProxyKind::Http,
+            other => {
+                return Err(format!(
+                    "unsupported proxy type `{other}` (use socks5, socks4 or http)"
+                ));
+            }
+        };
+        let rest = rest.trim_end_matches('/');
+        let (user, hostport) = match rest.rsplit_once('@') {
+            Some((u, h)) => {
+                if u.contains(':') {
+                    return Err(
+                        "put the proxy password in the vault (or type it when asked), not in the URL"
+                            .into(),
+                    );
+                }
+                (Some(u.to_owned()).filter(|u| !u.is_empty()), h)
+            }
+            None => (None, rest),
+        };
+        let (host, port) = if let Some(after) = hostport.strip_prefix('[') {
+            let (h, tail) = after
+                .split_once(']')
+                .ok_or_else(|| format!("unclosed `[` in `{url}`"))?;
+            let port = match tail.strip_prefix(':') {
+                Some(p) => Some(p),
+                None if tail.is_empty() => None,
+                None => return Err(format!("bad proxy address `{hostport}`")),
+            };
+            (h, port)
+        } else {
+            match hostport.rsplit_once(':') {
+                Some((h, p)) => (h, Some(p)),
+                None => (hostport, None),
+            }
+        };
+        if host.is_empty() || host.contains('/') {
+            return Err(format!("missing or bad proxy host in `{url}`"));
+        }
+        let port = match port {
+            Some(p) => p
+                .parse::<u16>()
+                .ok()
+                .filter(|p| *p != 0)
+                .ok_or_else(|| format!("bad proxy port `{p}`"))?,
+            None => kind.default_port(),
+        };
+        Ok(Self {
+            kind,
+            host: host.to_owned(),
+            port,
+            user,
+            password_credential: None,
+        })
+    }
+
+    /// The inverse of [`ProxySpec::parse_url`] (without any password).
+    pub fn to_url(&self) -> String {
+        let user = self
+            .user
+            .as_deref()
+            .map(|u| format!("{u}@"))
+            .unwrap_or_default();
+        let host = if self.host.contains(':') {
+            format!("[{}]", self.host)
+        } else {
+            self.host.clone()
+        };
+        format!("{}://{user}{host}:{}", self.kind.scheme(), self.port)
+    }
+}
+
 /// Which file protocol the file browser and transfers use.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -108,7 +211,7 @@ pub enum FileProtocol {
 }
 
 /// Run the file server as another user via `sudo` (e.g. root).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SudoOptions {
     /// Open the file browser elevated by default.
@@ -120,17 +223,6 @@ pub struct SudoOptions {
     /// Vault credential id with the sudo password (usually the login
     /// password). None: use the login password if saved, else prompt.
     pub password_credential: Option<String>,
-}
-
-impl Default for SudoOptions {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            user: String::new(),
-            sftp_server: String::new(),
-            password_credential: None,
-        }
-    }
 }
 
 /// A saved piece of text to send to a terminal.
@@ -284,5 +376,34 @@ mod tests {
         );
         assert_eq!(Protocol::Telnet.default_port(), 23);
         assert_eq!(HighlightRule::defaults().len(), 3);
+    }
+
+    #[test]
+    fn proxy_urls_parse() {
+        let p =
+            ProxySpec::parse_url("socks5://alice@10.0.0.1:1081").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(p.kind, ProxyKind::Socks5);
+        assert_eq!(
+            (p.host.as_str(), p.port, p.user.as_deref()),
+            ("10.0.0.1", 1081, Some("alice"))
+        );
+        assert_eq!(p.to_url(), "socks5://alice@10.0.0.1:1081");
+
+        let p = ProxySpec::parse_url("http://proxy.corp").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!((p.kind, p.port, p.user), (ProxyKind::Http, 8080, None));
+
+        let p = ProxySpec::parse_url("socks4a://[::1]:9050/").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            (p.kind, p.host.as_str(), p.port),
+            (ProxyKind::Socks4, "::1", 9050)
+        );
+        assert_eq!(p.to_url(), "socks4://[::1]:9050");
+
+        assert!(ProxySpec::parse_url("socks5h://h").is_ok_and(|p| p.port == 1080));
+        assert!(ProxySpec::parse_url("ftp://h:1").is_err());
+        assert!(ProxySpec::parse_url("h:1080").is_err());
+        assert!(ProxySpec::parse_url("http://u:pw@h:1").is_err_and(|e| e.contains("vault")));
+        assert!(ProxySpec::parse_url("http://h:0").is_err());
+        assert!(ProxySpec::parse_url("http://:80").is_err());
     }
 }
