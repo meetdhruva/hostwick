@@ -1,0 +1,21 @@
+[package]
+name = "hostwick-core"
+description = "Domain types for Hostwick: host profiles, ids, errors. No I/O."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+secrecy.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

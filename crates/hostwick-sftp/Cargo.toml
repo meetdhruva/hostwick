@@ -1,0 +1,31 @@
+[package]
+name = "hostwick-sftp"
+description = "Remote filesystem abstraction (SFTP) for Hostwick."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+hostwick-core.workspace = true
+hostwick-ssh.workspace = true
+russh.workspace = true
+russh-sftp.workspace = true
+tokio.workspace = true
+futures.workspace = true
+bytes.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+tempfile.workspace = true
+blake3.workspace = true
+tracing-subscriber.workspace = true

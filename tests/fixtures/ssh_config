@@ -1,0 +1,14 @@
+Host bastion
+    HostName bastion.example.com
+    User ops
+    IdentityFile ~/.ssh/work_ed25519
+
+Host db-*
+    ProxyJump ops@bastion.example.com
+    LocalForward 5432 localhost:5432
+
+Host db-primary
+    HostName 10.20.0.5
+
+Host *
+    ServerAliveInterval 20

@@ -1,0 +1,24 @@
+[package]
+name = "hostwick-import"
+description = "Importers for Hostwick: OpenSSH config, PuTTY sessions, WinSCP.ini."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+hostwick-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+pretty_assertions = "1"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56"

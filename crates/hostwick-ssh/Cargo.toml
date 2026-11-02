@@ -1,0 +1,31 @@
+[package]
+name = "hostwick-ssh"
+description = "SSH connection actor for Hostwick, built on russh."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+hostwick-core.workspace = true
+russh.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+secrecy.workspace = true
+dirs.workspace = true
+base64.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+anyhow.workspace = true
+tracing-subscriber.workspace = true

@@ -1,0 +1,4 @@
+[toolchain]
+# Pin to an exact release (e.g. "1.97.0") once your CI caches toolchains.
+channel = "stable"
+components = ["rustfmt", "clippy"]

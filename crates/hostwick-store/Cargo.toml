@@ -1,0 +1,25 @@
+[package]
+name = "hostwick-store"
+description = "Profile store for Hostwick (SQLite, migrations, portable mode)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+hostwick-core.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+dirs.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,43 @@
+[package]
+name = "hostwick-cli"
+description = "Hostwick command-line client: shell, exec, file transfer, import."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "hostwick"
+path = "src/main.rs"
+
+[dependencies]
+hostwick-core.workspace = true
+hostwick-ssh.workspace = true
+hostwick-sftp.workspace = true
+hostwick-transfer.workspace = true
+hostwick-vault.workspace = true
+hostwick-store.workspace = true
+hostwick-import.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+secrecy.workspace = true
+futures.workspace = true
+rpassword = "7.5"
+async-trait.workspace = true
+bytes.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_Foundation"] }
+
+[dev-dependencies]
+tempfile.workspace = true
