@@ -14,11 +14,13 @@ pub enum SshError {
     Timeout(Duration, String),
     #[error("host key for {0} was rejected")]
     HostKeyRejected(String),
-    #[error("authentication failed for {user}@{host} (server allows: {allowed})")]
+    #[error("authentication failed for {user}@{host} (server allows: {allowed}). Tried: {tried}")]
     AuthFailed {
         user: String,
         host: String,
         allowed: String,
+        /// What each configured method did, e.g. "key a.ppk: wrong passphrase".
+        tried: String,
     },
     #[error("could not load key {path}: {reason}")]
     Key { path: String, reason: String },

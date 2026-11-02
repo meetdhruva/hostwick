@@ -11,18 +11,20 @@ use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use futures::channel::oneshot;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, Sizable as _, WindowExt as _,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use hostwick_core::{AuthMethod, HostProfile, ProfileId, ProfileStore};
+use hostwick_core::{HostProfile, LogVars, ProfileId, ProfileStore, expand_log_path};
 use hostwick_ssh::{HostKeyDecision, HostKeyStatus};
 use hostwick_transfer::{TransferEvent, TransferId, TransferState};
 
 use crate::backend::{Backend, Prompt, quick_profile};
 use crate::files::FilesView;
+use crate::settings::Settings;
 use crate::terminal::{GridSize, TerminalEvent, TerminalView};
 use crate::util::human_size;
 
@@ -76,6 +78,18 @@ pub struct HostwickApp {
     prompt_open: bool,
     _tasks: Vec<Task<()>>,
     _subs: Vec<Subscription>,
+}
+
+/// The app icon, decoded once and shared.
+fn logo() -> Arc<Image> {
+    static LOGO: std::sync::OnceLock<Arc<Image>> = std::sync::OnceLock::new();
+    LOGO.get_or_init(|| {
+        Arc::new(Image::from_bytes(
+            ImageFormat::Png,
+            include_bytes!("../../../packaging/icons/hostwick.png").to_vec(),
+        ))
+    })
+    .clone()
 }
 
 /// One-shot reply that the dialog's (re-runnable) closures can fire once.
@@ -227,6 +241,7 @@ impl HostwickApp {
         };
         match kind {
             TabKind::Terminal => {
+                let profile_for_log = profile.clone();
                 let job = rt.spawn(backend.clone().open_shell(profile, 120, 32));
                 cx.spawn_in(window, async move |this, cx| {
                     let result = job.await;
@@ -236,8 +251,9 @@ impl HostwickApp {
                                 let view = cx.new(|cx| {
                                     TerminalView::new(title, shell, initial, &rt, window, cx)
                                 });
-                                let sub = cx.subscribe(&view, Self::on_terminal_event);
+                                let sub = cx.subscribe_in(&view, window, Self::on_terminal_event);
                                 app._subs.push(sub);
+                                app.auto_session_log(&profile_for_log, &view, cx);
                                 view.read(cx).focus_handle(cx).focus(window, cx);
                                 TabBody::Terminal(view)
                             }
@@ -291,10 +307,14 @@ impl HostwickApp {
 
     fn on_terminal_event(
         &mut self,
-        source: Entity<TerminalView>,
+        source: &Entity<TerminalView>,
         ev: &TerminalEvent,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let tab_ix = self.tabs.iter().position(
+            |t| matches!(&t.body, TabBody::Terminal(v) if v.entity_id() == source.entity_id()),
+        );
         match ev {
             TerminalEvent::UserInput(bytes) if self.broadcast => {
                 for tab in &self.tabs {
@@ -305,9 +325,105 @@ impl HostwickApp {
                     }
                 }
             }
-            TerminalEvent::TitleChanged | TerminalEvent::Exited => cx.notify(),
             TerminalEvent::UserInput(_) => {}
+            TerminalEvent::TitleChanged | TerminalEvent::Exited | TerminalEvent::LoggingChanged => {
+                cx.notify()
+            }
+            TerminalEvent::Reconnect => {
+                if let Some(ix) = tab_ix {
+                    self.reconnect_tab(ix, window, cx);
+                }
+            }
+            TerminalEvent::Duplicate => {
+                if let Some(ix) = tab_ix {
+                    let p = self.tabs[ix].profile.clone();
+                    self.open_tab(p, TabKind::Terminal, window, cx);
+                }
+            }
+            TerminalEvent::OpenFiles => {
+                if let Some(ix) = tab_ix {
+                    let p = self.tabs[ix].profile.clone();
+                    self.open_tab(p, TabKind::Files, window, cx);
+                }
+            }
         }
+    }
+
+    fn reconnect_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.tabs.get(ix).map(|t| t.id) {
+            self.active = Some(ix);
+            self.connect_tab(id, window, cx);
+            cx.notify();
+        }
+    }
+
+    /// Start a session log when the host (or the global setting) asks for one.
+    fn auto_session_log(
+        &self,
+        profile: &HostProfile,
+        view: &Entity<TerminalView>,
+        cx: &mut Context<Self>,
+    ) {
+        let settings = Settings::get(cx).clone();
+        let (template, mode, append) = match &profile.session_log {
+            Some(l) => (l.path.clone(), l.mode, l.append),
+            None if settings.log_all_sessions => (
+                "&S-&Y&M&D-&T.log".to_owned(),
+                settings.session_log_mode,
+                true,
+            ),
+            None => return,
+        };
+        let now = chrono::Local::now();
+        use chrono::{Datelike as _, Timelike as _};
+        let user = profile.user_or_local();
+        let vars = LogVars {
+            host: &profile.host,
+            port: profile.port,
+            user: &user,
+            session: &profile.name,
+            time: (
+                now.year(),
+                now.month(),
+                now.day(),
+                now.hour(),
+                now.minute(),
+                now.second(),
+            ),
+        };
+        let rel = std::path::PathBuf::from(expand_log_path(&template, &vars));
+        let path = if rel.is_absolute() {
+            rel
+        } else {
+            settings.session_log_dir(&self.backend.paths).join(rel)
+        };
+        let header = format!(
+            "{}  {}@{}:{}",
+            now.format("%Y-%m-%d %H:%M:%S"),
+            user,
+            profile.host,
+            profile.port
+        );
+        view.update(cx, |v, cx| {
+            if let Err(e) = v.start_log(&path, mode, append, &header, cx) {
+                tracing::warn!(error = %e, path = %path.display(), "cannot start session log");
+            }
+        });
+    }
+
+    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let this = cx.entity().downgrade();
+        crate::settingsform::open(self.backend.clone(), window, cx, move |s, _, cx| {
+            let s = s.clone();
+            let _ = this.update(cx, |app, cx| {
+                for tab in &app.tabs {
+                    if let TabBody::Terminal(v) = &tab.body {
+                        v.update(cx, |v, cx| v.apply_settings(&s, cx));
+                    }
+                }
+                cx.notify();
+            });
+        });
     }
 
     // ---- transfers ------------------------------------------------------------
@@ -599,124 +715,56 @@ impl HostwickApp {
 
     // ---- profiles ---------------------------------------------------------------
 
-    fn new_host_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let fields: Vec<(&'static str, Entity<InputState>)> = [
-            ("Name", "prod-web-1"),
-            ("Folder", "prod (optional)"),
-            ("Host", "10.0.0.5 or host.example.com"),
-            ("Port", "22"),
-            ("User", "deploy"),
-            ("Key file", "~/.ssh/id_ed25519 (optional)"),
-            ("Jump host", "user@bastion:22 (optional)"),
-        ]
-        .into_iter()
-        .map(|(label, ph)| {
-            (
-                label,
-                cx.new(|cx| InputState::new(window, cx).placeholder(ph)),
-            )
-        })
-        .collect();
+    /// New host (`None`) or edit an existing one.
+    fn host_dialog(
+        &mut self,
+        existing: Option<HostProfile>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let app = cx.entity().downgrade();
-        let first = std::cell::Cell::new(true);
-        window.open_dialog(cx, move |dialog, window, cx| {
-            if first.replace(false)
-                && let Some((_, i)) = fields.first()
-            {
-                i.focus_handle(cx).focus(window, cx);
-            }
-            let mut body = div().flex().flex_col().gap(px(6.0));
-            for (label, input) in &fields {
-                body = body.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(div().w(px(80.0)).text_size(px(13.0)).child(*label))
-                        .child(div().flex_1().child(Input::new(input))),
-                );
-            }
-            let (fields2, app2) = (fields.clone(), app.clone());
-            let save = Rc::new(move |window: &mut Window, cx: &mut App| {
-                let v = |i: usize| fields2[i].1.read(cx).value().trim().to_owned();
-                let (name, host) = (v(0), v(2));
-                if name.is_empty() || host.is_empty() {
-                    window
-                        .push_notification(Notification::warning("Name and host are required"), cx);
-                    return;
-                }
-                let mut p = HostProfile::new(name, host);
-                p.folder = v(1);
-                p.port = v(3).parse().unwrap_or(22);
-                p.user = Some(v(4)).filter(|u| !u.is_empty());
-                let key = v(5);
-                p.auth = crate::backend::quick_profile("x")
-                    .map(|q| q.auth)
-                    .unwrap_or_default();
-                if !key.is_empty() {
-                    p.auth.insert(
-                        1,
-                        AuthMethod::KeyFile {
-                            path: key.into(),
-                            passphrase_credential: None,
-                        },
-                    );
-                }
-                let jump = v(6);
-                if !jump.is_empty() {
-                    match hostwick_core::Target::parse(&jump) {
-                        Ok(t) => {
-                            p.jump = vec![hostwick_core::Endpoint {
-                                port: t.port_or_default(),
-                                host: t.host,
-                                user: t.user,
-                            }]
-                        }
-                        Err(e) => {
-                            window.push_notification(
-                                Notification::error(format!("Jump host: {e}")),
-                                cx,
-                            );
-                            return;
+        crate::hostform::open(existing, window, cx, move |p, window, cx| {
+            let _ = app.update(cx, |a, cx| {
+                match a.backend.store.upsert(&p) {
+                    Ok(()) => {
+                        a.selected = Some(p.id);
+                        a.reload_profiles();
+                        // Open tabs keep working; new connections use the edit.
+                        for t in &mut a.tabs {
+                            if t.profile.id == p.id {
+                                t.profile = p.clone();
+                            }
                         }
                     }
+                    Err(e) => window.push_notification(Notification::error(e.to_string()), cx),
                 }
-                let _ = app2.update(cx, |a, cx| {
-                    match a.backend.store.upsert(&p) {
-                        Ok(()) => {
-                            a.selected = Some(p.id);
-                            a.reload_profiles();
-                        }
-                        Err(e) => window.push_notification(Notification::error(e.to_string()), cx),
-                    }
-                    cx.notify();
-                });
-                window.close_dialog(cx);
+                cx.notify();
             });
-            let (save_click, save_enter) = (save.clone(), save.clone());
-            dialog
-                .title("New host")
-                .w(px(480.0))
-                .child(body)
-                .on_ok(move |_, window, cx| {
-                    save_enter(window, cx);
-                    false
-                })
-                .footer(
-                    Button::new("save")
-                        .primary()
-                        .label("Save")
-                        .on_click(move |_, window, cx| save_click(window, cx)),
-                )
         });
     }
 
+    fn duplicate_profile(&mut self, id: ProfileId, cx: &mut Context<Self>) {
+        let Some(mut p) = self.profiles.iter().find(|p| p.id == id).cloned() else {
+            return;
+        };
+        p.id = ProfileId::new();
+        p.name = format!("{} (copy)", p.name);
+        p.source = Default::default();
+        if self.backend.store.upsert(&p).is_ok() {
+            self.selected = Some(p.id);
+            self.reload_profiles();
+        }
+        cx.notify();
+    }
+
     fn delete_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(p) = self
-            .selected
-            .and_then(|id| self.profiles.iter().find(|p| p.id == id))
-            .cloned()
-        else {
+        if let Some(id) = self.selected {
+            self.delete_profile(id, window, cx);
+        }
+    }
+
+    fn delete_profile(&mut self, id: ProfileId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(p) = self.profiles.iter().find(|p| p.id == id).cloned() else {
             return;
         };
         let app = cx.entity().downgrade();
@@ -738,7 +786,9 @@ impl HostwickApp {
                             move |_, window, cx| {
                                 let _ = app2.update(cx, |a, cx| {
                                     let _ = a.backend.store.delete(p2.id);
-                                    a.selected = None;
+                                    if a.selected == Some(p2.id) {
+                                        a.selected = None;
+                                    }
                                     a.reload_profiles();
                                     cx.notify();
                                 });
@@ -750,15 +800,20 @@ impl HostwickApp {
     }
 
     fn import(&mut self, which: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        // "putty"/"winscp" read this PC's registry (Windows); "*-file" asks for a file.
         let from_registry = cfg!(windows) && matches!(which, "putty" | "winscp");
+        let which = which.trim_end_matches("-file");
         if which == "ssh" || from_registry {
             let result = match which {
                 "ssh" => std::env::var_os("HOME")
                     .or_else(|| std::env::var_os("USERPROFILE"))
                     .map(|h| std::path::Path::new(&h).join(".ssh").join("config"))
                     .ok_or_else(|| "no home directory".to_owned())
-                    .and_then(|p| std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display())))
-                    .map(|b| hostwick_import::parse_ssh_config(&hostwick_import::decode_text(&b))),
+                    .and_then(|p| {
+                        hostwick_import::load_ssh_config(&p)
+                            .map_err(|e| format!("{}: {e}", p.display()))
+                    })
+                    .map(|text| hostwick_import::parse_ssh_config(&text)),
                 "putty" => hostwick_import::putty_from_registry().map_err(|e| e.to_string()),
                 _ => hostwick_import::winscp_from_registry().map_err(|e| e.to_string()),
             };
@@ -769,11 +824,14 @@ impl HostwickApp {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some(if which == "putty" {
-                "PuTTY .reg export".into()
-            } else {
-                "WinSCP.ini".into()
-            }),
+            prompt: Some(
+                match which {
+                    "putty" => "PuTTY .reg export",
+                    "solar" => "Solar-PuTTY export (.json)",
+                    _ => "WinSCP.ini",
+                }
+                .into(),
+            ),
         });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = picked.await else {
@@ -790,10 +848,10 @@ impl HostwickApp {
                     return;
                 }
             };
-            let result = if which == "putty" {
-                hostwick_import::parse_putty_reg(&text)
-            } else {
-                hostwick_import::parse_winscp_ini(&text)
+            let result = match which {
+                "putty" => hostwick_import::parse_putty_reg(&text),
+                "solar" => hostwick_import::parse_solarputty_json(&text),
+                _ => hostwick_import::parse_winscp_ini(&text),
             }
             .map_err(|e| e.to_string());
             let _ = this.update_in(cx, |a, w, cx| a.apply_import(result, w, cx));
@@ -814,29 +872,94 @@ impl HostwickApp {
                 return;
             }
         };
-        let (mut added, mut updated) = (0, 0);
+        let (mut added, mut updated) = (Vec::new(), Vec::new());
+        let mut failed = Vec::new();
         for mut p in r.profiles {
-            if let Some(prior) = self
+            let prior = self
                 .profiles
                 .iter()
-                .find(|e| e.source == p.source && p.source != Default::default())
-            {
+                .find(|e| e.source == p.source && p.source != Default::default());
+            if let Some(prior) = prior {
                 p.id = prior.id;
-                updated += 1;
-            } else {
-                added += 1;
+                // Keep what the person changed locally after the last import.
+                p.session_log = prior.session_log.clone();
+                p.notes = prior.notes.clone();
             }
-            let _ = self.backend.store.upsert(&p);
+            match self.backend.store.upsert(&p) {
+                Ok(()) if prior.is_some() => updated.push(p.path()),
+                Ok(()) => added.push(p.path()),
+                Err(e) => failed.push(format!("{}: {e}", p.path())),
+            }
         }
         self.reload_profiles();
-        let mut msg = format!("Imported: {added} added, {updated} updated");
-        if !r.warnings.is_empty() {
-            msg.push_str(&format!(", {} skipped", r.warnings.len()));
-            for w in &r.warnings {
-                tracing::warn!("import: {w}");
-            }
+        for w in &r.warnings {
+            tracing::warn!("import: {w}");
         }
-        window.push_notification(Notification::success(msg), cx);
+        let summary = format!(
+            "{} added, {} updated, {} with notes",
+            added.len(),
+            updated.len(),
+            r.warnings.len() + failed.len()
+        );
+        tracing::info!("import: {summary}");
+        if r.warnings.is_empty() && failed.is_empty() {
+            window.push_notification(Notification::success(format!("Imported: {summary}")), cx);
+            cx.notify();
+            return;
+        }
+        // Something needs attention: show the full report instead of a toast.
+        let notes: Vec<String> = failed.into_iter().chain(r.warnings).collect();
+        let lists = Rc::new((added, updated, notes));
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let muted = cx.theme().muted_foreground;
+            let section = |title: String, items: &[String]| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(div().pt(px(6.0)).font_weight(FontWeight::SEMIBOLD).child(title))
+                    .children(items.iter().map(|i| {
+                        div()
+                            .pl(px(10.0))
+                            .text_size(px(12.0))
+                            .child(SharedString::from(format!("• {i}")))
+                    }))
+            };
+            let (added, updated, notes) = &*lists;
+            dialog
+                .title("Import report")
+                .w(px(640.0))
+                .child(
+                    div()
+                        .id("import-report")
+                        .max_h(px(480.0))
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .when(!notes.is_empty(), |d| {
+                            d.child(section(format!("Needs attention ({})", notes.len()), notes))
+                        })
+                        .when(!added.is_empty(), |d| {
+                            d.child(section(format!("Added ({})", added.len()), added))
+                        })
+                        .when(!updated.is_empty(), |d| {
+                            d.child(section(format!("Updated ({})", updated.len()), updated))
+                        })
+                        .child(
+                            div()
+                                .pt(px(8.0))
+                                .text_size(px(11.0))
+                                .text_color(muted)
+                                .child("Hosts listed under “Needs attention” were still imported unless the note says skipped. Right-click a host → Edit… to adjust it."),
+                        ),
+                )
+                .footer(
+                    Button::new("ok")
+                        .primary()
+                        .label("OK")
+                        .on_click(|_, window, cx| window.close_dialog(cx)),
+                )
+        });
         cx.notify();
     }
 
@@ -891,9 +1014,27 @@ impl HostwickApp {
                     .gap(px(8.0))
                     .child(
                         div()
-                            .text_size(px(15.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("Hostwick"),
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(img(logo()).size(px(22.0)))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(15.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("Hostwick"),
+                            )
+                            .child(
+                                Button::new("settings")
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::Settings)
+                                    .tooltip("Settings")
+                                    .on_click(
+                                        cx.listener(|app, _, w, cx| app.open_settings(w, cx)),
+                                    ),
+                            ),
                     )
                     .child(Input::new(&self.quick).small())
                     .child(Input::new(&self.search).small().cleanable(true)),
@@ -960,6 +1101,13 @@ impl HostwickApp {
                                                 .whitespace_nowrap()
                                                 .child(p.name.clone()),
                                         )
+                                        .on_mouse_down(
+                                            MouseButton::Right,
+                                            cx.listener(move |app, _, _, cx| {
+                                                app.selected = Some(id);
+                                                cx.notify();
+                                            }),
+                                        )
                                         .child(
                                             div()
                                                 .text_size(px(11.0))
@@ -967,6 +1115,7 @@ impl HostwickApp {
                                                 .whitespace_nowrap()
                                                 .child(p.host.clone()),
                                         )
+                                        .context_menu(Self::host_menu(cx.entity().downgrade(), id))
                                         .into_any_element()
                                 }
                             })
@@ -1007,10 +1156,28 @@ impl HostwickApp {
                                     })),
                             )
                             .child(
+                                Button::new("edit-host")
+                                    .small()
+                                    .ghost()
+                                    .icon(IconName::Settings2)
+                                    .tooltip("Edit host")
+                                    .disabled(!has_sel)
+                                    .on_click(cx.listener(|app, _, w, cx| {
+                                        let p = app
+                                            .selected
+                                            .and_then(|id| app.profiles.iter().find(|p| p.id == id))
+                                            .cloned();
+                                        if p.is_some() {
+                                            app.host_dialog(p, w, cx);
+                                        }
+                                    })),
+                            )
+                            .child(
                                 Button::new("del-host")
                                     .small()
                                     .ghost()
                                     .icon(IconName::Delete)
+                                    .tooltip("Delete host")
                                     .disabled(!has_sel)
                                     .on_click(
                                         cx.listener(|app, _, w, cx| app.delete_selected(w, cx)),
@@ -1018,47 +1185,238 @@ impl HostwickApp {
                             ),
                     )
                     .child(
-                        Button::new("new-host")
-                            .small()
-                            .label("New host…")
-                            .on_click(cx.listener(|app, _, w, cx| app.new_host_dialog(w, cx))),
-                    )
-                    .child(
                         div()
                             .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap(px(4.0))
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .text_color(theme.muted_foreground)
-                                    .child("Import"),
-                            )
-                            .child(
-                                Button::new("imp-ssh")
-                                    .small()
-                                    .ghost()
-                                    .label("ssh_config")
-                                    .on_click(cx.listener(|a, _, w, cx| a.import("ssh", w, cx))),
-                            )
-                            .child(
-                                Button::new("imp-putty")
-                                    .small()
-                                    .ghost()
-                                    .label("PuTTY")
-                                    .on_click(cx.listener(|a, _, w, cx| a.import("putty", w, cx))),
-                            )
-                            .child(
-                                Button::new("imp-winscp")
-                                    .small()
-                                    .ghost()
-                                    .label("WinSCP")
-                                    .on_click(cx.listener(|a, _, w, cx| a.import("winscp", w, cx))),
-                            ),
+                            .gap(px(6.0))
+                            .child(Button::new("new-host").small().label("New host…").on_click(
+                                cx.listener(|app, _, w, cx| app.host_dialog(None, w, cx)),
+                            ))
+                            .child(Self::import_button(cx.entity().downgrade())),
                     ),
             )
             .into_any_element()
+    }
+
+    fn import_button(app: WeakEntity<Self>) -> impl IntoElement {
+        let item = move |label: &'static str, which: &'static str| {
+            let app = app.clone();
+            PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                let _ = app.update(cx, |a, cx| a.import(which, window, cx));
+            })
+        };
+        Button::new("import")
+            .small()
+            .label("Import…")
+            .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
+                let m = menu.item(item("OpenSSH ~/.ssh/config", "ssh"));
+                let m = if cfg!(windows) {
+                    m.item(item("PuTTY (this PC's saved sessions)", "putty"))
+                        .item(item("WinSCP (this PC's saved sites)", "winscp"))
+                } else {
+                    m
+                };
+                m.item(item("PuTTY .reg export file…", "putty-file"))
+                    .item(item("WinSCP.ini file…", "winscp-file"))
+                    .item(item("Solar-PuTTY .json export…", "solar"))
+            })
+    }
+
+    /// Right-click menu for a saved host.
+    fn host_menu(
+        app: WeakEntity<Self>,
+        id: ProfileId,
+    ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+        move |menu, _, _| {
+            let act = |f: fn(&mut Self, ProfileId, &mut Window, &mut Context<Self>)| {
+                let app = app.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let _ = app.update(cx, |a, cx| f(a, id, window, cx));
+                }
+            };
+            menu.item(
+                PopupMenuItem::new("Open terminal").on_click(act(|a, id, w, cx| {
+                    a.open_profile(id, TabKind::Terminal, w, cx)
+                })),
+            )
+            .item(
+                PopupMenuItem::new("Open files (SFTP)").on_click(act(|a, id, w, cx| {
+                    a.open_profile(id, TabKind::Files, w, cx)
+                })),
+            )
+            .separator()
+            .item(PopupMenuItem::new("Edit…").on_click(act(|a, id, w, cx| {
+                let p = a.profiles.iter().find(|p| p.id == id).cloned();
+                if p.is_some() {
+                    a.host_dialog(p, w, cx);
+                }
+            })))
+            .item(
+                PopupMenuItem::new("Duplicate")
+                    .on_click(act(|a, id, _, cx| a.duplicate_profile(id, cx))),
+            )
+            .item(
+                PopupMenuItem::new("Copy address").on_click(act(|a, id, _, cx| {
+                    if let Some(p) = a.profiles.iter().find(|p| p.id == id) {
+                        let user = p.user.as_ref().map(|u| format!("{u}@")).unwrap_or_default();
+                        let port = if p.port == 22 {
+                            String::new()
+                        } else {
+                            format!(":{}", p.port)
+                        };
+                        cx.write_to_clipboard(ClipboardItem::new_string(format!(
+                            "{user}{}{port}",
+                            p.host
+                        )));
+                    }
+                })),
+            )
+            .separator()
+            .item(
+                PopupMenuItem::new("Delete…")
+                    .on_click(act(|a, id, w, cx| a.delete_profile(id, w, cx))),
+            )
+        }
+    }
+
+    /// Right-click menu for a tab.
+    fn tab_menu(
+        app: WeakEntity<Self>,
+        tab_id: u64,
+    ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+        move |menu, _, _| {
+            let act = |f: fn(&mut Self, usize, &mut Window, &mut Context<Self>)| {
+                let app = app.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let _ = app.update(cx, |a, cx| {
+                        if let Some(ix) = a.tabs.iter().position(|t| t.id == tab_id) {
+                            f(a, ix, window, cx);
+                        }
+                    });
+                }
+            };
+            menu.item(
+                PopupMenuItem::new("Reconnect")
+                    .on_click(act(|a, ix, w, cx| a.reconnect_tab(ix, w, cx))),
+            )
+            .item(
+                PopupMenuItem::new("Duplicate").on_click(act(|a, ix, w, cx| {
+                    let (p, k) = (a.tabs[ix].profile.clone(), a.tabs[ix].kind);
+                    a.open_tab(p, k, w, cx);
+                })),
+            )
+            .item(
+                PopupMenuItem::new("Open files (SFTP)").on_click(act(|a, ix, w, cx| {
+                    let p = a.tabs[ix].profile.clone();
+                    a.open_tab(p, TabKind::Files, w, cx);
+                })),
+            )
+            .item(
+                PopupMenuItem::new("Open terminal").on_click(act(|a, ix, w, cx| {
+                    let p = a.tabs[ix].profile.clone();
+                    a.open_tab(p, TabKind::Terminal, w, cx);
+                })),
+            )
+            .separator()
+            .item(PopupMenuItem::new("Close").on_click(act(|a, ix, _, cx| a.close_tab(ix, cx))))
+            .item(
+                PopupMenuItem::new("Close others").on_click(act(|a, ix, _, cx| {
+                    let keep = a.tabs.remove(ix);
+                    a.tabs = vec![keep];
+                    a.active = Some(0);
+                    cx.notify();
+                })),
+            )
+            .item(PopupMenuItem::new("Close all").on_click(act(|a, _, _, cx| {
+                a.tabs.clear();
+                a.active = None;
+                cx.notify();
+            })))
+        }
+    }
+
+    /// App-wide shortcuts, handled before the terminal sees the key. They
+    /// all use Shift (or Cmd on macOS) so plain Ctrl+letter keys still reach
+    /// the shell (Ctrl+W, Ctrl+T, Ctrl+N mean things there).
+    fn on_shortcut(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let m = ev.keystroke.modifiers;
+        let key = ev.keystroke.key.as_str();
+        let cmd = if cfg!(target_os = "macos") {
+            m.platform
+        } else {
+            m.control && m.shift
+        };
+        let handled = match key {
+            "tab" if m.control => {
+                if !self.tabs.is_empty() {
+                    let n = self.tabs.len();
+                    let cur = self.active.unwrap_or(0);
+                    let next = if m.shift {
+                        (cur + n - 1) % n
+                    } else {
+                        (cur + 1) % n
+                    };
+                    self.activate_tab(next, window, cx);
+                }
+                true
+            }
+            "t" if cmd => {
+                if let Some(t) = self.active.and_then(|i| self.tabs.get(i)) {
+                    let (p, k) = (t.profile.clone(), t.kind);
+                    self.open_tab(p, k, window, cx);
+                }
+                true
+            }
+            "w" if cmd => {
+                if let Some(ix) = self.active {
+                    self.close_tab(ix, cx);
+                }
+                true
+            }
+            "r" if cmd => {
+                if let Some(ix) = self.active {
+                    self.reconnect_tab(ix, window, cx);
+                }
+                true
+            }
+            "n" if cmd => {
+                self.host_dialog(None, window, cx);
+                true
+            }
+            "," if m.control || m.platform => {
+                self.open_settings(window, cx);
+                true
+            }
+            "b" if cmd => {
+                self.broadcast = !self.broadcast;
+                cx.notify();
+                true
+            }
+            _ => false,
+        };
+        if handled {
+            cx.stop_propagation();
+        }
+    }
+
+    fn activate_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.active = Some(ix);
+        if let Some(TabBody::Terminal(v)) = self.tabs.get(ix).map(|t| &t.body) {
+            v.read(cx).focus_handle(cx).focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn open_profile(
+        &mut self,
+        id: ProfileId,
+        kind: TabKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.selected = Some(id);
+        if let Some(p) = self.profiles.iter().find(|p| p.id == id).cloned() {
+            self.open_tab(p, kind, window, cx);
+        }
     }
 
     fn open_selected(&mut self, kind: TabKind, window: &mut Window, cx: &mut Context<Self>) {
@@ -1133,6 +1491,7 @@ impl HostwickApp {
                                 theme.danger
                             }))
                             .child(div().overflow_hidden().whitespace_nowrap().child(title))
+                            .context_menu(Self::tab_menu(cx.entity().downgrade(), t.id))
                             .child(
                                 Button::new(("close", t.id))
                                     .ghost()
@@ -1177,7 +1536,15 @@ impl HostwickApp {
                 .text_color(theme.muted_foreground)
                 .child(div().text_size(px(18.0)).child("No open sessions"))
                 .child("Double-click a host, or type user@host in the quick-connect box.")
-                .child("Import from ~/.ssh/config, PuTTY or WinSCP at the bottom left.")
+                .child("Right-click hosts, tabs, files and terminals for more actions.")
+                .child("Import from ~/.ssh/config, PuTTY, WinSCP or Solar-PuTTY with Import… (bottom left).")
+                .child(
+                    div().pt(px(12.0)).text_size(px(12.0)).child(if cfg!(target_os = "macos") {
+                        "⌘N new host · ⌘T duplicate tab · ⌘W close tab · ⌘R reconnect · ⌃Tab next tab · ⌘, settings"
+                    } else {
+                        "Ctrl+Shift+N new host · Ctrl+Shift+T duplicate tab · Ctrl+Shift+W close tab · Ctrl+Shift+R reconnect · Ctrl+Tab next tab · Ctrl+, settings"
+                    }),
+                )
                 .into_any_element();
         };
         let id = tab.id;
@@ -1343,6 +1710,7 @@ impl Render for HostwickApp {
             .flex()
             .bg(theme.background)
             .text_color(theme.foreground)
+            .capture_key_down(cx.listener(Self::on_shortcut))
             .child(sidebar)
             .child(
                 div()

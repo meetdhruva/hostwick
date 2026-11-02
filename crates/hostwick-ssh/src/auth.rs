@@ -35,13 +35,26 @@ pub(crate) async fn authenticate(
         } => remaining_methods.to_vec(),
     };
 
+    let mut tried: Vec<String> = Vec::new();
     for method in methods {
+        let label = match method {
+            AuthMethod::Agent => "agent".to_owned(),
+            AuthMethod::KeyFile { path, .. } => format!(
+                "key {}",
+                path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            ),
+            AuthMethod::Password { .. } => "password".to_owned(),
+            AuthMethod::KeyboardInteractive => "keyboard-interactive".to_owned(),
+        };
         let kind = match method {
             AuthMethod::Agent | AuthMethod::KeyFile { .. } => MethodKind::PublicKey,
             AuthMethod::Password { .. } => MethodKind::Password,
             AuthMethod::KeyboardInteractive => MethodKind::KeyboardInteractive,
         };
         if !allowed.is_empty() && !allowed.contains(&kind) {
+            tried.push(format!("{label}: not offered by server"));
             continue;
         }
         let result = match method {
@@ -58,6 +71,10 @@ pub(crate) async fn authenticate(
         match result {
             Ok(Step::Done) => return Ok(()),
             Ok(Step::Continue { remaining }) => {
+                tried.push(match &remaining {
+                    Some(_) => format!("{label}: rejected"),
+                    None => format!("{label}: skipped (nothing entered)"),
+                });
                 if let Some(r) = remaining {
                     allowed = r;
                 }
@@ -65,6 +82,15 @@ pub(crate) async fn authenticate(
             // A broken key file or missing agent shouldn't stop the next method.
             Err(e @ (SshError::Key { .. } | SshError::Agent(_))) => {
                 tracing::info!(error = %e, "auth method unavailable, trying next");
+                let reason = match &e {
+                    SshError::Key { reason, .. } => reason.clone(),
+                    SshError::Agent(r) => r.clone(),
+                    _ => e.to_string(),
+                };
+                if matches!(e, SshError::Key { .. }) {
+                    ctx.interaction.notice(&format!("{label}: {reason}"));
+                }
+                tried.push(format!("{label}: {reason}"));
             }
             Err(e) => return Err(e),
         }
@@ -78,6 +104,11 @@ pub(crate) async fn authenticate(
             .map(|m| <&str>::from(m).to_owned())
             .collect::<Vec<_>>()
             .join(", "),
+        tried: if tried.is_empty() {
+            "nothing configured".into()
+        } else {
+            tried.join("; ")
+        },
     })
 }
 
@@ -162,10 +193,8 @@ pub(crate) async fn load_key(
     let text = tokio::fs::read_to_string(&path)
         .await
         .map_err(|e| key_err(e.to_string()))?;
-    if text.contains("PuTTY-User-Key-File") {
-        return Err(key_err(
-            "PuTTY .ppk keys are not read directly yet; load it into Pageant or convert it with `puttygen key.ppk -O private-openssh -o key`".into(),
-        ));
+    if text.starts_with("PuTTY-User-Key-File") {
+        return load_ppk(&text, passphrase_credential, ctx, &path).await;
     }
     match russh::keys::decode_secret_key(&text, None) {
         Ok(k) => Ok(k),
@@ -180,6 +209,42 @@ pub(crate) async fn load_key(
         }
         Err(e) => Err(key_err(e.to_string())),
     }
+}
+
+/// PuTTY `.ppk` (format 2 or 3, plain or AES-256 encrypted).
+async fn load_ppk(
+    text: &str,
+    passphrase_credential: Option<&str>,
+    ctx: &AuthCtx<'_>,
+    path: &Path,
+) -> Result<PrivateKey, SshError> {
+    let key_err = |reason: String| SshError::Key {
+        path: path.display().to_string(),
+        reason,
+    };
+    let encrypted = !text.lines().any(|l| l.trim() == "Encryption: none");
+    let passphrase = if encrypted {
+        let pass = match passphrase_credential.and_then(|c| ctx.credentials.get(c)) {
+            Some(p) => Some(p),
+            None => ctx.interaction.key_passphrase(path).await,
+        };
+        Some(
+            pass.ok_or_else(|| key_err("passphrase required".into()))?
+                .expose_secret()
+                .to_owned(),
+        )
+    } else {
+        None
+    };
+    let wrong_pass = encrypted;
+    PrivateKey::from_ppk(text, passphrase).map_err(|e| {
+        let msg = e.to_string();
+        if wrong_pass && msg.to_lowercase().contains("mac") {
+            key_err("wrong passphrase".into())
+        } else {
+            key_err(msg)
+        }
+    })
 }
 
 async fn try_key_file(

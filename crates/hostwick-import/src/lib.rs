@@ -14,7 +14,7 @@ use hostwick_core::{AuthMethod, HostProfile};
 
 pub use putty::{parse_putty_reg, putty_from_registry};
 pub use solarputty::parse_solarputty_json;
-pub use ssh_config::parse_ssh_config;
+pub use ssh_config::{load_ssh_config, parse_ssh_config};
 pub use winscp::{parse_winscp_ini, winscp_from_registry};
 
 #[derive(Debug, Default)]

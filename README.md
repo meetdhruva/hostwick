@@ -1,3 +1,5 @@
+<img src="packaging/icons/hostwick.png" width="96" alt="Hostwick icon">
+
 # Hostwick
 
 A fast, reliable SSH terminal, SFTP file manager and tunnel manager in one Rust
@@ -13,12 +15,18 @@ app — built to replace Solar-PuTTY, PuTTY and WinSCP on Windows, macOS and Lin
   several files in parallel, resumable `.filepart` writes, retries with backoff.
 - **Native GPU UI.** GPUI (Zed's UI framework) via `gpui-kit`, with the
   Alacritty terminal core. No webview.
-- **Brings your sessions.** Imports `~/.ssh/config`, PuTTY (registry or `.reg`),
-  WinSCP (registry or `WinSCP.ini`) and Solar-PuTTY JSON exports.
+- **Brings your sessions and keys.** Imports `~/.ssh/config` (with `Include`),
+  PuTTY (registry or `.reg`), WinSCP (registry or `WinSCP.ini`) and Solar-PuTTY
+  JSON exports, and reads PuTTY `.ppk` keys (v2 and v3, encrypted or not)
+  directly — no conversion.
 
 ![Terminal](docs/screenshots/terminal.png)
 
 ![File browser](docs/screenshots/files.png)
+
+| Host editor | Settings | Import report |
+|---|---|---|
+| ![Host editor](docs/screenshots/host-editor.png) | ![Settings](docs/screenshots/settings.png) | ![Import report](docs/screenshots/import-report.png) |
 
 ## Layout
 
@@ -121,12 +129,66 @@ cargo run --release -p hostwick-desktop
 
 Sidebar with saved hosts (folders, search, quick connect), terminal and file
 tabs, a transfer queue with progress and cancel, and broadcast input to every
-open terminal. PuTTY habits work: selecting copies, right-click pastes;
-Ctrl+Shift+C/V (Cmd+C/V on macOS) also work; Shift+PageUp/PageDown scroll.
-Host-key, password, passphrase and MFA prompts appear as dialogs.
+open terminal. Host-key, password, passphrase and MFA prompts appear as dialogs.
 
-Terminal font: Consolas (Windows), Menlo (macOS), DejaVu Sans Mono (Linux);
-override with `HOSTWICK_FONT="JetBrains Mono"`.
+**Right-click everywhere**
+
+| Where | Menu |
+|---|---|
+| Saved host | Open terminal, Open files, Edit…, Duplicate, Copy address, Delete… |
+| Tab | Reconnect, Duplicate, Open files/terminal, Close, Close others, Close all |
+| Terminal | Copy, Paste, Select all, Clear scrollback, Log session to file… / Stop, Open files, Duplicate, Reconnect |
+| File | Open, Download…, Rename…, Copy path, Upload here…, New folder…, Refresh, Delete… |
+
+Prefer PuTTY's "right-click pastes"? Settings → Right-click → *Paste (PuTTY)*.
+
+**Host editor** (New host… or right-click → Edit…): name, folder, host, port,
+user, key files (OpenSSH or `.ppk`, with Browse…), jump hosts
+(`user@bastion:22, inner`), port forwards (`L8080:localhost:80 R9000:localhost:3000 D1080`,
+`-L 8080:…` also accepted), keepalive, terminal type, session log, notes and
+legacy algorithms for old devices.
+
+**Settings** (gear icon, `Ctrl+,` / `⌘,`): dark/light theme, terminal font and
+size, scrollback, right-click behaviour, copy-on-select, session logging
+defaults, app log level (applies immediately) and *Open log folder*.
+
+**Logging**
+
+- *Session logs* (like PuTTY's): per host in the host editor, for every
+  session in Settings, or on demand from the terminal's right-click menu.
+  File names take PuTTY tokens — `&S` session, `&H` host, `&P` port, `&U` user,
+  `&Y&M&D` date, `&T` time — so `&S-&Y&M&D.log` gives `prod-web-20261102.log`.
+  *Printable text* strips escape codes; *Raw* keeps them for replay. A **● LOG**
+  badge shows while a terminal is being logged.
+- *App log*: daily-rotated `hostwick.YYYY-MM-DD.log` (14 kept) in the log
+  folder, level set in Settings (`HOSTWICK_LOG` overrides it).
+
+**Shortcuts** (`⌘` instead of `Ctrl+Shift` on macOS — plain `Ctrl+letter` keys
+always go to the shell):
+
+| Keys | Action |
+|---|---|
+| Ctrl+Shift+N | New host |
+| Ctrl+Shift+T | Duplicate current tab |
+| Ctrl+Shift+W | Close tab |
+| Ctrl+Shift+R | Reconnect |
+| Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
+| Ctrl+Shift+B | Toggle broadcast input |
+| Ctrl+, | Settings |
+| Ctrl+Shift+C / V, Shift+Insert | Copy / paste in the terminal |
+| Shift+PageUp / PageDown | Scroll back |
+| Enter on an ended session | Reconnect |
+
+When a connection fails, the error lists every authentication method tried and
+why it failed (for example `key work.ppk: wrong passphrase; password: rejected`).
+
+### Install
+
+- **Windows**: unzip anywhere and run `hostwick-desktop.exe`.
+- **macOS**: unzip and move `Hostwick.app` to Applications.
+- **Linux**: extract and run `./install.sh` (installs to `~/.local`, adds the
+  app and its icon to your applications menu), or run `./hostwick-desktop`
+  directly.
 
 ## Security
 
@@ -164,7 +226,9 @@ connection sharing, and a pipelined 24 MiB SFTP round trip.
 - Linux: full test suite, end-to-end suite against OpenSSH, CLI by hand, and
   the desktop app driven under a virtual display (connect, host-key and
   password dialogs, colors/CJK/full-screen apps, a 300k-line output flood,
-  broadcast input, file browsing, new folder, delete).
+  broadcast input, file browsing, new folder, rename, delete, every
+  right-click menu, host editor, settings (theme, font, log level applied
+  live), session logging, import report, shortcuts, reconnect).
 - Windows and macOS: not run yet. The code paths are cross-platform and CI
   builds and tests all three OSes; the Windows-only pieces (Pageant/OpenSSH
   agent pipe, registry importers, console VT mode in the CLI) need a first run
@@ -175,9 +239,8 @@ connection sharing, and a pipelined 24 MiB SFTP round trip.
 - Two-way sync (WinSCP "Both") and remote-side change detection finer than
   one second (SFTP reports whole seconds).
 
-- PuTTY `.ppk` keys are not read directly yet; use Pageant (supported) or
-  convert with `puttygen key.ppk -O private-openssh -o key`.
-- Agent forwarding is requested but forwarded-agent channels are not served yet.
+- Agent forwarding (forwarded-agent channels are not served yet, so the host
+  editor does not offer it).
 - The desktop app does not yet unlock the vault (the CLI does); it prompts.
 - Terminal mouse reporting (for `htop`/`mc` mouse clicks) and OSC 52 clipboard.
 - Legacy SCP (servers without SFTP), FTP/S3 adapters behind `RemoteFs`.

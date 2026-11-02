@@ -70,6 +70,8 @@ jobs:
           mkdir -p "$dir/Hostwick.app/Contents/MacOS"
           cp target/${{ matrix.target }}/release/hostwick-desktop "$dir/Hostwick.app/Contents/MacOS/"
           sed "s/__VERSION__/${v#v}/" packaging/macos/Info.plist > "$dir/Hostwick.app/Contents/Info.plist"
+          mkdir -p "$dir/Hostwick.app/Contents/Resources"
+          cp packaging/icons/hostwick.icns "$dir/Hostwick.app/Contents/Resources/"
           # Ad-hoc signature so Apple Silicon will run it (not notarized).
           codesign --force --deep --sign - "$dir/Hostwick.app"
           cp target/${{ matrix.target }}/release/hostwick README.md "$dir/"
@@ -80,7 +82,7 @@ jobs:
           v="$VERSION"; dir="hostwick-$v-${{ matrix.name }}"
           mkdir -p "$dir"
           cp target/${{ matrix.target }}/release/hostwick target/${{ matrix.target }}/release/hostwick-desktop \
-             packaging/linux/hostwick.desktop README.md "$dir/"
+             packaging/linux/hostwick.desktop packaging/linux/install.sh packaging/icons/hostwick.png README.md "$dir/"
           # Keep line tables for readable crash backtraces, but compressed.
           objcopy --compress-debug-sections=zlib "$dir/hostwick"
           objcopy --compress-debug-sections=zlib "$dir/hostwick-desktop"
@@ -121,6 +123,6 @@ jobs:
 
             - **Windows**: unzip and run `hostwick-desktop.exe` (unsigned: SmartScreen may ask you to confirm).
             - **macOS**: unzip and open `Hostwick.app` (ad-hoc signed, not notarized: right-click → Open the first time, or `xattr -dr com.apple.quarantine Hostwick.app`).
-            - **Linux**: needs `libxkbcommon`, `libxkbcommon-x11`, a Vulkan driver (`mesa-vulkan-drivers`) and fontconfig.
+            - **Linux**: extract and run `./install.sh` to add Hostwick (with its icon) to your applications menu, or run `./hostwick-desktop` directly. Needs `libxkbcommon`, `libxkbcommon-x11`, a Vulkan driver (`mesa-vulkan-drivers`) and fontconfig.
 
             Verify downloads with `SHA256SUMS`.

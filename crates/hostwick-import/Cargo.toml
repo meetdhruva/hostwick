@@ -19,6 +19,7 @@ serde_json.workspace = true
 
 [dev-dependencies]
 pretty_assertions = "1"
+tempfile.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"

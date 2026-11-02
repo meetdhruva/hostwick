@@ -13,6 +13,31 @@ pub fn human_size(n: u64) -> String {
     }
 }
 
+/// `rwxr-xr-x` from Unix permission bits (lower 9 bits).
+pub fn mode_string(mode: u32) -> String {
+    let mut out = String::with_capacity(9);
+    for shift in [6, 3, 0] {
+        let bits = (mode >> shift) & 7;
+        out.push(if bits & 4 != 0 { 'r' } else { '-' });
+        out.push(if bits & 2 != 0 { 'w' } else { '-' });
+        out.push(if bits & 1 != 0 { 'x' } else { '-' });
+    }
+    out
+}
+
+/// `YYYY-MM-DD HH:MM` in the computer's local time zone.
+pub fn local_time(secs: u64) -> String {
+    i64::try_from(secs)
+        .ok()
+        .and_then(|s| chrono::DateTime::from_timestamp(s, 0))
+        .map(|t| {
+            t.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|| human_time(secs))
+}
+
 /// `YYYY-MM-DD HH:MM` (UTC) from Unix seconds, without a date library.
 pub fn human_time(secs: u64) -> String {
     let days = (secs / 86_400) as i64;
@@ -41,6 +66,8 @@ mod tests {
     #[test]
     fn formats() {
         assert_eq!(human_time(0), "1970-01-01 00:00");
+        assert_eq!(mode_string(0o755), "rwxr-xr-x");
+        assert_eq!(mode_string(0o100600), "rw-------");
         assert_eq!(human_time(1_600_000_000), "2020-09-13 12:26");
         assert_eq!(human_time(951_782_400), "2000-02-29 00:00");
         assert_eq!(human_size(10), "10 B");

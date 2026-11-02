@@ -226,6 +226,9 @@ pub struct HostProfile {
     pub notes: String,
     #[serde(default)]
     pub source: ProfileSource,
+    /// Log terminal output of sessions to this host.
+    #[serde(default)]
+    pub session_log: Option<crate::SessionLog>,
 }
 
 fn default_auth() -> Vec<AuthMethod> {
@@ -263,6 +266,7 @@ impl HostProfile {
             tags: Vec::new(),
             notes: String::new(),
             source: ProfileSource::Manual,
+            session_log: None,
         }
     }
 

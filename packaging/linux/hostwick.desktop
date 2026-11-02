@@ -4,4 +4,6 @@ Name=Hostwick
 Comment=SSH terminal, SFTP and tunnels
 Exec=hostwick-desktop
 Terminal=false
+Icon=hostwick
+StartupWMClass=hostwick
 Categories=Network;RemoteAccess;System;TerminalEmulator;

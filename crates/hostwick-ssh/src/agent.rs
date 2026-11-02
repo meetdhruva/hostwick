@@ -26,8 +26,11 @@ pub(crate) async fn connect() -> Result<Agent, SshError> {
 
 #[cfg(not(windows))]
 pub(crate) async fn connect() -> Result<Agent, SshError> {
+    if std::env::var_os("SSH_AUTH_SOCK").is_none_or(|s| s.is_empty()) {
+        return Err(SshError::Agent("no agent running".into()));
+    }
     AgentClient::connect_env()
         .await
         .map(AgentClient::dynamic)
-        .map_err(|e| SshError::Agent(format!("SSH_AUTH_SOCK: {e}")))
+        .map_err(|e| SshError::Agent(format!("agent not reachable ({e})")))
 }

@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, Sizable as _, WindowExt as _,
 };
@@ -14,7 +15,7 @@ use hostwick_sftp::{Entry, EntryKind, LocalFs, RemoteFs, path_to_slash};
 use hostwick_transfer::{ExistingPolicy, Job, SyncMode, SyncOptions};
 
 use crate::backend::Backend;
-use crate::util::{human_size, human_time};
+use crate::util::{human_size, local_time, mode_string};
 
 pub struct FilesView {
     backend: Arc<Backend>,
@@ -445,6 +446,129 @@ impl FilesView {
         .detach();
     }
 
+    /// Right-click menu for the selected row (the right mouse-down selects it).
+    fn row_menu(
+        view: WeakEntity<Self>,
+        is_dir: bool,
+    ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+        move |menu, _, _| {
+            let act = |f: fn(&mut Self, &mut Window, &mut Context<Self>)| {
+                let view = view.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let _ = view.update(cx, |v, cx| f(v, window, cx));
+                }
+            };
+            let menu = if is_dir {
+                menu.item(PopupMenuItem::new("Open").on_click(act(|v, _, cx| {
+                    if let Some(ix) = v.selected {
+                        v.open(ix, cx);
+                    }
+                })))
+            } else {
+                menu
+            };
+            menu.item(PopupMenuItem::new("Download…").on_click(act(|v, _, cx| v.download(cx))))
+                .item(
+                    PopupMenuItem::new("Rename…").on_click(act(|v, w, cx| v.rename_dialog(w, cx))),
+                )
+                .item(PopupMenuItem::new("Copy path").on_click(act(|v, _, cx| {
+                    if let Some(e) = v.selected.and_then(|i| v.entries.get(i)) {
+                        cx.write_to_clipboard(ClipboardItem::new_string(e.path.clone()));
+                    }
+                })))
+                .separator()
+                .item(PopupMenuItem::new("Upload here…").on_click(act(|v, _, cx| v.upload(cx))))
+                .item(
+                    PopupMenuItem::new("New folder…").on_click(act(|v, w, cx| v.new_folder(w, cx))),
+                )
+                .item(PopupMenuItem::new("Refresh").on_click(act(|v, _, cx| v.refresh(cx))))
+                .separator()
+                .item(
+                    PopupMenuItem::new("Delete…").on_click(act(|v, w, cx| v.confirm_delete(w, cx))),
+                )
+        }
+    }
+
+    fn rename_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.selected.and_then(|i| self.entries.get(i)).cloned() else {
+            return;
+        };
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(entry.name.clone()));
+        let view = cx.entity().downgrade();
+        let first = std::cell::Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if first.replace(false) {
+                input.focus_handle(cx).focus(window, cx);
+            }
+            let (input2, view2, entry2) = (input.clone(), view.clone(), entry.clone());
+            let submit = std::rc::Rc::new(move |window: &mut Window, cx: &mut App| {
+                let name = input2.read(cx).value().trim().to_owned();
+                if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+                    window.push_notification(
+                        gpui_kit::component::notification::Notification::warning(
+                            "Enter a name without “/”",
+                        ),
+                        cx,
+                    );
+                    return;
+                }
+                if name != entry2.name {
+                    let _ = view2.update(cx, |v, cx| v.rename(entry2.path.clone(), name, cx));
+                }
+                window.close_dialog(cx);
+            });
+            let (on_click, on_enter) = (submit.clone(), submit.clone());
+            dialog
+                .title("Rename")
+                .child(Input::new(&input))
+                .on_ok(move |_, window, cx| {
+                    on_enter(window, cx);
+                    false
+                })
+                .footer(
+                    div()
+                        .flex()
+                        .gap(px(8.0))
+                        .child(
+                            Button::new("cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("rename")
+                                .primary()
+                                .label("Rename")
+                                .on_click(move |_, window, cx| on_click(window, cx)),
+                        ),
+                )
+        });
+    }
+
+    fn rename(&mut self, from: String, name: String, cx: &mut Context<Self>) {
+        let to = hostwick_sftp::join(&hostwick_sftp::parent(&from), &name);
+        let fs = self.fs.clone();
+        let job = self.backend.rt.spawn(async move {
+            // Refuse to overwrite: SFTP rename semantics differ between servers.
+            if fs.stat(&to).await?.is_some() {
+                return Err(hostwick_sftp::FsError::Remote {
+                    path: to,
+                    message: format!("“{name}” already exists"),
+                });
+            }
+            fs.rename(&from, &to).await
+        });
+        cx.spawn(async move |this, cx| {
+            let res = job.await;
+            let _ = this.update(cx, |v, cx| {
+                if let Ok(Err(e)) = res {
+                    v.error = Some(e.to_string());
+                }
+                v.refresh(cx);
+            });
+        })
+        .detach();
+    }
+
     fn render_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let e = &self.entries[ix];
         let selected = self.selected == Some(ix);
@@ -472,6 +596,13 @@ impl FilesView {
                 }
                 cx.notify();
             }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |v, _, _, cx| {
+                    v.selected = Some(ix);
+                    cx.notify();
+                }),
+            )
             .child(div().w(px(18.0)).child(icon))
             .child(
                 div()
@@ -491,14 +622,16 @@ impl FilesView {
                 div()
                     .w(px(140.0))
                     .text_color(theme.muted_foreground)
-                    .child(e.modified.map(human_time).unwrap_or_default()),
+                    .child(e.modified.map(local_time).unwrap_or_default()),
             )
             .child(
                 div()
                     .w(px(90.0))
                     .text_color(theme.muted_foreground)
-                    .child(e.permissions.map(|p| format!("{p:o}")).unwrap_or_default()),
+                    .font_family(crate::terminal::monospace_family())
+                    .child(e.permissions.map(mode_string).unwrap_or_default()),
             )
+            .context_menu(Self::row_menu(cx.entity().downgrade(), e.is_dir()))
             .into_any_element()
     }
 }
@@ -629,7 +762,7 @@ impl Render for FilesView {
                     .child(div().w(px(18.0)))
                     .child(div().flex_1().child("Name"))
                     .child(div().w(px(90.0)).text_right().child("Size"))
-                    .child(div().w(px(140.0)).child("Modified (UTC)"))
+                    .child(div().w(px(140.0)).child("Modified"))
                     .child(div().w(px(90.0)).child("Mode")),
             )
             .child(

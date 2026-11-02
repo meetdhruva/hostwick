@@ -7,6 +7,10 @@
 mod app;
 mod backend;
 mod files;
+mod hostform;
+mod logging;
+mod settings;
+mod settingsform;
 mod terminal;
 mod util;
 
@@ -15,13 +19,6 @@ use std::sync::Arc;
 use gpui_kit::*;
 
 fn main() {
-    let filter = tracing_subscriber::EnvFilter::try_from_env("HOSTWICK_LOG")
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,hostwick=info"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .try_init();
-
     let (prompts_tx, prompts_rx) = futures::channel::mpsc::unbounded();
     let backend = match backend::Backend::new(prompts_tx) {
         Ok(b) => Arc::new(b),
@@ -30,12 +27,16 @@ fn main() {
             std::process::exit(1);
         }
     };
+    let settings = settings::Settings::load(&backend.store);
+    logging::init(&backend.paths.logs, &settings.log_level);
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), data = %backend.paths.data_dir.display(), "starting");
 
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
-            gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
+            settings::apply_theme(settings.theme, cx);
+            cx.set_global(settings);
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();
@@ -45,6 +46,8 @@ fn main() {
 
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::centered(size(px(1280.0), px(800.0)), cx)),
+                // Matches StartupWMClass in hostwick.desktop (Linux taskbar icon).
+                app_id: Some("hostwick".into()),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Hostwick".into()),
                     ..Default::default()

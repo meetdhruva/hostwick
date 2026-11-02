@@ -91,12 +91,20 @@ pub fn putty_from_registry() -> Result<ImportResult, ImportError> {
                 "PublicKeyFile",
                 "PortForwardings",
                 "ProxyHost",
+                "ProxyUsername",
+                "TerminalType",
             ] {
                 if let Ok(v) = key.get_value::<String, _>(field) {
                     raw.insert(field, Value::Str(v));
                 }
             }
-            for field in ["PortNumber", "ProxyMethod", "PingIntervalSecs", "AgentFwd"] {
+            for field in [
+                "PortNumber",
+                "ProxyMethod",
+                "ProxyPort",
+                "PingIntervalSecs",
+                "AgentFwd",
+            ] {
                 if let Ok(v) = key.get_value::<u32, _>(field) {
                     raw.insert(field, Value::Dword(v));
                 }
@@ -164,12 +172,30 @@ fn convert(sessions: Vec<RawSession>) -> ImportResult {
                 }
             }
         }
-        if s.num("ProxyMethod").is_some_and(|m| m != 0) {
-            out.warnings.push(format!(
-                "{}: uses a PuTTY proxy ({}); proxies are not imported — use a jump host instead",
+        if let Some(term) = s.str("TerminalType") {
+            p.term = term;
+        }
+        match (s.num("ProxyMethod").unwrap_or(0), s.str("ProxyHost")) {
+            (0, _) => {}
+            // 6 = "SSH to proxy and use port forwarding" (PuTTY 0.77+): a jump host.
+            (6, Some(host)) => p.jump.push(hostwick_core::Endpoint {
+                host,
+                port: s.num("ProxyPort").and_then(|n| u16::try_from(n).ok()).filter(|n| *n != 0).unwrap_or(22),
+                user: s.str("ProxyUsername"),
+            }),
+            (method, host) => out.warnings.push(format!(
+                "{}: imported, but its PuTTY {} proxy ({}) is not supported — connect directly or set a jump host",
                 s.name,
-                s.str("ProxyHost").unwrap_or_default()
-            ));
+                match method {
+                    1 => "SOCKS4",
+                    2 => "SOCKS5",
+                    3 => "HTTP",
+                    4 => "Telnet",
+                    5 => "local-command",
+                    _ => "unknown",
+                },
+                host.unwrap_or_default()
+            )),
         }
         out.profiles.push(p);
     }
@@ -255,12 +281,31 @@ mod tests {
 "Protocol"="ssh"
 "ProxyMethod"=dword:00000002
 "ProxyHost"="proxy.corp"
+
+[HKEY_CURRENT_USER\Software\SimonTatham\PuTTY\Sessions\behind-bastion]
+"HostName"="10.9.9.9"
+"Protocol"="ssh"
+"TerminalType"="xterm"
+"ProxyMethod"=dword:00000006
+"ProxyHost"="bastion.corp"
+"ProxyPort"=dword:00000937
+"ProxyUsername"="jumper"
 "#;
 
     #[test]
     fn parses_reg_export() {
         let r = parse_putty_reg(REG).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(r.profiles.len(), 2);
+        assert_eq!(r.profiles.len(), 3);
+        let jb = &r.profiles[2];
+        assert_eq!(jb.term, "xterm");
+        assert_eq!(
+            jb.jump,
+            vec![hostwick_core::Endpoint {
+                host: "bastion.corp".into(),
+                port: 2359,
+                user: Some("jumper".into())
+            }]
+        );
         let web = &r.profiles[0];
         assert_eq!((web.folder.as_str(), web.name.as_str()), ("prod", "web 01"));
         assert_eq!(

@@ -1,11 +1,108 @@
 use hostwick_core::{AuthMethod, Endpoint, ForwardSpec, HostProfile, ProfileSource, Target};
 
+use std::path::{Path, PathBuf};
+
 use crate::ImportResult;
 
 struct Block {
     patterns: Vec<String>,
     /// (keyword lowercased, value)
     options: Vec<(String, String)>,
+}
+
+/// Read an OpenSSH config file with every `Include` expanded in place, the
+/// way `ssh` does: relative paths are under `~/.ssh`, `*`/`?` wildcards in
+/// the file name match in sorted order, missing files are ignored.
+pub fn load_ssh_config(path: &Path) -> std::io::Result<String> {
+    let ssh_dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let mut out = String::new();
+    inline(path, &ssh_dir, &mut Vec::new(), &mut out)?;
+    Ok(out)
+}
+
+/// `stack` holds the files being expanded, so include loops stop.
+fn inline(
+    path: &Path,
+    ssh_dir: &Path,
+    stack: &mut Vec<PathBuf>,
+    out: &mut String,
+) -> std::io::Result<()> {
+    let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if stack.contains(&key) || stack.len() >= 16 {
+        return Ok(());
+    }
+    let text = crate::decode_text(&std::fs::read(path)?);
+    stack.push(key);
+    for line in text.lines() {
+        let include = split_kv(line.trim())
+            .filter(|(k, _)| k.eq_ignore_ascii_case("include"))
+            .map(|(_, v)| v);
+        let Some(value) = include else {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        };
+        for pattern in words(&value) {
+            for file in expand_include(&pattern, ssh_dir) {
+                // An unreadable included file is skipped, like ssh does.
+                let _ = inline(&file, ssh_dir, stack, out);
+            }
+        }
+    }
+    stack.pop();
+    Ok(())
+}
+
+fn expand_include(pattern: &str, ssh_dir: &Path) -> Vec<PathBuf> {
+    let p = if let Some(rest) = pattern.strip_prefix("~/") {
+        match ssh_dir.parent() {
+            Some(home) => home.join(rest),
+            None => return vec![],
+        }
+    } else {
+        let p = PathBuf::from(pattern);
+        if p.is_absolute() { p } else { ssh_dir.join(p) }
+    };
+    let Some(name) = p.file_name().and_then(|n| n.to_str()).map(str::to_owned) else {
+        return vec![];
+    };
+    if !name.contains(['*', '?']) {
+        return if p.is_file() { vec![p] } else { vec![] };
+    }
+    let dir = p.parent().map(Path::to_path_buf).unwrap_or_default();
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .filter(|e| e.file_name().to_str().is_some_and(|n| wildcard(&name, n)))
+        .map(|e| e.path())
+        .collect();
+    files.sort();
+    files
+}
+
+/// `*` and `?` matching (OpenSSH `match_pattern`).
+fn wildcard(pattern: &str, text: &str) -> bool {
+    let (p, t): (Vec<char>, Vec<char>) = (pattern.chars().collect(), text.chars().collect());
+    let (mut pi, mut ti, mut star, mut mark) = (0, 0, None, 0);
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            mark = ti;
+            pi += 1;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|c| *c == '*')
 }
 
 /// Parse an OpenSSH client config into one profile per concrete `Host`
@@ -45,7 +142,7 @@ pub fn parse_ssh_config(text: &str) -> ImportResult {
                 ));
             }
             "include" => out.warnings.push(format!(
-                "line {}: `Include {value}` not followed; import that file separately",
+                "line {}: `Include {value}` not followed (use load_ssh_config to read includes)",
                 lineno + 1
             )),
             _ if in_match => {}
@@ -352,5 +449,31 @@ Host *
         ] {
             let _ = parse_ssh_config(s);
         }
+    }
+
+    #[test]
+    fn includes_are_inlined_with_wildcards() -> std::io::Result<()> {
+        let home = tempfile::tempdir()?;
+        let ssh = home.path().join(".ssh");
+        std::fs::create_dir_all(ssh.join("conf.d"))?;
+        std::fs::write(
+            ssh.join("config"),
+            "Include conf.d/*.conf ~/.ssh/extra missing\nHost main\n  HostName m\n",
+        )?;
+        std::fs::write(ssh.join("conf.d/b.conf"), "Host b\n  HostName hb\n")?;
+        std::fs::write(ssh.join("conf.d/a.conf"), "Host a\n  HostName ha\n")?;
+        std::fs::write(ssh.join("conf.d/skip.txt"), "Host skip\n")?;
+        std::fs::write(ssh.join("extra"), "Include extra\nHost x\n  HostName hx\n")?; // self-loop
+        let text = load_ssh_config(&ssh.join("config"))?;
+        let r = parse_ssh_config(&text);
+        let names: Vec<_> = r.profiles.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["a", "b", "x", "main"], "{text}");
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        assert!(
+            wildcard("*.conf", "a.conf")
+                && !wildcard("*.conf", "a.txt")
+                && wildcard("a?c*", "abcde")
+        );
+        Ok(())
     }
 }

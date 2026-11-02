@@ -50,6 +50,8 @@ pub trait Interaction: Send + Sync {
     ) -> Option<Vec<String>>;
     /// Pre-auth banner from the server (e.g. legal notice).
     fn banner(&self, _text: &str) {}
+    /// Non-fatal problem worth showing (e.g. "key x.ppk: wrong passphrase").
+    fn notice(&self, _text: &str) {}
 }
 
 /// Lookup of stored secrets (the vault) by credential id.

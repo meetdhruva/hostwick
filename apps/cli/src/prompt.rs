@@ -150,4 +150,8 @@ impl Interaction for TerminalInteraction {
     fn banner(&self, text: &str) {
         eprint!("{text}");
     }
+
+    fn notice(&self, text: &str) {
+        eprintln!("note: {text}");
+    }
 }

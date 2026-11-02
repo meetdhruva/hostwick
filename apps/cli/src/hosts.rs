@@ -173,7 +173,9 @@ pub fn run_import(app: &App, cmd: ImportCmd) -> Result<i32> {
                     .map(|h| PathBuf::from(h).join(".ssh").join("config"))
                     .context("no home directory")?,
             };
-            (hostwick_import::parse_ssh_config(&read(&path)?), dry_run)
+            let text = hostwick_import::load_ssh_config(&path)
+                .with_context(|| format!("cannot read {}", path.display()))?;
+            (hostwick_import::parse_ssh_config(&text), dry_run)
         }
         ImportCmd::Putty {
             file: Some(f),
