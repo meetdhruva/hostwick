@@ -3520,6 +3520,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "hostwick-keys"
+version = "0.2.0"
+dependencies = [
+ "argon2 0.5.3",
+ "base64",
+ "getrandom 0.4.3",
+ "hex",
+ "hmac 0.13.0",
+ "russh",
+ "secrecy",
+ "sha1",
+ "ssh-key",
+ "tempfile",
+ "thiserror 2.0.21",
+ "zeroize",
+]
+
+[[package]]
 name = "hostwick-sftp"
 version = "0.2.0"
 dependencies = [

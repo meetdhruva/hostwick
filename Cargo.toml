@@ -8,6 +8,7 @@ members = [
     "crates/hostwick-vault",
     "crates/hostwick-store",
     "crates/hostwick-import",
+    "crates/hostwick-keys",
     "apps/cli",
     "apps/desktop",
 ]
@@ -21,6 +22,7 @@ default-members = [
     "crates/hostwick-vault",
     "crates/hostwick-store",
     "crates/hostwick-import",
+    "crates/hostwick-keys",
     "apps/cli",
 ]
 
@@ -40,6 +42,7 @@ hostwick-transfer = { path = "crates/hostwick-transfer", version = "0.2.0" }
 hostwick-vault = { path = "crates/hostwick-vault", version = "0.2.0" }
 hostwick-store = { path = "crates/hostwick-store", version = "0.2.0" }
 hostwick-import = { path = "crates/hostwick-import", version = "0.2.0" }
+hostwick-keys = { path = "crates/hostwick-keys", version = "0.2.0" }
 
 # `ring` instead of the default aws-lc-rs: no CMake/NASM needed on Windows.
 russh = { version = "0.65", default-features = false, features = ["flate2", "ring", "rsa"] }
