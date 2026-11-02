@@ -16,6 +16,10 @@ app — built to replace Solar-PuTTY, PuTTY and WinSCP on Windows, macOS and Lin
 - **Brings your sessions.** Imports `~/.ssh/config`, PuTTY (registry or `.reg`),
   WinSCP (registry or `WinSCP.ini`) and Solar-PuTTY JSON exports.
 
+![Terminal](docs/screenshots/terminal.png)
+
+![File browser](docs/screenshots/files.png)
+
 ## Layout
 
 ```
