@@ -342,15 +342,21 @@ is remembered per host).
   for local rows on macOS and Wayland; remote rows (and X11/Windows) cannot be
   dragged out — use Download.
 - **Edit in your editor** (F4 or right-click → Edit): the file is downloaded to
-  a temporary folder under its own name and opened with *Settings → External
+  a private folder (`0700`, in the app's data directory) under its own name
+  and opened with *Settings → External
   editor* (`{file}` is replaced by the path, otherwise appended; empty = the
   system's default app). Every save is uploaded — changes are detected by
   content hash, not timestamps, so editors that save by rename and time-zone
   differences do not matter. If the server copy changed meanwhile you choose:
-  *Overwrite*, *Download theirs* or *Save as copy*. Uploads write into the
-  existing file, so its owner and permissions stay. The **Edits** button lists
-  open files with their state (watching, uploading, uploaded 12:01, error) and
-  stops watching; temporary copies are removed when the tab closes.
+  *Overwrite*, *Download theirs* or *Save as copy*. Each upload goes to a
+  temporary file next to the original, is size-checked, gets the original's
+  permissions and owner, and is renamed over it — a dropped connection never
+  leaves a truncated file. Only when that is impossible (folder not writable,
+  owner cannot be kept, a symbolic link) is the file rewritten in place, and
+  the status says so. The **Edits** button lists open files with their state
+  (watching, uploading, uploaded 12:01, error) and stops watching; the copies
+  are removed when the tab closes, unless some edits never reached the server
+  — then the folder is kept and you are told where.
 - **Properties**: type, size and *Calculate* for folders (computed on the
   server with `find` when possible), modified time, owner/group (names and
   numeric ids, editable), permissions as checkboxes kept in step with an octal
@@ -526,9 +532,11 @@ a language, copy `en.ftl`, translate it, and add one line to `LANGUAGES` in
   authenticates its KDF parameters, writes atomically, and is `0600` on Unix.
 - Agent and X11 forwarding are off by default and only ever go to the
   destination host, never to jump hosts. Agent or X11 channels a server opens
-  without being asked are refused. X11 forwarding works like OpenSSH's
-  untrusted `ssh -X`: the server only sees a random fake cookie, which is
-  checked and swapped for the real one locally.
+  without being asked are refused. X11 forwarding works like PuTTY's and
+  OpenSSH's *trusted* `ssh -Y`: the server only sees a random fake cookie,
+  which is checked and swapped for the real one locally, but forwarded X
+  clients get full access to your display (they can read keystrokes and take
+  screenshots), so only forward X11 to servers you trust.
 - `russh` ≥ 0.62.5 is required (CVE-2026-73429 and a second fix); this tree
   uses 0.65. Run `cargo deny check` in CI.
 
