@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Instant, SystemTime};
 
+use gpui_kit::SharedString;
 use hostwick_core::{AuthMethod, ExposeSecret, HostProfile, ProfileId, SecretString};
 use hostwick_ssh::Credentials;
 use hostwick_vault::{Vault, VaultError};
@@ -136,7 +137,7 @@ pub fn profile_ids(p: &HostProfile) -> Vec<(CredKind, String)> {
 /// A human name for a saved credential: which hosts use it and for what.
 pub fn describe(id: &str, profiles: &[HostProfile]) -> String {
     if id == SYNC_PASSPHRASE_ID {
-        return "Settings sync passphrase".into();
+        return t!("cred-sync-passphrase").into();
     }
     let mut users = Vec::new();
     let mut what = None;
@@ -145,15 +146,17 @@ pub fn describe(id: &str, profiles: &[HostProfile]) -> String {
             if pid == id {
                 users.push(p.path());
                 what.get_or_insert(match kind {
-                    CredKind::Password => "login password".to_owned(),
-                    CredKind::Sudo => "sudo password".to_owned(),
-                    CredKind::Proxy => "proxy password".to_owned(),
-                    CredKind::KeyPassphrase(path) => format!(
-                        "passphrase for {}",
-                        path.file_name()
+                    CredKind::Password => t!("cred-login-password").to_string(),
+                    CredKind::Sudo => t!("cred-sudo-password").to_string(),
+                    CredKind::Proxy => t!("cred-proxy-password").to_string(),
+                    CredKind::KeyPassphrase(path) => t!(
+                        "cred-key-passphrase",
+                        file = path
+                            .file_name()
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_else(|| path.display().to_string())
-                    ),
+                    )
+                    .to_string(),
                 });
             }
         }
@@ -164,8 +167,8 @@ pub fn describe(id: &str, profiles: &[HostProfile]) -> String {
         (Some(w), 1) => format!("{} — {w}", users[0]),
         (Some(w), n) if n > 1 => format!("{w} ({})", users.join(", ")),
         _ => match id.strip_prefix("key:") {
-            Some(path) => format!("Key passphrase — {path} (no host uses it)"),
-            None if id.starts_with("host:") => "Unused (its host was deleted)".into(),
+            Some(path) => t!("cred-key-unused", path = path).into(),
+            None if id.starts_with("host:") => t!("cred-host-deleted").into(),
             None => id.to_owned(),
         },
     }
@@ -175,10 +178,10 @@ pub fn describe(id: &str, profiles: &[HostProfile]) -> String {
 pub const SYNC_PASSPHRASE_ID: &str = "hostwick:settings-sync";
 
 /// Rough strength of a new master password, for the hint under the field.
-pub fn strength_hint(pw: &str) -> (u8, &'static str) {
+pub fn strength_hint(pw: &str) -> (u8, SharedString) {
     let len = pw.chars().count();
     if len == 0 {
-        return (0, "");
+        return (0, SharedString::default());
     }
     let classes = [
         pw.chars().any(|c| c.is_ascii_lowercase()),
@@ -191,11 +194,11 @@ pub fn strength_hint(pw: &str) -> (u8, &'static str) {
     .count();
     let words = pw.split_whitespace().count();
     match (len, classes, words) {
-        (0..=7, _, _) => (1, "Too short — use at least 8 characters"),
-        (_, _, w) if w >= 4 && len >= 16 => (3, "Strong passphrase"),
-        (8..=11, 0..=2, _) => (1, "Weak — longer is better (a few words work well)"),
-        (8..=11, _, _) | (12..=15, 0..=2, _) => (2, "Fair"),
-        _ => (3, "Strong"),
+        (0..=7, _, _) => (1, t!("strength-too-short")),
+        (_, _, w) if w >= 4 && len >= 16 => (3, t!("strength-strong-passphrase")),
+        (8..=11, 0..=2, _) => (1, t!("strength-weak")),
+        (8..=11, _, _) | (12..=15, 0..=2, _) => (2, t!("strength-fair")),
+        _ => (3, t!("strength-strong")),
     }
 }
 
@@ -358,7 +361,7 @@ impl VaultManager {
     pub fn set(&self, id: &str, secret: SecretString) -> Result<(), String> {
         let res = self
             .with_open(|v| v.set(id, secret))
-            .ok_or_else(|| "the vault is locked".to_owned())?
+            .ok_or_else(|| t!("vault-locked-error").to_string())?
             .map_err(|e| e.to_string());
         if res.is_ok()
             && let Ok(mut s) = self.stale.lock()
@@ -370,7 +373,7 @@ impl VaultManager {
 
     pub fn remove(&self, id: &str) -> Result<bool, String> {
         self.with_open(|v| v.remove(id))
-            .ok_or_else(|| "the vault is locked".to_owned())?
+            .ok_or_else(|| t!("vault-locked-error").to_string())?
             .map_err(|e| e.to_string())
     }
 
@@ -383,7 +386,7 @@ impl VaultManager {
     /// Blocking (Argon2, twice).
     pub fn change_master(&self, old: &SecretString, new: SecretString) -> Result<(), String> {
         let mut fresh = Vault::unlock(&self.path, old).map_err(|e| match e {
-            VaultError::WrongPassword => "The current master password is wrong.".to_owned(),
+            VaultError::WrongPassword => t!("vault-current-wrong").to_string(),
             e => e.to_string(),
         })?;
         fresh.change_master(&new).map_err(|e| e.to_string())?;

@@ -57,7 +57,7 @@ pub fn compile(query: &str, case_sensitive: bool, regex: bool) -> Result<RegexSe
     RegexSearch::new(&pattern(query, case_sensitive, regex)).map_err(|e| {
         let s = e.to_string();
         if s.contains("exceeds size limit") || s.contains("too big") {
-            "pattern too complex".to_owned()
+            t!("search-too-complex").to_string()
         } else {
             s
         }

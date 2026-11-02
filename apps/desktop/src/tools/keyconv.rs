@@ -61,15 +61,14 @@ pub fn converted_path(path: &Path, format: OutFormat) -> PathBuf {
 
 impl KeyTool {
     fn new(backend: Arc<Backend>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mk = |ph: &str, masked: bool, window: &mut Window, cx: &mut Context<Self>| {
-            let ph = ph.to_owned();
+        let mk = |ph: SharedString, masked: bool, window: &mut Window, cx: &mut Context<Self>| {
             cx.new(|cx| InputState::new(window, cx).placeholder(ph).masked(masked))
         };
-        let path = mk("~/.ssh/id_ed25519 or C:\\keys\\work.ppk", false, window, cx);
-        let old = mk("Current passphrase (if it has one)", true, window, cx);
-        let new = mk("New passphrase (empty = none)", true, window, cx);
-        let confirm = mk("Repeat new passphrase", true, window, cx);
-        let out = mk("Output file", false, window, cx);
+        let path = mk(t!("keyconv-path-placeholder"), false, window, cx);
+        let old = mk(t!("keyconv-current-placeholder"), true, window, cx);
+        let new = mk(t!("keyconv-new-placeholder"), true, window, cx);
+        let confirm = mk(t!("keyconv-repeat-placeholder"), true, window, cx);
+        let out = mk(t!("keyconv-output"), false, window, cx);
         let mut subs = vec![cx.subscribe_in(
             &path,
             window,
@@ -140,7 +139,7 @@ impl KeyTool {
             return;
         };
         if self.new.read(cx).value() != self.confirm.read(cx).value() {
-            self.message = Some((true, "The new passphrases do not match.".into()));
+            self.message = Some((true, t!("keyconv-mismatch").into()));
             cx.notify();
             return;
         }
@@ -151,10 +150,11 @@ impl KeyTool {
             let info = hostwick_keys::inspect(&path).ok();
             Ok((
                 info,
-                format!(
-                    "Passphrase {} ({fmt}).",
-                    if new.is_some() { "changed" } else { "removed" }
-                ),
+                if new.is_some() {
+                    t!("keyconv-pass-changed", format = fmt.to_string()).into()
+                } else {
+                    t!("keyconv-pass-removed", format = fmt.to_string()).into()
+                },
             ))
         });
     }
@@ -170,7 +170,7 @@ impl KeyTool {
             ssh_dir_path(&out_text)
         };
         if self.new.read(cx).value() != self.confirm.read(cx).value() {
-            self.message = Some((true, "The new passphrases do not match.".into()));
+            self.message = Some((true, t!("keyconv-mismatch").into()));
             cx.notify();
             return;
         }
@@ -194,7 +194,12 @@ impl KeyTool {
             .map_err(describe)?;
             Ok((
                 None,
-                format!("Wrote {} ({}).", out.display(), format.label()),
+                t!(
+                    "keyconv-wrote",
+                    path = out.display().to_string(),
+                    format = format.label()
+                )
+                .into(),
             ))
         });
     }
@@ -233,7 +238,9 @@ impl KeyTool {
                         }
                     }
                     Ok(Err(e)) => f.message = Some((true, e)),
-                    Err(e) => f.message = Some((true, format!("internal error: {e}"))),
+                    Err(e) => {
+                        f.message = Some((true, t!("error-internal", error = e.to_string()).into()))
+                    }
                 }
                 cx.notify();
             });
@@ -244,14 +251,9 @@ impl KeyTool {
 
 fn describe(e: KeyError) -> String {
     match e {
-        KeyError::PassphraseRequired => {
-            "This key has a passphrase: type it under “Current passphrase”.".into()
-        }
-        KeyError::WrongPassphrase => "Wrong passphrase.".into(),
-        KeyError::Exists(p) => format!(
-            "{} already exists; choose another output file.",
-            p.display()
-        ),
+        KeyError::PassphraseRequired => t!("keyconv-needs-passphrase").into(),
+        KeyError::WrongPassphrase => t!("keyconv-wrong-passphrase").into(),
+        KeyError::Exists(p) => t!("keyconv-exists", path = p.display().to_string()).into(),
         e => e.to_string(),
     }
 }
@@ -259,7 +261,7 @@ fn describe(e: KeyError) -> String {
 impl Render for KeyTool {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let row = |label: &'static str, el: AnyElement| {
+        let row = |label: SharedString, el: AnyElement| {
             div()
                 .flex()
                 .items_center()
@@ -275,37 +277,36 @@ impl Render for KeyTool {
         };
         let path_input = self.path.clone();
         let this = cx.entity().downgrade();
-        let browse =
-            Button::new("kc-browse")
-                .small()
-                .label("Browse…")
-                .on_click(move |_, window, cx| {
-                    let picked = cx.prompt_for_paths(PathPromptOptions {
-                        files: true,
-                        directories: false,
-                        multiple: false,
-                        prompt: Some("Key file".into()),
-                    });
-                    let (input, this) = (path_input.clone(), this.clone());
-                    window
-                        .spawn(cx, async move |cx| {
-                            let Ok(Ok(Some(paths))) = picked.await else {
-                                return;
-                            };
-                            if let Some(p) = paths.into_iter().next() {
-                                let text = p.display().to_string();
-                                let _ = cx.update(|window, cx| {
-                                    input.update(cx, |s, cx| s.set_value(text, window, cx));
-                                    let _ = this.update(cx, |f, cx| f.inspect(window, cx));
-                                });
-                            }
-                        })
-                        .detach();
+        let browse = Button::new("kc-browse")
+            .small()
+            .label(t!("button-browse"))
+            .on_click(move |_, window, cx| {
+                let picked = cx.prompt_for_paths(PathPromptOptions {
+                    files: true,
+                    directories: false,
+                    multiple: false,
+                    prompt: Some(t!("keyconv-key-file")),
                 });
+                let (input, this) = (path_input.clone(), this.clone());
+                window
+                    .spawn(cx, async move |cx| {
+                        let Ok(Ok(Some(paths))) = picked.await else {
+                            return;
+                        };
+                        if let Some(p) = paths.into_iter().next() {
+                            let text = p.display().to_string();
+                            let _ = cx.update(|window, cx| {
+                                input.update(cx, |s, cx| s.set_value(text, window, cx));
+                                let _ = this.update(cx, |f, cx| f.inspect(window, cx));
+                            });
+                        }
+                    })
+                    .detach();
+            });
         let info = self.info.clone().map(|i| {
             let public = hostwick_keys::public_openssh(&i.public_key);
             let copy = public.clone();
-            let kv = |k: &'static str, v: String| {
+            let kv = |k: SharedString, v: String| {
                 div()
                     .flex()
                     .gap(px(8.0))
@@ -326,34 +327,40 @@ impl Render for KeyTool {
                 .rounded(px(4.0))
                 .border_1()
                 .border_color(theme.border)
-                .child(kv("Format", i.format.to_string()))
+                .child(kv(t!("keygen-format"), i.format.to_string()))
                 .child(kv(
-                    "Type",
-                    format!("{} {} bits ({})", i.type_label, i.bits, i.algorithm),
+                    t!("keygen-type"),
+                    t!(
+                        "keyconv-type-bits",
+                        kind = &i.type_label,
+                        bits = i.bits,
+                        algorithm = &i.algorithm
+                    )
+                    .into(),
                 ))
                 .child(kv(
-                    "Protected",
+                    t!("keyconv-protected"),
                     match (i.format, i.encrypted) {
-                        (KeyFormat::Public, _) => "public key only".into(),
-                        (_, true) => "yes, with a passphrase".into(),
-                        (_, false) => "no passphrase".into(),
+                        (KeyFormat::Public, _) => t!("keyconv-public-only").into(),
+                        (_, true) => t!("keyconv-encrypted").into(),
+                        (_, false) => t!("keyconv-no-passphrase").into(),
                     },
                 ))
                 .child(kv(
-                    "Comment",
+                    t!("keygen-comment"),
                     if i.comment.is_empty() {
                         "—".into()
                     } else {
                         i.comment.clone()
                     },
                 ))
-                .child(kv("Fingerprint", i.fingerprint.clone()))
+                .child(kv(t!("keyconv-fingerprint"), i.fingerprint.clone()))
                 .child(mono(wrap_chars(&public, 72), cx))
                 .child(
                     div().child(
                         Button::new("kc-copy")
                             .xsmall()
-                            .label("Copy public key")
+                            .label(t!("keygen-copy-public"))
                             .on_click(move |_, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))
                             }),
@@ -370,6 +377,7 @@ impl Render for KeyTool {
                 Button::new(("kcf", i))
                     .xsmall()
                     .label(fmt.label())
+                    .toggled(self.format == fmt)
                     .when(self.format == fmt, |b| b.primary())
                     .on_click(cx.listener(move |f, _, w, cx| f.set_format(fmt, w, cx))),
             );
@@ -382,21 +390,22 @@ impl Render for KeyTool {
             .max_h(px(580.0))
             .overflow_y_scroll()
             .child(row(
-                "Key file",
+                t!("keyconv-key-file"),
                 div()
                     .flex()
                     .gap(px(6.0))
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(Input::new(&self.path).small()),
+                        div().flex_1().min_w_0().child(
+                            Input::new(&self.path)
+                                .small()
+                                .aria_label(t!("keyconv-key-file")),
+                        ),
                     )
                     .child(browse)
                     .child(
                         Button::new("kc-inspect")
                             .small()
-                            .label("Inspect")
+                            .label(t!("keyconv-inspect"))
                             .disabled(self.busy)
                             .on_click(cx.listener(|f, _, w, cx| f.inspect(w, cx))),
                     )
@@ -405,23 +414,26 @@ impl Render for KeyTool {
             .children(info)
             .when(is_private, |d| {
                 d.child(row(
-                    "Current",
+                    t!("keyconv-current"),
                     Input::new(&self.old)
                         .small()
+                        .aria_label(t!("keyconv-current"))
                         .mask_toggle()
                         .into_any_element(),
                 ))
                 .child(row(
-                    "New passphrase",
+                    t!("keyconv-new"),
                     Input::new(&self.new)
                         .small()
+                        .aria_label(t!("keyconv-new"))
                         .mask_toggle()
                         .into_any_element(),
                 ))
                 .child(row(
-                    "Repeat",
+                    t!("keygen-repeat"),
                     Input::new(&self.confirm)
                         .small()
+                        .aria_label(t!("keygen-repeat"))
                         .mask_toggle()
                         .into_any_element(),
                 ))
@@ -429,15 +441,18 @@ impl Render for KeyTool {
                     div().pl(px(138.0)).child(
                         Button::new("kc-pass")
                             .small()
-                            .label("Change passphrase")
+                            .label(t!("keyconv-change"))
                             .disabled(self.busy)
                             .on_click(cx.listener(|f, _, w, cx| f.change_passphrase(w, cx))),
                     ),
                 )
-                .child(row("Convert to", formats.into_any_element()))
+                .child(row(t!("keyconv-convert-to"), formats.into_any_element()))
                 .child(row(
-                    "Output file",
-                    Input::new(&self.out).small().into_any_element(),
+                    t!("keyconv-output"),
+                    Input::new(&self.out)
+                        .small()
+                        .aria_label(t!("keyconv-output"))
+                        .into_any_element(),
                 ))
                 .child(
                     div()
@@ -449,7 +464,7 @@ impl Render for KeyTool {
                             Button::new("kc-convert")
                                 .small()
                                 .primary()
-                                .label("Convert")
+                                .label(t!("keyconv-convert"))
                                 .disabled(self.busy)
                                 .on_click(cx.listener(|f, _, w, cx| f.convert(w, cx))),
                         )
@@ -457,12 +472,16 @@ impl Render for KeyTool {
                             div()
                                 .text_size(px(11.0))
                                 .text_color(theme.muted_foreground)
-                                .child("Keeps the current passphrase unless you type a new one."),
+                                .child(t!("keyconv-keeps-passphrase")),
                         ),
                 )
             })
             .when(self.busy, |d| {
-                d.child(div().text_color(theme.muted_foreground).child("Working…"))
+                d.child(
+                    div()
+                        .text_color(theme.muted_foreground)
+                        .child(t!("keyconv-working")),
+                )
             })
             .when_some(self.message.clone(), |d, (err, m)| {
                 d.child(
@@ -485,14 +504,14 @@ pub fn open(backend: Arc<Backend>, window: &mut Window, cx: &mut App) {
             input.update(cx, |s, cx| s.focus(window, cx));
         }
         dialog
-            .title("Inspect or convert key")
+            .title(crate::a11y::text(t!("keyconv-title")))
             .w(px(720.0))
             .margin_top(px(40.0))
             .child(form.clone())
             .footer(
                 div().flex().child(
                     Button::new("close")
-                        .label("Close")
+                        .label(t!("button-close"))
                         .on_click(|_, w, cx| w.close_dialog(cx)),
                 ),
             )

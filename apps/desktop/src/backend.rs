@@ -37,6 +37,48 @@ pub struct RememberOffer {
     pub checked: bool,
 }
 
+/// Which secret a prompt asks for (for the "Remember …" wording).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretWhat {
+    Password,
+    ProxyPassword,
+    Passphrase,
+    Sudo,
+}
+
+impl SecretWhat {
+    /// "The saved password was not accepted. Type the current one."
+    fn rejected_note(self) -> String {
+        match self {
+            Self::Password => t!("secret-rejected-password"),
+            Self::ProxyPassword => t!("secret-rejected-proxy"),
+            Self::Passphrase => t!("secret-rejected-passphrase"),
+            Self::Sudo => t!("secret-rejected-sudo"),
+        }
+        .into()
+    }
+
+    fn update_label(self) -> String {
+        match self {
+            Self::Password => t!("secret-update-password"),
+            Self::ProxyPassword => t!("secret-update-proxy"),
+            Self::Passphrase => t!("secret-update-passphrase"),
+            Self::Sudo => t!("secret-update-sudo"),
+        }
+        .into()
+    }
+
+    fn remember_label(self) -> String {
+        match self {
+            Self::Password => t!("secret-remember-password"),
+            Self::ProxyPassword => t!("secret-remember-proxy"),
+            Self::Passphrase => t!("secret-remember-passphrase"),
+            Self::Sudo => t!("secret-remember-sudo"),
+        }
+        .into()
+    }
+}
+
 /// What the person typed into a secret prompt.
 pub struct SecretAnswer {
     pub value: String,
@@ -127,7 +169,7 @@ impl UiInteraction {
     ) -> Option<Vec<String>> {
         let (reply, rx) = oneshot::channel();
         let title = if name.is_empty() {
-            "Server authentication".to_owned()
+            t!("prompt-server-auth-title").to_string()
         } else {
             name.to_owned()
         };
@@ -209,7 +251,7 @@ impl SessionInteraction {
     fn offer(
         &self,
         kind: Option<&CredKind>,
-        what: &str,
+        what: SecretWhat,
     ) -> (Option<String>, Option<RememberOffer>) {
         let Some(kind) = kind else {
             return (None, None);
@@ -221,11 +263,9 @@ impl SessionInteraction {
             .unwrap_or(false);
         if rejected {
             (
-                Some(format!(
-                    "The saved {what} was not accepted. Type the current one."
-                )),
+                Some(what.rejected_note()),
                 Some(RememberOffer {
-                    label: format!("Update the saved {what}"),
+                    label: what.update_label(),
                     checked: true,
                 }),
             )
@@ -233,7 +273,7 @@ impl SessionInteraction {
             (
                 None,
                 Some(RememberOffer {
-                    label: format!("Remember {what}"),
+                    label: what.remember_label(),
                     checked: false,
                 }),
             )
@@ -245,7 +285,7 @@ impl SessionInteraction {
         kind: Option<CredKind>,
         title: String,
         label: &str,
-        what: &str,
+        what: SecretWhat,
     ) -> Option<SecretString> {
         let (note, offer) = self.offer(kind.as_ref(), what);
         let ans = self.ui.secret(title, label, note, offer).await?;
@@ -277,14 +317,14 @@ impl Interaction for SessionInteraction {
     async fn password(&self, user: &str, host: &str) -> Option<SecretString> {
         let kind = self.classify(SecretUse::Password { user, host });
         let what = if kind == Some(CredKind::Proxy) {
-            "proxy password"
+            SecretWhat::ProxyPassword
         } else {
-            "password"
+            SecretWhat::Password
         };
         self.ask(
             kind,
-            format!("Password for {user}@{host}"),
-            "Password",
+            t!("prompt-password-title", user = user, host = host).into(),
+            &t!("prompt-password-label"),
             what,
         )
         .await
@@ -294,9 +334,9 @@ impl Interaction for SessionInteraction {
         let kind = self.classify(SecretUse::KeyPassphrase(path));
         self.ask(
             kind,
-            format!("Passphrase for {}", path.display()),
-            "Passphrase",
-            "passphrase",
+            t!("prompt-passphrase-title", path = path.display().to_string()).into(),
+            &t!("prompt-passphrase-label"),
+            SecretWhat::Passphrase,
         )
         .await
     }
@@ -465,10 +505,7 @@ impl Backend {
             return;
         }
         if !self
-            .ensure_vault(format!(
-                "{} has saved passwords. Unlock them with your master password.",
-                profile.name
-            ))
+            .ensure_vault(t!("vault-reason-host", name = &profile.name).into())
             .await
         {
             self.vault.set_declined(true);
@@ -482,12 +519,12 @@ impl Backend {
             return;
         }
         let reason = if self.vault.exists() {
-            "Unlock your saved passwords to store this one.".to_owned()
+            t!("vault-reason-store").to_string()
         } else {
-            "Create a vault for saved passwords. One master password protects them; it is never stored.".to_owned()
+            t!("vault-reason-create").to_string()
         };
         if !self.ensure_vault(reason).await {
-            self.notice("Not saved: the password vault is locked.");
+            self.notice(t!("notice-not-saved-locked"));
             return;
         }
         let Ok(mut p) = self.store.get(profile) else {
@@ -502,7 +539,7 @@ impl Backend {
                         saved += 1;
                     }
                 }
-                Err(e) => self.notice(format!("Could not save the password: {e}")),
+                Err(e) => self.notice(t!("notice-save-password-failed", error = e.to_string())),
             }
         }
         if saved > 0 {
@@ -511,7 +548,11 @@ impl Backend {
                     tracing::info!(host = %p.name, saved, "remembered credentials");
                     self.send(Prompt::ProfilesChanged);
                 }
-                Err(e) => self.notice(format!("Could not update {}: {e}", p.name)),
+                Err(e) => self.notice(t!(
+                    "notice-update-host-failed",
+                    name = &p.name,
+                    error = e.to_string()
+                )),
             }
         }
     }
@@ -603,9 +644,12 @@ impl Backend {
     pub async fn open_files(self: Arc<Self>, profile: HostProfile) -> Result<FilesSession> {
         if profile.protocol != Protocol::Ssh {
             anyhow::bail!(
-                "Files need SSH: {} is a {} connection, which cannot transfer files.",
-                profile.name,
-                profile.protocol.label().to_lowercase()
+                "{}",
+                t!(
+                    "files-need-ssh",
+                    name = &profile.name,
+                    protocol = crate::util::protocol_name(&profile.protocol)
+                )
             );
         }
         if profile.sudo.enabled {
@@ -613,7 +657,7 @@ impl Backend {
                 Ok(s) => return Ok(s),
                 Err(e) => {
                     let mut s = self.open_remote(profile, false).await?;
-                    s.notice = Some(format!("Could not open as root: {e:#}"));
+                    s.notice = Some(t!("files-root-failed", error = format!("{e:#}")).into());
                     return Ok(s);
                 }
             }
@@ -665,23 +709,22 @@ impl Backend {
                         this.vault.mark_stale(id);
                     }
                     let title = if wrong && !saved_rejected {
-                        format!("Wrong password. sudo password for {who}")
+                        t!("prompt-sudo-wrong-title", who = &who).to_string()
                     } else {
-                        format!("sudo password for {who}")
+                        t!("prompt-sudo-title", who = &who).to_string()
                     };
-                    let note = saved_rejected
-                        .then(|| "sudo did not accept the saved password.".to_owned());
+                    let note = saved_rejected.then(|| SecretWhat::Sudo.rejected_note());
                     let offer = can_remember.then(|| RememberOffer {
                         label: if saved_rejected {
-                            "Update the saved sudo password".into()
+                            SecretWhat::Sudo.update_label()
                         } else {
-                            "Remember sudo password".into()
+                            SecretWhat::Sudo.remember_label()
                         },
                         checked: saved_rejected,
                     });
                     let ans = this
                         .interaction
-                        .secret(title, "Password", note, offer)
+                        .secret(title, &t!("prompt-password-label"), note, offer)
                         .await?;
                     let secret = SecretString::from(ans.value);
                     if let Ok(mut t) = typed.lock() {
@@ -691,10 +734,12 @@ impl Backend {
                 }
             })
             .await
-            .context(if elevate {
-                "opening files as root"
-            } else {
-                "opening the file browser"
+            .with_context(|| {
+                if elevate {
+                    t!("files-opening-root")
+                } else {
+                    t!("files-opening")
+                }
             })?
         };
         let to_save = typed.lock().ok().and_then(|mut t| t.take());
@@ -707,6 +752,59 @@ impl Backend {
             fs,
             notice: None,
         })
+    }
+
+    /// "Test connection" in the host editor: connect through `spec` to
+    /// `host:port` (off the UI thread) and say what answered. The proxy
+    /// password comes from the vault or a prompt; nothing is remembered.
+    pub async fn test_proxy(
+        self: Arc<Self>,
+        spec: hostwick_core::ProxySpec,
+        host: String,
+        port: u16,
+    ) -> Result<String, String> {
+        use tokio::io::AsyncReadExt as _;
+        if spec.password_credential.is_some() && self.vault.exists() && !self.vault.is_unlocked() {
+            self.ensure_vault(t!("vault-reason-proxy-test").into())
+                .await;
+        }
+        let session = Arc::new(SessionInteraction {
+            ui: self.interaction.clone(),
+            vault: self.vault.clone(),
+            profile: None,
+            state: Mutex::default(),
+        });
+        let mut ctx = ConnectContext::new(session, Arc::new(VaultCredentials(self.vault.clone())));
+        ctx.connect_timeout = Duration::from_secs(15);
+        let target = if port == 22 {
+            host.clone()
+        } else {
+            format!("{host}:{port}")
+        };
+        let mut tcp = hostwick_ssh::connect_via_proxy(&spec, &ctx, &host, port)
+            .await
+            .map_err(|e| e.to_string())?;
+        // An SSH server greets first; telnet servers may stay quiet.
+        let mut buf = [0u8; 255];
+        match tokio::time::timeout(Duration::from_secs(5), tcp.read(&mut buf)).await {
+            Ok(Ok(0)) => Err(t!("proxy-test-closed", target = &target).into()),
+            Ok(Ok(n)) => {
+                let greeting = String::from_utf8_lossy(&buf[..n]);
+                let first = greeting.lines().next().unwrap_or_default().trim();
+                if first.starts_with("SSH-") {
+                    Ok(t!("proxy-test-ok-ssh", target = &target, server = first).into())
+                } else {
+                    Ok(t!("proxy-test-ok", target = &target).into())
+                }
+            }
+            Ok(Err(e)) => Err(t!(
+                "proxy-test-read-failed",
+                target = &target,
+                error = e.to_string()
+            )
+            .into()),
+            Err(_) => Ok(t!("proxy-test-ok-quiet", target = &target).into()),
+        }
     }
 
     /// Ask the person for a secret through the app's prompt dialogs.

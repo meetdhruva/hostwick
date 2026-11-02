@@ -21,13 +21,13 @@ struct SnippetRow {
 
 pub struct SnippetEditor {
     rows: Vec<SnippetRow>,
-    empty_hint: &'static str,
+    empty_hint: SharedString,
 }
 
 impl SnippetEditor {
     pub fn new(
         snippets: &[Snippet],
-        empty_hint: &'static str,
+        empty_hint: SharedString,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -46,13 +46,13 @@ impl SnippetEditor {
         self.rows.push(SnippetRow {
             name: cx.new(|cx| {
                 InputState::new(window, cx)
-                    .placeholder("Button label")
+                    .placeholder(t!("snippet-label-placeholder"))
                     .default_value(name)
             }),
             text: cx.new(|cx| {
                 TextareaState::new(window, cx)
                     .rows(2)
-                    .placeholder("Text to send (several lines are pasted as one block)")
+                    .placeholder(t!("snippet-text-placeholder"))
                     .default_value(text)
             }),
             run: snip.run,
@@ -91,7 +91,7 @@ impl Render for SnippetEditor {
                     div()
                         .text_size(px(12.0))
                         .text_color(theme.muted_foreground)
-                        .child(self.empty_hint),
+                        .child(self.empty_hint.clone()),
                 )
             })
             .children(self.rows.iter().enumerate().map(|(i, r)| {
@@ -111,15 +111,21 @@ impl Render for SnippetEditor {
                             .gap(px(4.0))
                             .child(Input::new(&r.name).small())
                             .child(
-                                Checkbox::new(("snip-run", i))
-                                    .label("Press Enter")
-                                    .checked(r.run)
-                                    .on_click(cx.listener(move |e, v: &bool, _, cx| {
+                                crate::a11y::checkbox(
+                                    ("snip-run", i),
+                                    t!("snippet-press-enter"),
+                                    false,
+                                    cx,
+                                )
+                                .checked(r.run)
+                                .on_click(cx.listener(
+                                    move |e, v: &bool, _, cx| {
                                         if let Some(r) = e.rows.get_mut(i) {
                                             r.run = *v;
                                         }
                                         cx.notify();
-                                    })),
+                                    },
+                                )),
                             ),
                     )
                     .child(div().flex_1().child(Textarea::new(&r.text).small()))
@@ -132,7 +138,8 @@ impl Render for SnippetEditor {
                                     .xsmall()
                                     .ghost()
                                     .icon(IconName::ChevronUp)
-                                    .tooltip("Move up")
+                                    .tooltip(t!("snippet-move-up"))
+                                    .accessibility_label(t!("snippet-move-up"))
                                     .disabled(i == 0)
                                     .on_click(cx.listener(move |e, _, _, cx| {
                                         e.rows.swap(i, i - 1);
@@ -144,7 +151,8 @@ impl Render for SnippetEditor {
                                     .xsmall()
                                     .ghost()
                                     .icon(IconName::ChevronDown)
-                                    .tooltip("Move down")
+                                    .tooltip(t!("snippet-move-down"))
+                                    .accessibility_label(t!("snippet-move-down"))
                                     .disabled(i + 1 >= n)
                                     .on_click(cx.listener(move |e, _, _, cx| {
                                         e.rows.swap(i, i + 1);
@@ -156,7 +164,8 @@ impl Render for SnippetEditor {
                                     .xsmall()
                                     .ghost()
                                     .icon(IconName::Delete)
-                                    .tooltip("Remove")
+                                    .tooltip(t!("editor-remove"))
+                                    .accessibility_label(t!("editor-remove"))
                                     .on_click(cx.listener(move |e, _, _, cx| {
                                         e.rows.remove(i);
                                         cx.notify();
@@ -169,7 +178,7 @@ impl Render for SnippetEditor {
                     Button::new("snip-add")
                         .small()
                         .icon(IconName::Plus)
-                        .label("Add snippet")
+                        .label(t!("snippet-add"))
                         .on_click(cx.listener(|e, _, window, cx| {
                             e.push(
                                 &Snippet {
@@ -213,16 +222,17 @@ const PREVIEW: &[&str] = &[
 /// Problems with a rule, for the inline message (None = fine).
 pub fn rule_problem(r: &HighlightRule) -> Option<String> {
     if r.pattern.trim().is_empty() {
-        return Some("empty pattern".into());
+        return Some(t!("rule-error-empty").into());
     }
     if parse_color(&r.color).is_none() {
-        return Some(format!("colour must look like #ff8800, not `{}`", r.color));
+        return Some(t!("rule-error-color", color = &r.color).into());
     }
     if r.regex
         && let Err(e) = regex::Regex::new(&r.pattern)
     {
         let first = e.to_string();
-        let line = first.lines().last().unwrap_or("bad regular expression");
+        let fallback = t!("rule-error-regex");
+        let line = first.lines().last().unwrap_or(&fallback);
         return Some(line.trim().to_owned());
     }
     None
@@ -244,7 +254,7 @@ impl RuleEditor {
         let (pattern, color) = (r.pattern.clone(), r.color.clone());
         let pattern = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("word or regular expression")
+                .placeholder(t!("rule-pattern-placeholder"))
                 .default_value(pattern)
         });
         let color = cx.new(|cx| {
@@ -283,10 +293,9 @@ impl RuleEditor {
 
     /// First problem among enabled rules, for blocking Save.
     pub fn problem(&self, cx: &App) -> Option<String> {
-        self.values(cx)
-            .iter()
-            .filter(|r| r.enabled)
-            .find_map(|r| rule_problem(r).map(|p| format!("Highlight `{}`: {p}", r.pattern)))
+        self.values(cx).iter().filter(|r| r.enabled).find_map(|r| {
+            rule_problem(r).map(|p| t!("rule-error", pattern = &r.pattern, error = p).to_string())
+        })
     }
 }
 
@@ -354,7 +363,7 @@ impl Render for RuleEditor {
                             .child(
                                 Checkbox::new(("rule-on", i))
                                     .checked(r.enabled)
-                                    .tooltip("Enabled")
+                                    .tooltip(t!("rule-enabled"))
                                     .on_click(cx.listener(move |e, v: &bool, _, cx| {
                                         if let Some(r) = e.rows.get_mut(i) {
                                             r.enabled = *v;
@@ -369,9 +378,9 @@ impl Render for RuleEditor {
                                     .label(".*")
                                     .when(r.regex, |b| b.primary())
                                     .tooltip(if r.regex {
-                                        "Regular expression (click for a plain word)"
+                                        t!("rule-regex-on")
                                     } else {
-                                        "Plain word, any case (click for a regular expression)"
+                                        t!("rule-regex-off")
                                     })
                                     .on_click(cx.listener(move |e, _, _, cx| {
                                         if let Some(r) = e.rows.get_mut(i) {
@@ -389,13 +398,18 @@ impl Render for RuleEditor {
                                     .border_color(theme.border)
                                     .bg(swatch),
                             )
-                            .child(div().w(px(92.0)).child(Input::new(&r.color).small()))
+                            .child(
+                                div().w(px(92.0)).child(
+                                    Input::new(&r.color).small().aria_label(t!("rule-color")),
+                                ),
+                            )
                             .child(
                                 Button::new(("rule-del", i))
                                     .xsmall()
                                     .ghost()
                                     .icon(IconName::Delete)
-                                    .tooltip("Remove")
+                                    .tooltip(t!("editor-remove"))
+                                    .accessibility_label(t!("editor-remove"))
                                     .on_click(cx.listener(move |e, _, _, cx| {
                                         e.rows.remove(i);
                                         cx.notify();
@@ -420,7 +434,7 @@ impl Render for RuleEditor {
                         Button::new("rule-add")
                             .small()
                             .icon(IconName::Plus)
-                            .label("Add rule")
+                            .label(t!("rule-add"))
                             .on_click(cx.listener(|e, _, window, cx| {
                                 e.push(
                                     &HighlightRule {
@@ -439,7 +453,7 @@ impl Render for RuleEditor {
                         Button::new("rule-defaults")
                             .small()
                             .ghost()
-                            .label("Restore defaults")
+                            .label(t!("rule-defaults"))
                             .on_click(cx.listener(|e, _, window, cx| {
                                 e.rows.clear();
                                 for r in HighlightRule::defaults() {

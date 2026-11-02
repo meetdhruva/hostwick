@@ -6,10 +6,9 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use crate::notify::{Toast, ToastExt as _};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -55,7 +54,7 @@ impl HostwickApp {
     ) {
         match p {
             Prompt::Banner(text) => {
-                window.push_notification(Notification::info(text), cx);
+                window.toast(Toast::info(text), cx);
                 return;
             }
             Prompt::Notice(text) => {
@@ -66,7 +65,10 @@ impl HostwickApp {
                     Instant::now(),
                 ) {
                     tracing::info!(notice = %text);
-                    window.push_notification(Notification::warning(text).title("Connection"), cx);
+                    window.toast(
+                        Toast::warning(text).title(t!("notice-connection-title")),
+                        cx,
+                    );
                 }
                 return;
             }
@@ -135,19 +137,23 @@ impl HostwickApp {
                     format!("{}:{}", info.host, info.port)
                 };
                 let body = if changed {
-                    format!(
-                        "WARNING: the host key for {target} has CHANGED.\n\nThis can mean someone is intercepting the connection (man-in-the-middle), or the server was reinstalled.\n\nNew {} key:\n{}\n\nOnly continue if you know the key was changed on purpose.",
-                        info.algorithm, info.fingerprint
+                    t!(
+                        "hostkey-changed-body",
+                        host = target,
+                        algorithm = &info.algorithm,
+                        fingerprint = &info.fingerprint
                     )
                 } else {
-                    format!(
-                        "This is the first connection to {target}.\n\n{} key fingerprint:\n{}\n\nVerify it with the server's administrator before trusting it.",
-                        info.algorithm, info.fingerprint
+                    t!(
+                        "hostkey-unknown-body",
+                        host = target,
+                        algorithm = &info.algorithm,
+                        fingerprint = &info.fingerprint
                     )
                 };
                 window.open_dialog(cx, move |dialog, _, _| {
                     let decide =
-                        |label: &'static str, id: &'static str, decision: HostKeyDecision| {
+                        |label: SharedString, id: &'static str, decision: HostKeyDecision| {
                             let (reply, app) = (reply.clone(), app.clone());
                             Button::new(id).label(label).on_click(move |_, window, cx| {
                                 answer(&reply, decision);
@@ -157,17 +163,17 @@ impl HostwickApp {
                         };
                     let (reply_close, app_close) = (reply.clone(), app.clone());
                     dialog
-                        .title(if changed {
-                            "Host key changed!"
+                        .title(crate::a11y::text(if changed {
+                            t!("hostkey-changed-title")
                         } else {
-                            "Unknown host"
-                        })
+                            t!("hostkey-unknown-title")
+                        }))
                         .w(px(520.0))
                         .child(
                             div()
                                 .whitespace_normal()
                                 .text_size(px(13.0))
-                                .child(body.clone()),
+                                .child(crate::a11y::text(body.clone())),
                         )
                         .on_close(move |_, window, cx| {
                             if reply_close.borrow().is_some() {
@@ -179,14 +185,22 @@ impl HostwickApp {
                             div()
                                 .flex()
                                 .gap(px(8.0))
-                                .child(decide("Reject", "hk-reject", HostKeyDecision::Reject))
-                                .child(decide("Trust once", "hk-once", HostKeyDecision::AcceptOnce))
+                                .child(decide(
+                                    t!("hostkey-reject"),
+                                    "hk-reject",
+                                    HostKeyDecision::Reject,
+                                ))
+                                .child(decide(
+                                    t!("hostkey-trust-once"),
+                                    "hk-once",
+                                    HostKeyDecision::AcceptOnce,
+                                ))
                                 .child(
                                     decide(
                                         if changed {
-                                            "Replace saved key"
+                                            t!("hostkey-replace")
                                         } else {
-                                            "Trust and remember"
+                                            t!("hostkey-trust-remember")
                                         },
                                         "hk-remember",
                                         HostKeyDecision::AcceptAndRemember,
@@ -331,7 +345,7 @@ impl HostwickApp {
                     div()
                         .text_size(px(13.0))
                         .whitespace_normal()
-                        .child(text.clone()),
+                        .child(crate::a11y::text(text.clone())),
                 );
             }
             for i in &inputs {
@@ -340,11 +354,11 @@ impl HostwickApp {
             if let Some((offer, cell)) = &remember {
                 let c = cell.clone();
                 let hint = if vault_open {
-                    "Saved encrypted in your password vault."
+                    t!("remember-hint-unlocked")
                 } else if vault_exists {
-                    "You'll be asked for your vault's master password."
+                    t!("remember-hint-locked")
                 } else {
-                    "You'll create a password vault with a master password."
+                    t!("remember-hint-create")
                 };
                 body = body.child(
                     div()
@@ -352,8 +366,7 @@ impl HostwickApp {
                         .flex_col()
                         .gap(px(2.0))
                         .child(
-                            Checkbox::new("remember")
-                                .label(offer.label.clone())
+                            crate::a11y::checkbox("remember", offer.label.clone(), false, cx)
                                 .checked(cell.get())
                                 .on_click(move |v, window, _| {
                                     c.set(*v);
@@ -372,7 +385,7 @@ impl HostwickApp {
                 );
             }
             dialog
-                .title(title.clone())
+                .title(crate::a11y::text(title.clone()))
                 .w(px(440.0))
                 .child(body)
                 // Enter triggers the dialog's Confirm action: submit, and
@@ -388,13 +401,13 @@ impl HostwickApp {
                         .gap(px(8.0))
                         .child(
                             Button::new("cancel")
-                                .label("Cancel")
+                                .label(t!("button-cancel"))
                                 .on_click(move |_, w, cx| cancel(false, w, cx)),
                         )
                         .child(
                             Button::new("ok")
                                 .primary()
-                                .label("Continue")
+                                .label(t!("button-continue"))
                                 .on_click(move |_, w, cx| ok(true, w, cx)),
                         ),
                 )

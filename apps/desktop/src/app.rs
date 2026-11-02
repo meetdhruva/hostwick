@@ -13,12 +13,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::notify::{Toast, ToastExt as _};
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use futures::channel::oneshot;
-use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::input::{InputEvent, InputState};
-use gpui_kit::component::notification::Notification;
 use gpui_kit::*;
 use hostwick_core::{HostProfile, LogVars, ProfileId, ProfileStore, expand_log_path};
 use hostwick_term::TransportKind;
@@ -119,6 +118,18 @@ pub struct HostwickApp {
     sync: sync::SyncState,
     /// Root focus, so app shortcuts work before any terminal has focus.
     focus: FocusHandle,
+    /// The saved-hosts list (arrow keys, Enter, F2, Del, Menu).
+    list_focus: FocusHandle,
+    list_scroll: UniformListScrollHandle,
+    /// The tab bar (arrow keys switch tabs).
+    tabs_focus: FocusHandle,
+    /// Where keyboard-opened context menus appear.
+    host_anchor: crate::a11y::MenuAnchor,
+    tab_anchor: crate::a11y::MenuAnchor,
+    /// Language the window was last drawn in (placeholders follow it).
+    lang: &'static str,
+    /// The tab layout last written, to skip writing the same again.
+    saved_tabs: RefCell<String>,
     _tasks: Vec<Task<()>>,
     _subs: Vec<Subscription>,
 }
@@ -131,6 +142,22 @@ pub fn sync_folder_key() -> &'static str {
 /// Settings key of the last settings-sync result.
 pub fn sync_last_key() -> &'static str {
     sync::LAST_KEY
+}
+
+/// The share of split `id`, if it is in `node`.
+fn split_ratio(node: &Node<Pane>, id: u64) -> Option<f32> {
+    match node {
+        Node::Split {
+            id: s, ratio, a, b, ..
+        } => {
+            if *s == id {
+                Some(*ratio)
+            } else {
+                split_ratio(a, id).or_else(|| split_ratio(b, id))
+            }
+        }
+        _ => None,
+    }
 }
 
 /// The app icon, decoded once and shared.
@@ -165,12 +192,23 @@ impl HostwickApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search hosts"));
+        let search =
+            cx.new(|cx| InputState::new(window, cx).placeholder(t!("sidebar-search-placeholder")));
         let quick = cx.new(|cx| InputState::new(window, cx).placeholder("user@host:port  ⏎"));
         let mut subs = vec![
             cx.subscribe_in(&search, window, |_, _, ev: &InputEvent, _, cx| {
                 if let InputEvent::Change = ev {
                     cx.notify();
+                }
+            }),
+            // An element that had keyboard focus disappeared (a host-editor
+            // section switched, a pane closed): give focus to its closest
+            // surviving ancestor (the dialog, the view) so Escape, Enter and
+            // the shortcuts keep working; else to the window.
+            cx.on_focus_lost(window, |this, window, cx| {
+                match window.focus_lost_restore_target(cx) {
+                    Some(h) => h.focus(window, cx),
+                    None => this.focus.focus(window, cx),
                 }
             }),
         ];
@@ -185,7 +223,7 @@ impl HostwickApp {
                     }
                     match quick_profile(&text) {
                         Ok(p) => this.open_tab_quick(p, Some(text), TabKind::Terminal, window, cx),
-                        Err(e) => window.push_notification(Notification::error(e.to_string()), cx),
+                        Err(e) => window.toast(Toast::error(e.to_string()), cx),
                     }
                 }
             },
@@ -260,6 +298,13 @@ impl HostwickApp {
             notice_times: VecDeque::new(),
             sync: sync::SyncState::load(),
             focus: cx.focus_handle(),
+            list_focus: cx.focus_handle().tab_stop(true),
+            list_scroll: UniformListScrollHandle::new(),
+            tabs_focus: cx.focus_handle().tab_stop(true),
+            host_anchor: Default::default(),
+            tab_anchor: Default::default(),
+            lang: crate::i18n::current(),
+            saved_tabs: RefCell::default(),
             _tasks: vec![prompt_task, transfer_task, tick_task],
             _subs: subs,
         };
@@ -287,6 +332,8 @@ impl HostwickApp {
             cx.notify();
         }
         self.sync_tick(window, cx);
+        // Folders shown in file browsers change without a tab event.
+        self.persist_tabs(cx);
     }
 
     // ---- tabs and panes -------------------------------------------------------
@@ -419,7 +466,11 @@ impl HostwickApp {
                                 });
                             }
                             Err(e) => view.update(cx, |v, cx| {
-                                v.reconnect_failed(format!("internal error: {e}"), true, cx)
+                                v.reconnect_failed(
+                                    t!("error-internal", error = e.to_string()).into(),
+                                    true,
+                                    cx,
+                                )
                             }),
                         }
                         let _ = window;
@@ -461,7 +512,9 @@ impl HostwickApp {
                                 PaneBody::Terminal(view)
                             }
                             Ok(Err(e)) => PaneBody::Failed(format!("{e:#}")),
-                            Err(e) => PaneBody::Failed(format!("internal error: {e}")),
+                            Err(e) => {
+                                PaneBody::Failed(t!("error-internal", error = e.to_string()).into())
+                            }
                         };
                         if let Some(p) = app.pane_mut(pane_id) {
                             p.body = body;
@@ -499,7 +552,9 @@ impl HostwickApp {
                                 PaneBody::Files(view)
                             }
                             Ok(Err(e)) => PaneBody::Failed(format!("{e:#}")),
-                            Err(e) => PaneBody::Failed(format!("internal error: {e}")),
+                            Err(e) => {
+                                PaneBody::Failed(t!("error-internal", error = e.to_string()).into())
+                            }
                         };
                         if let Some(p) = app.pane_mut(pane_id) {
                             p.body = body;
@@ -589,7 +644,7 @@ impl HostwickApp {
             return;
         };
         if tab.kind != TabKind::Terminal {
-            window.push_notification(Notification::info("Only terminal tabs can be split."), cx);
+            window.toast(Toast::info(t!("split-only-terminals")), cx);
             return;
         }
         let Some(src) = tab.focused_pane() else {
@@ -635,6 +690,46 @@ impl HostwickApp {
             }
             None => false,
         }
+    }
+
+    /// A divider was dragged: resize live, save when the drag ends.
+    pub(crate) fn set_split_ratio(&mut self, split: u64, ratio: f32, cx: &mut Context<Self>) {
+        if let Some(t) = self.active.and_then(|i| self.tabs.get_mut(i))
+            && t.root.set_ratio(split, ratio)
+        {
+            cx.notify();
+        }
+    }
+
+    /// Move a divider by `delta` (screen-reader increment/decrement).
+    pub(crate) fn nudge_split(&mut self, split: u64, delta: f32, cx: &mut Context<Self>) {
+        let current = self
+            .active
+            .and_then(|i| self.tabs.get(i))
+            .and_then(|t| split_ratio(&t.root, split));
+        if let Some(r) = current {
+            self.set_split_ratio(split, r + delta, cx);
+            self.persist_tabs(cx);
+        }
+    }
+
+    /// Alt+Shift+arrows: move the divider next to the focused pane.
+    fn resize_focused(&mut self, dir: Dir, cx: &mut Context<Self>) -> bool {
+        let Some(t) = self.active.and_then(|i| self.tabs.get_mut(i)) else {
+            return false;
+        };
+        let (vertical, delta) = match dir {
+            Dir::Left => (false, -0.05),
+            Dir::Right => (false, 0.05),
+            Dir::Up => (true, -0.05),
+            Dir::Down => (true, 0.05),
+        };
+        let done = t.root.nudge(t.focused, vertical, delta);
+        if done {
+            self.persist_tabs(cx);
+            cx.notify();
+        }
+        done
     }
 
     /// Keyboard focus to the active tab's focused pane.
@@ -691,12 +786,7 @@ impl HostwickApp {
         };
         files.id = self.next_id();
         if cwd.is_none() {
-            window.push_notification(
-                Notification::info(
-                    "The terminal has not reported its folder yet. Turn on “Shell integration” in Edit host → Terminal so the file browser can follow it (bash and zsh).",
-                ),
-                cx,
-            );
+            window.toast(Toast::info(t!("files-follow-no-folder")), cx);
         }
         self.push_tab(files, TabKind::Files, window, cx);
     }
@@ -839,10 +929,18 @@ impl HostwickApp {
 
     // ---- restore tabs -----------------------------------------------------------
 
-    fn saved_pane(p: &Pane) -> SavedPane {
+    fn saved_pane(p: &Pane, cx: &App) -> SavedPane {
+        let dir = match &p.body {
+            PaneBody::Files(v) => Some(v.read(cx).remote_dir().to_owned()),
+            _ => p.start_dir.clone(),
+        }
+        .filter(|d| !d.is_empty());
         SavedPane {
             profile: p.quick.is_none().then_some(p.profile.id),
             quick: p.quick.clone(),
+            id: Some(p.id),
+            follows: p.follows,
+            dir,
         }
     }
 
@@ -858,7 +956,7 @@ impl HostwickApp {
                             TabKind::Terminal => SavedKind::Terminal,
                             TabKind::Files => SavedKind::Files,
                         },
-                        root: crate::layout::save_tree(&t.root, &Self::saved_pane),
+                        root: crate::layout::save_tree(&t.root, &|p| Self::saved_pane(p, cx)),
                     })
                     .collect(),
                 active: self.active,
@@ -867,12 +965,16 @@ impl HostwickApp {
         } else {
             String::new()
         };
-        if let Err(e) = self
+        if *self.saved_tabs.borrow() == json {
+            return;
+        }
+        match self
             .backend
             .store
             .set_setting(crate::layout::TABS_KEY, &json)
         {
-            tracing::warn!(error = %e, "could not save open tabs");
+            Ok(()) => *self.saved_tabs.borrow_mut() = json,
+            Err(e) => tracing::warn!(error = %e, "could not save open tabs"),
         }
     }
 
@@ -897,11 +999,14 @@ impl HostwickApp {
             (None, Some(q)) => quick_profile(q).is_ok(),
             _ => false,
         };
+        // Saved pane id → new pane id, to restore which file browser follows
+        // which terminal.
+        let mut ids = HashMap::new();
         for t in saved.tabs {
             let Some(root) = t.root.prune(&exists) else {
                 continue;
             };
-            let root = self.build_tree(root);
+            let root = self.build_tree(root, &mut ids);
             let focused = root.leaves().first().map(|p| p.id).unwrap_or(0);
             let id = self.next_id();
             self.tabs.push(Tab {
@@ -914,13 +1019,19 @@ impl HostwickApp {
                 focused,
             });
         }
+        for t in &mut self.tabs {
+            for p in t.root.leaves_mut() {
+                p.follows = p.follows.and_then(|old| ids.get(&old).copied());
+            }
+        }
         if !self.tabs.is_empty() {
             let ix = saved.active.unwrap_or(0).min(self.tabs.len() - 1);
             self.activate_tab(ix, window, cx);
         }
     }
 
-    fn build_tree(&mut self, node: SavedNode) -> Node<Pane> {
+    /// Live panes from a saved tree; `ids` collects saved id → new id.
+    fn build_tree(&mut self, node: SavedNode, ids: &mut HashMap<u64, u64>) -> Node<Pane> {
         match node {
             SavedNode::Pane(p) => {
                 let profile = match (&p.profile, &p.quick) {
@@ -929,14 +1040,27 @@ impl HostwickApp {
                     _ => None,
                 }
                 .unwrap_or_else(|| HostProfile::new("?", "?"));
-                Node::Leaf(self.new_pane(profile, p.quick))
+                let mut pane = self.new_pane(profile, p.quick);
+                // Still the saved id for now; remapped once all tabs exist.
+                pane.follows = p.follows;
+                pane.start_dir = p.dir;
+                if let Some(old) = p.id {
+                    ids.insert(old, pane.id);
+                }
+                Node::Leaf(pane)
             }
-            SavedNode::Split { vertical, a, b } => {
-                let a = Box::new(self.build_tree(*a));
-                let b = Box::new(self.build_tree(*b));
+            SavedNode::Split {
+                vertical,
+                ratio,
+                a,
+                b,
+            } => {
+                let a = Box::new(self.build_tree(*a, ids));
+                let b = Box::new(self.build_tree(*b, ids));
                 Node::Split {
                     id: self.next_id(),
                     vertical,
+                    ratio: crate::layout::clamp_ratio(ratio),
                     a,
                     b,
                 }
@@ -975,6 +1099,7 @@ impl HostwickApp {
         use crate::settingsform::SettingsEvent;
         match ev {
             SettingsEvent::Saved => {
+                self.apply_language(window, cx);
                 self.apply_settings_to_views(cx);
                 self.persist_tabs(cx);
                 self.mark_sync_dirty();
@@ -985,6 +1110,20 @@ impl HostwickApp {
                 cx.notify();
             }
         }
+    }
+
+    /// After the UI language changed: texts kept in inputs follow, and
+    /// every window redraws in the new language.
+    pub(crate) fn apply_language(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let now = crate::i18n::current();
+        if now == self.lang {
+            return;
+        }
+        self.lang = now;
+        self.search.update(cx, |s, cx| {
+            s.set_placeholder(t!("sidebar-search-placeholder"), window, cx)
+        });
+        cx.refresh_windows();
     }
 
     fn apply_settings_to_views(&mut self, cx: &mut Context<Self>) {
@@ -1066,7 +1205,7 @@ impl HostwickApp {
                             }
                             a.mark_sync_dirty();
                         }
-                        Err(e) => window.push_notification(Notification::error(e.to_string()), cx),
+                        Err(e) => window.toast(Toast::error(e.to_string()), cx),
                     }
                     cx.notify();
                 });
@@ -1079,7 +1218,7 @@ impl HostwickApp {
             return;
         };
         p.id = ProfileId::new();
-        p.name = format!("{} (copy)", p.name);
+        p.name = t!("host-copy-name", name = &p.name).into();
         p.source = Default::default();
         if self.backend.store.upsert(&p).is_ok() {
             self.selected = Some(p.id);
@@ -1120,6 +1259,180 @@ impl HostwickApp {
 
     // ---- keyboard ---------------------------------------------------------------
 
+    /// Saved hosts in the order the sidebar shows them (search applied).
+    fn visible_profiles(&self, cx: &App) -> Vec<ProfileId> {
+        self.sidebar_rows(cx)
+            .into_iter()
+            .filter_map(|r| match r {
+                SidebarRow::Profile(i) => self.profiles.get(i).map(|p| p.id),
+                SidebarRow::Folder(_) => None,
+            })
+            .collect()
+    }
+
+    /// Keys in the saved-hosts list: arrows/Home/End/PageUp/PageDown move,
+    /// Enter opens a terminal, Shift+Enter the files, F2 edits, Del deletes
+    /// (after asking), Shift+F10 or the Menu key opens the host's menu.
+    fn on_list_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let ks = &ev.keystroke;
+        let m = ks.modifiers;
+        if crate::a11y::is_menu_key(ks) {
+            if self.selected.is_none() {
+                self.select_relative(0, window, cx);
+            }
+            self.host_anchor.open(window, cx);
+            cx.stop_propagation();
+            return;
+        }
+        if m.control || m.alt || m.platform {
+            return;
+        }
+        let handled = match ks.key.as_str() {
+            "up" => self.select_relative(-1, window, cx),
+            "down" => self.select_relative(1, window, cx),
+            "pageup" => self.select_relative(-10, window, cx),
+            "pagedown" => self.select_relative(10, window, cx),
+            "home" => self.select_relative(isize::MIN, window, cx),
+            "end" => self.select_relative(isize::MAX, window, cx),
+            "enter" => {
+                let kind = if m.shift {
+                    TabKind::Files
+                } else {
+                    TabKind::Terminal
+                };
+                self.open_selected(kind, window, cx);
+                true
+            }
+            "f2" => {
+                let p = self
+                    .selected
+                    .and_then(|id| self.profiles.iter().find(|p| p.id == id))
+                    .cloned();
+                if p.is_some() {
+                    self.host_dialog(p, window, cx);
+                }
+                true
+            }
+            "delete" => {
+                self.delete_selected(window, cx);
+                true
+            }
+            _ => false,
+        };
+        if handled {
+            cx.stop_propagation();
+        }
+    }
+
+    /// Move the host selection by `delta` rows (clamped; `isize::MIN`/`MAX`
+    /// for first/last) and scroll it into view.
+    fn select_relative(&mut self, delta: isize, _: &mut Window, cx: &mut Context<Self>) -> bool {
+        let ids = self.visible_profiles(cx);
+        if ids.is_empty() {
+            return true;
+        }
+        let cur = self
+            .selected
+            .and_then(|s| ids.iter().position(|id| *id == s));
+        let last = ids.len() as isize - 1;
+        let next = match (cur, delta) {
+            (_, isize::MIN) => 0,
+            (_, isize::MAX) => last,
+            (None, _) => 0,
+            (Some(c), d) => (c as isize).saturating_add(d).clamp(0, last),
+        } as usize;
+        self.selected = Some(ids[next]);
+        // Scroll the row (folders are rows too) into view.
+        let rows = self.sidebar_rows(cx);
+        if let Some(ix) = rows.iter().position(|r| {
+            matches!(r, SidebarRow::Profile(i) if self.profiles.get(*i).map(|p| p.id) == Some(ids[next]))
+        }) {
+            self.list_scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+        }
+        cx.notify();
+        true
+    }
+
+    /// Keys on the tab bar: Left/Right (Home/End) switch tabs, Enter or
+    /// Down goes into the tab, Delete closes it, Shift+F10/Menu its menu.
+    fn on_tabs_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let ks = &ev.keystroke;
+        let m = ks.modifiers;
+        if crate::a11y::is_menu_key(ks) {
+            self.tab_anchor.open(window, cx);
+            cx.stop_propagation();
+            return;
+        }
+        if m.control || m.alt || m.platform || m.shift || self.tabs.is_empty() {
+            return;
+        }
+        let n = self.tabs.len();
+        let cur = self.active.unwrap_or(0).min(n - 1);
+        let target = match ks.key.as_str() {
+            "left" => Some((cur + n - 1) % n),
+            "right" => Some((cur + 1) % n),
+            "home" => Some(0),
+            "end" => Some(n - 1),
+            "enter" | "down" | "space" => {
+                self.focus_active(window, cx);
+                cx.stop_propagation();
+                return;
+            }
+            "delete" => {
+                self.close_tab(cur, cx);
+                if self.tabs.is_empty() {
+                    self.list_focus.focus(window, cx);
+                }
+                cx.stop_propagation();
+                return;
+            }
+            _ => None,
+        };
+        if let Some(ix) = target {
+            self.activate_tab(ix, window, cx);
+            // Stay on the tab bar while choosing.
+            self.tabs_focus.focus(window, cx);
+            cx.stop_propagation();
+        }
+    }
+
+    /// Ctrl+F6 / Ctrl+Shift+F6: move keyboard focus between the hosts list,
+    /// the tab bar and the open session (Tab cannot leave a terminal: the
+    /// shell needs it).
+    fn cycle_region(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let in_list = self.list_focus.contains_focused(window, cx);
+        let in_tabs = self.tabs_focus.contains_focused(window, cx);
+        let has_body = self.active.is_some();
+        // 0 = list, 1 = tab bar, 2 = session
+        let cur = if in_list {
+            0
+        } else if in_tabs {
+            1
+        } else if has_body {
+            2
+        } else {
+            0
+        };
+        let regions: &[usize] = if has_body { &[0, 1, 2] } else { &[0] };
+        let pos = regions.iter().position(|r| *r == cur).unwrap_or(0);
+        let next = if forward {
+            regions[(pos + 1) % regions.len()]
+        } else {
+            regions[(pos + regions.len() - 1) % regions.len()]
+        };
+        match next {
+            1 => self.tabs_focus.focus(window, cx),
+            2 => self.focus_active(window, cx),
+            _ => {
+                if self.selected.is_none() {
+                    self.select_relative(0, window, cx);
+                }
+                self.list_focus.focus(window, cx)
+            }
+        }
+        cx.notify();
+    }
+
     /// App-wide shortcuts, handled before the terminal sees the key. They
     /// all use Shift (or Cmd on macOS) so plain Ctrl+letter keys still reach
     /// the shell (Ctrl+W, Ctrl+T, Ctrl+N mean things there).
@@ -1127,6 +1440,11 @@ impl HostwickApp {
         let m = ev.keystroke.modifiers;
         let key = ev.keystroke.key.as_str();
         let mac = cfg!(target_os = "macos");
+        if key == "f6" && m.control && !m.alt && !m.platform {
+            self.cycle_region(!m.shift, window, cx);
+            cx.stop_propagation();
+            return;
+        }
         let cmd = if mac {
             m.platform
         } else {
@@ -1155,7 +1473,7 @@ impl HostwickApp {
             .is_some_and(|t| t.root.count() > 1);
         let handled = match key {
             "left" | "right" | "up" | "down"
-                if m.alt && !m.control && !m.shift && !m.platform && multi_pane =>
+                if m.alt && !m.control && !m.platform && multi_pane =>
             {
                 let dir = match key {
                     "left" => Dir::Left,
@@ -1163,7 +1481,11 @@ impl HostwickApp {
                     "up" => Dir::Up,
                     _ => Dir::Down,
                 };
-                self.move_focus(dir, window, cx);
+                if m.shift {
+                    self.resize_focused(dir, cx);
+                } else {
+                    self.move_focus(dir, window, cx);
+                }
                 true
             }
             "tab" if m.control => {

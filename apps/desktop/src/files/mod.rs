@@ -23,12 +23,12 @@ mod syncdlg;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::notify::{Toast, ToastExt as _};
 use futures::StreamExt as _;
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, Selectable as _, Sizable as _, WindowExt as _,
 };
@@ -90,6 +90,8 @@ impl From<&Entry> for Item {
 }
 
 pub struct FilesView {
+    /// Where Shift+F10 / the Menu key opens the row menu.
+    pub(super) menu_anchor: crate::a11y::MenuAnchor,
     backend: Arc<Backend>,
     profile: HostProfile,
     local: Pane,
@@ -208,6 +210,7 @@ impl FilesView {
             edit_tx,
             sync: None,
             link: None,
+            menu_anchor: Default::default(),
             follow: false,
             focus: cx.focus_handle(),
             _tasks: vec![edit_task],
@@ -229,6 +232,11 @@ impl FilesView {
     }
 
     /// Following the linked terminal's folder now.
+    /// The remote folder shown (empty before the first listing).
+    pub fn remote_dir(&self) -> &str {
+        &self.remote.cwd
+    }
+
     pub fn following(&self) -> bool {
         self.link.is_some() && self.follow
     }
@@ -355,7 +363,7 @@ impl FilesView {
                 }
             }
             Ok(Err(e)) => pane.error = Some(e.to_string()),
-            Err(e) => pane.error = Some(format!("internal error: {e}")),
+            Err(e) => pane.error = Some(t!("error-internal", error = e.to_string()).into()),
         }
         cx.notify();
     }
@@ -400,6 +408,11 @@ impl FilesView {
         } else {
             return;
         };
+        if crate::a11y::is_menu_key(&ev.keystroke) {
+            self.menu_anchor.open(window, cx);
+            cx.stop_propagation();
+            return;
+        }
         let m = ev.keystroke.modifiers;
         let ctrl = m.control || m.platform;
         let key = ev.keystroke.key.as_str();
@@ -445,6 +458,14 @@ impl FilesView {
             }
             "a" if ctrl => {
                 self.pane_mut(side).sel.select_all(&refs);
+                true
+            }
+            // Pick rows one by one from the keyboard (like Ctrl+click).
+            "space" if !ctrl && !m.alt => {
+                let pane = self.pane_mut(side);
+                if let Some(ix) = pane.sel.cursor {
+                    pane.sel.click(ix, &refs, true, false);
+                }
                 true
             }
             "r" if ctrl && !m.shift => {
@@ -508,19 +529,33 @@ impl FilesView {
         }
         let to = side.other();
         let dir = self.pane(to).cwd.clone();
-        let what = if items.len() == 1 {
-            format!("“{}”", items[0].name)
-        } else {
-            format!("{} items", items.len())
-        };
-        let verb = match (mv, side) {
-            (true, _) => "Move",
-            (false, Side::Local) => "Upload",
-            (false, Side::Remote) => "Download",
+        let (one, count) = (items[0].name.clone(), items.len());
+        let (verb, text) = match (mv, side) {
+            (true, _) => (
+                t!("files-move"),
+                t!("files-move-confirm", count = count, name = one, dir = &dir),
+            ),
+            (false, Side::Local) => (
+                t!("files-upload"),
+                t!(
+                    "files-upload-confirm",
+                    count = count,
+                    name = one,
+                    dir = &dir
+                ),
+            ),
+            (false, Side::Remote) => (
+                t!("files-download"),
+                t!(
+                    "files-download-confirm",
+                    count = count,
+                    name = one,
+                    dir = &dir
+                ),
+            ),
         };
         let view = cx.entity().downgrade();
         let src = self.pane(side).fs.clone();
-        let text = format!("{verb} {what} to {dir}?");
         window.open_dialog(cx, move |dialog, _, _| {
             let (view, items, src, dir) = (view.clone(), items.clone(), src.clone(), dir.clone());
             let view2 = view.clone();
@@ -533,8 +568,8 @@ impl FilesView {
             });
             let (on_ok, on_click) = (go.clone(), go);
             dialog
-                .title(verb)
-                .child(text.clone())
+                .title(crate::a11y::text(verb.clone()))
+                .child(crate::a11y::text(text.clone()))
                 .on_ok(move |_, window, cx| {
                     on_ok(window, cx);
                     false
@@ -543,7 +578,7 @@ impl FilesView {
                     div()
                         .flex()
                         .gap(px(8.0))
-                        .child(Button::new("cancel").label("Cancel").on_click(
+                        .child(Button::new("cancel").label(t!("button-cancel")).on_click(
                             move |_, window, cx| {
                                 window.close_dialog(cx);
                                 let _ = view2.update(cx, |v, cx| v.refocus(window, cx));
@@ -552,7 +587,7 @@ impl FilesView {
                         .child(
                             Button::new("go")
                                 .primary()
-                                .label(verb)
+                                .label(verb.clone())
                                 .on_click(move |_, window, cx| on_click(window, cx)),
                         ),
                 )
@@ -580,7 +615,7 @@ impl FilesView {
             for it in items {
                 let target = hostwick_sftp::join(&dir, &it.name);
                 if it.path == target {
-                    failed.push(format!("{}: source and destination are the same", it.name));
+                    failed.push(t!("files-same-place", name = &it.name).into());
                     continue;
                 }
                 if it.is_dir {
@@ -639,7 +674,9 @@ impl FilesView {
                         gid: None,
                     };
                     if let Err(e) = remove_recursive(src2.as_ref(), &entry).await {
-                        failed.push(format!("{}: copied, but not removed: {e}", it.name));
+                        failed.push(
+                            t!("files-not-removed", name = &it.name, error = e.to_string()).into(),
+                        );
                     }
                 }
             }
@@ -648,7 +685,7 @@ impl FilesView {
         cx.spawn(async move |this, cx| {
             let failed = job
                 .await
-                .unwrap_or_else(|e| vec![format!("internal error: {e}")]);
+                .unwrap_or_else(|e| vec![t!("error-internal", error = e.to_string()).into()]);
             let _ = this.update(cx, |v, cx| {
                 if !failed.is_empty() {
                     v.banner = Some((true, failed.join("; ")));
@@ -667,7 +704,7 @@ impl FilesView {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("Download here".into()),
+            prompt: Some(t!("files-pick-download")),
         });
         let src = self.remote.fs.clone();
         cx.spawn(async move |this, cx| {
@@ -689,7 +726,7 @@ impl FilesView {
             files: true,
             directories: true,
             multiple: true,
-            prompt: Some("Upload".into()),
+            prompt: Some(t!("files-upload")),
         });
         let dir = self.remote.cwd.clone();
         cx.spawn(async move |this, cx| {
@@ -735,7 +772,7 @@ impl FilesView {
             let mut failed = Vec::new();
             for (from, to) in moves {
                 let res = match fs.stat(&to).await {
-                    Ok(Some(_)) => Err(format!("{to} already exists")),
+                    Ok(Some(_)) => Err(t!("files-exists", name = &to).to_string()),
                     Ok(None) => fs.rename(&from, &to).await.map_err(|e| e.to_string()),
                     Err(e) => Err(e.to_string()),
                 };
@@ -804,24 +841,20 @@ impl FilesView {
         }
         let view = cx.entity().downgrade();
         let text = if entries.len() == 1 {
-            let what = if entries[0].is_dir() {
-                "folder and everything in it"
+            if entries[0].is_dir() {
+                t!("files-delete-folder-confirm", name = &entries[0].name)
             } else {
-                "file"
-            };
-            format!("Permanently delete the {what} “{}”?", entries[0].name)
+                t!("files-delete-file-confirm", name = &entries[0].name)
+            }
         } else {
-            format!(
-                "Permanently delete {} items (folders with everything in them)?",
-                entries.len()
-            )
+            t!("files-delete-many-confirm", count = entries.len())
         };
         window.open_dialog(cx, move |dialog, _, _| {
             let (view, entries) = (view.clone(), entries.clone());
             let (enter_view, enter_entries) = (view.clone(), entries.clone());
             dialog
-                .title("Delete")
-                .child(text.clone())
+                .title(crate::a11y::text(t!("files-delete-title")))
+                .child(crate::a11y::text(text.clone()))
                 .on_ok(move |_, window, cx| {
                     window.close_dialog(cx);
                     let _ = enter_view.update(cx, |v, cx| {
@@ -836,22 +869,25 @@ impl FilesView {
                         .gap(px(8.0))
                         .child({
                             let view = view.clone();
-                            Button::new("cancel")
-                                .label("Cancel")
-                                .on_click(move |_, window, cx| {
+                            Button::new("cancel").label(t!("button-cancel")).on_click(
+                                move |_, window, cx| {
                                     window.close_dialog(cx);
                                     let _ = view.update(cx, |v, cx| v.refocus(window, cx));
-                                })
+                                },
+                            )
                         })
-                        .child(Button::new("delete").danger().label("Delete").on_click(
-                            move |_, window, cx| {
-                                window.close_dialog(cx);
-                                let _ = view.update(cx, |v, cx| {
-                                    v.refocus(window, cx);
-                                    v.delete(side, entries.clone(), cx)
-                                });
-                            },
-                        )),
+                        .child(
+                            Button::new("delete")
+                                .danger()
+                                .label(t!("button-delete"))
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let _ = view.update(cx, |v, cx| {
+                                        v.refocus(window, cx);
+                                        v.delete(side, entries.clone(), cx)
+                                    });
+                                }),
+                        ),
                 )
         });
     }
@@ -883,10 +919,10 @@ impl FilesView {
     #[allow(clippy::too_many_arguments)] // labels + the submit callback
     fn text_dialog(
         &mut self,
-        title: &'static str,
-        button: &'static str,
+        title: SharedString,
+        button: SharedString,
         initial: String,
-        placeholder: &'static str,
+        placeholder: SharedString,
         window: &mut Window,
         cx: &mut Context<Self>,
         submit: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) -> Result<(), String>
@@ -915,13 +951,13 @@ impl FilesView {
                         window.close_dialog(cx);
                         let _ = view2.update(cx, |v, cx| v.refocus(window, cx));
                     }
-                    Err(msg) => window.push_notification(Notification::warning(msg), cx),
+                    Err(msg) => window.toast(Toast::warning(msg), cx),
                 }
             });
             let view3 = view.clone();
             let (on_ok, on_click) = (go.clone(), go);
             dialog
-                .title(title)
+                .title(crate::a11y::text(title.clone()))
                 .child(Input::new(&input))
                 .on_ok(move |_, window, cx| {
                     on_ok(window, cx);
@@ -931,7 +967,7 @@ impl FilesView {
                     div()
                         .flex()
                         .gap(px(8.0))
-                        .child(Button::new("cancel").label("Cancel").on_click(
+                        .child(Button::new("cancel").label(t!("button-cancel")).on_click(
                             move |_, window, cx| {
                                 window.close_dialog(cx);
                                 let _ = view3.update(cx, |v, cx| v.refocus(window, cx));
@@ -940,7 +976,7 @@ impl FilesView {
                         .child(
                             Button::new("ok")
                                 .primary()
-                                .label(button)
+                                .label(button.clone())
                                 .on_click(move |_, window, cx| on_click(window, cx)),
                         ),
                 )
@@ -949,7 +985,7 @@ impl FilesView {
 
     fn valid_name(name: &str) -> Result<(), String> {
         if name.is_empty() || name.contains('/') || name == "." || name == ".." {
-            Err("Enter a name without “/”".into())
+            Err(t!("files-name-invalid").into())
         } else {
             Ok(())
         }
@@ -957,10 +993,10 @@ impl FilesView {
 
     fn new_folder(&mut self, side: Side, window: &mut Window, cx: &mut Context<Self>) {
         self.text_dialog(
-            "New folder",
-            "Create",
+            t!("files-new-folder"),
+            t!("files-create"),
             String::new(),
-            "Folder name",
+            t!("files-folder-name"),
             window,
             cx,
             move |v, name, _, cx| {
@@ -982,10 +1018,10 @@ impl FilesView {
             return;
         };
         self.text_dialog(
-            "Rename",
-            "Rename",
+            t!("files-rename"),
+            t!("files-rename"),
             entry.name.clone(),
-            "New name",
+            t!("files-new-name"),
             window,
             cx,
             move |v, name, _, cx| {
@@ -1002,7 +1038,7 @@ impl FilesView {
                         if fs.stat(&to).await?.is_some() {
                             return Err(hostwick_sftp::FsError::Remote {
                                 path: to,
-                                message: format!("“{name}” already exists"),
+                                message: t!("files-exists", name = &name).into(),
                             });
                         }
                         fs.rename(&from, &to).await
@@ -1026,10 +1062,10 @@ impl FilesView {
             format!("{target} -> link-to-{target}")
         };
         self.text_dialog(
-            "New symlink",
-            "Create",
+            t!("files-new-symlink"),
+            t!("files-create"),
             default,
-            "target -> link name",
+            t!("files-symlink-placeholder"),
             window,
             cx,
             move |v, text, _, cx| {
@@ -1037,10 +1073,10 @@ impl FilesView {
                     .split_once("->")
                     .map(|(a, b)| (a.trim().to_owned(), b.trim().to_owned()))
                 else {
-                    return Err("Write it as “target -> link name”".into());
+                    return Err(t!("files-symlink-format").into());
                 };
                 if target.is_empty() {
-                    return Err("The target is empty".into());
+                    return Err(t!("files-symlink-empty").into());
                 }
                 Self::valid_name(&link)?;
                 let link = hostwick_sftp::join(&v.pane(side).cwd, &link);
@@ -1068,7 +1104,9 @@ impl FilesView {
             let _ = this.update(cx, |v, cx| {
                 match res {
                     Ok(Err(e)) => v.banner = Some((true, e.to_string())),
-                    Err(e) => v.banner = Some((true, format!("internal error: {e}"))),
+                    Err(e) => {
+                        v.banner = Some((true, t!("error-internal", error = e.to_string()).into()))
+                    }
                     Ok(Ok(())) => {}
                 }
                 v.refresh(side, cx);
@@ -1197,7 +1235,7 @@ impl FilesView {
         let reply = std::rc::Rc::new(std::cell::RefCell::new(Some(reply)));
         // Closing the dialog any other way drops the sender: "later".
         window.open_dialog(cx, move |dialog, _, _| {
-            let b = |id: &'static str, label: &'static str, c: ConflictChoice| {
+            let b = |id: &'static str, label: SharedString, c: ConflictChoice| {
                 let reply = reply.clone();
                 Button::new(id).label(label).on_click(move |_, window, cx| {
                     if let Some(tx) = reply.borrow_mut().take() {
@@ -1207,19 +1245,32 @@ impl FilesView {
                 })
             };
             dialog
-                .title("Changed on the server")
+                .title(crate::a11y::text(t!("edit-conflict-title")))
                 .w(px(600.0))
-                .child(format!(
-                    "“{name}” was changed on the server since you opened it. What should happen with your saved version?"
-                ))
+                .child(crate::a11y::text(t!("edit-conflict-body", name = &name)))
                 .footer(
                     div()
                         .flex()
                         .gap(px(8.0))
-                        .child(b("later", "Decide later", ConflictChoice::Later))
-                        .child(b("theirs", "Download theirs", ConflictChoice::DownloadTheirs))
-                        .child(b("copy", "Save as copy", ConflictChoice::SaveCopy))
-                        .child(b("overwrite", "Overwrite", ConflictChoice::Overwrite).danger()),
+                        .child(b("later", t!("edit-conflict-later"), ConflictChoice::Later))
+                        .child(b(
+                            "theirs",
+                            t!("edit-conflict-theirs"),
+                            ConflictChoice::DownloadTheirs,
+                        ))
+                        .child(b(
+                            "copy",
+                            t!("edit-conflict-copy"),
+                            ConflictChoice::SaveCopy,
+                        ))
+                        .child(
+                            b(
+                                "overwrite",
+                                t!("edit-conflict-overwrite"),
+                                ConflictChoice::Overwrite,
+                            )
+                            .danger(),
+                        ),
                 )
         });
     }
@@ -1241,7 +1292,12 @@ impl FilesView {
                     std::thread::spawn(move || child.wait());
                     Ok(())
                 }
-                Err(e) => Err(format!("could not start the editor “{program}”: {e}")),
+                Err(e) => Err(t!(
+                    "edit-editor-failed",
+                    program = &program,
+                    error = e.to_string()
+                )
+                .to_string()),
             }
         });
         cx.spawn(async move |this, cx| {
@@ -1297,7 +1353,9 @@ impl FilesView {
                         );
                     }
                     Ok(Err(e)) => v.banner = Some((true, format!("{e:#}"))),
-                    Err(e) => v.banner = Some((true, format!("internal error: {e}"))),
+                    Err(e) => {
+                        v.banner = Some((true, t!("error-internal", error = e.to_string()).into()))
+                    }
                 }
                 cx.notify();
             });
@@ -1317,7 +1375,7 @@ impl FilesView {
         excludes: Vec<String>,
         cx: &mut Context<Self>,
     ) {
-        let (tx, mut rx) = futures::channel::mpsc::unbounded::<String>();
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<(bool, String)>();
         let cancel = CancellationToken::new();
         let (engine, fs) = (self.backend.engine.clone(), self.remote.fs.clone());
         let (src_root, dst_root, token) = (local.clone(), remote.clone(), cancel.clone());
@@ -1339,18 +1397,20 @@ impl FilesView {
                 token,
                 |r| {
                     let msg = match r {
-                        Ok(r) if r.is_noop() => "up to date".to_owned(),
-                        Ok(r) => format!(
-                            "synced {} file(s), {}{}",
-                            r.copied.len(),
-                            human_size(r.bytes),
-                            if r.failed.is_empty() {
-                                String::new()
-                            } else {
-                                format!(", {} failed", r.failed.len())
+                        Ok(r) if r.is_noop() => (false, t!("keep-up-to-date").to_string()),
+                        Ok(r) => {
+                            let mut m = t!(
+                                "keep-synced",
+                                count = r.copied.len(),
+                                size = human_size(r.bytes)
+                            )
+                            .to_string();
+                            if !r.failed.is_empty() {
+                                m = format!("{m}, {}", t!("keep-failed", count = r.failed.len()));
                             }
-                        ),
-                        Err(e) => format!("error (retrying): {e}"),
+                            (true, m)
+                        }
+                        Err(e) => (true, t!("keep-error", error = e.to_string()).to_string()),
                     };
                     let _ = tx.unbounded_send(msg);
                 },
@@ -1358,10 +1418,9 @@ impl FilesView {
             .await;
         });
         let ui = cx.spawn(async move |this, cx| {
-            while let Some(msg) = rx.next().await {
+            while let Some((changed, msg)) = rx.next().await {
                 let alive = this
                     .update(cx, |v, cx| {
-                        let changed = msg != "up to date";
                         if let Some(s) = v.sync.as_mut() {
                             s.status = msg;
                         }
@@ -1380,7 +1439,7 @@ impl FilesView {
             local,
             remote,
             cancel,
-            status: "starting…".into(),
+            status: t!("keep-starting").into(),
             _ui: ui,
         });
         cx.notify();
@@ -1403,8 +1462,8 @@ impl FilesView {
     fn render_toolbar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let n_edits = self.edits.len();
-        let edits_label = if n_edits == 0 {
-            "Edits".to_owned()
+        let edits_label: SharedString = if n_edits == 0 {
+            t!("edits")
         } else {
             let busy = self
                 .edits
@@ -1418,7 +1477,7 @@ impl FilesView {
                 .or_else(|| self.edits.last())
                 .map(|e| e.status.describe())
                 .unwrap_or_default();
-            format!("Edits ({n_edits}): {busy}")
+            t!("edits-busy", count = n_edits, status = busy)
         };
         let has_error = self
             .edits
@@ -1430,7 +1489,7 @@ impl FilesView {
             .label(edits_label)
             .disabled(n_edits == 0)
             .when(has_error, |b| b.warning())
-            .tooltip("Files open in an editor; saves upload automatically")
+            .tooltip(t!("edits-tooltip"))
             .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, cx| {
                 let Some(v) = view.upgrade() else {
                     return menu;
@@ -1447,15 +1506,17 @@ impl FilesView {
                     menu = menu
                         .item(PopupMenuItem::new(format!("{path} — {status}")).disabled(true))
                         .item(
-                            PopupMenuItem::new("    Stop watching").on_click(move |_, _, cx| {
-                                let _ = view.update(cx, |v, cx| v.stop_edit(Some(id), cx));
-                            }),
+                            PopupMenuItem::new(format!("    {}", t!("edits-stop"))).on_click(
+                                move |_, _, cx| {
+                                    let _ = view.update(cx, |v, cx| v.stop_edit(Some(id), cx));
+                                },
+                            ),
                         );
                 }
                 let view = view.clone();
                 menu.separator()
                     .item(
-                        PopupMenuItem::new("Stop watching all").on_click(move |_, _, cx| {
+                        PopupMenuItem::new(t!("edits-stop-all")).on_click(move |_, _, cx| {
                             let _ = view.update(cx, |v, cx| v.stop_edit(None, cx));
                         }),
                     )
@@ -1474,12 +1535,12 @@ impl FilesView {
                     .small()
                     .icon(IconName::PanelLeft)
                     .label(if self.show_local {
-                        "Hide local"
+                        t!("files-hide-local")
                     } else {
-                        "Show local"
+                        t!("files-show-local")
                     })
                     .selected(self.show_local)
-                    .tooltip("Show or hide the local computer's files")
+                    .tooltip(t!("files-local-tooltip"))
                     .on_click(cx.listener(|v, _, w, cx| {
                         let show = !v.show_local;
                         v.set_show_local(show, w, cx)
@@ -1490,29 +1551,27 @@ impl FilesView {
                     Button::new("upload")
                         .small()
                         .primary()
-                        .label("Upload…")
+                        .label(t!("files-upload-pick"))
                         .on_click(cx.listener(|v, _, _, cx| v.upload_with_picker(cx))),
                 )
             })
             .child(
                 Button::new("sync")
                     .small()
-                    .label("Synchronize…")
-                    .tooltip("Compare folders, review the changes, then run them")
+                    .label(t!("files-synchronize"))
+                    .tooltip(t!("files-synchronize-tooltip"))
                     .on_click(cx.listener(|v, _, w, cx| syncdlg::open(v, w, cx))),
             )
             .child(
                 Button::new("keep")
                     .small()
                     .label(if self.sync.is_some() {
-                        "Stop keeping up to date"
+                        t!("files-keep-stop")
                     } else {
-                        "Keep up to date…"
+                        t!("files-keep")
                     })
                     .when(self.sync.is_some(), |b| b.warning())
-                    .tooltip(
-                        "Upload changes from a local folder into a remote folder automatically",
-                    )
+                    .tooltip(t!("files-keep-tooltip"))
                     .on_click(cx.listener(|v, _, w, cx| {
                         if v.sync.take().is_some() {
                             cx.notify();
@@ -1528,15 +1587,13 @@ impl FilesView {
                         .small()
                         .icon(IconName::RefreshCw)
                         .label(if self.follow {
-                            "Following terminal"
+                            t!("files-following")
                         } else {
-                            "Follow terminal"
+                            t!("files-follow")
                         })
                         .selected(self.follow)
                         .when(self.follow, |b| b.primary())
-                        .tooltip(format!(
-                            "Show the folder the terminal “{term}” is in, as it changes"
-                        ))
+                        .tooltip(t!("files-follow-tooltip", terminal = term))
                         .on_click(cx.listener(|v, _, _, cx| v.toggle_follow(cx))),
                 )
             })
@@ -1546,13 +1603,13 @@ impl FilesView {
                     .small()
                     .icon(IconName::TriangleAlert)
                     .label(match (self.switching_root, self.elevated) {
-                        (true, _) => "Switching…",
-                        (false, true) => "Root: on",
-                        (false, false) => "Reopen as root",
+                        (true, _) => t!("files-root-switching"),
+                        (false, true) => t!("files-root-on"),
+                        (false, false) => t!("files-root-reopen"),
                     })
                     .when(self.elevated, |b| b.danger())
                     .disabled(self.switching_root)
-                    .tooltip("Browse the server as root (or the host's sudo user) through sudo")
+                    .tooltip(t!("files-root-tooltip"))
                     .on_click(cx.listener(|v, _, _, cx| v.toggle_root(cx))),
             )
             .into_any_element()
@@ -1596,6 +1653,7 @@ impl Render for FilesView {
                                 .xsmall()
                                 .ghost()
                                 .icon(IconName::Close)
+                                .accessibility_label(t!("dismiss"))
                                 .on_click(cx.listener(|v, _, _, cx| {
                                     v.banner = None;
                                     cx.notify();
@@ -1620,9 +1678,11 @@ impl Render for FilesView {
                         .text_color(theme.muted_foreground)
                         .border_t_1()
                         .border_color(theme.border)
-                        .child(format!(
-                            "Keeping {} → {} up to date: {}",
-                            s.local, s.remote, s.status
+                        .child(t!(
+                            "keep-status",
+                            local = &s.local,
+                            remote = &s.remote,
+                            status = &s.status
                         )),
                 )
             })

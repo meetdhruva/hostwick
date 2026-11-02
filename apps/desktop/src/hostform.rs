@@ -5,11 +5,13 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
+use gpui_kit::accesskit::Role;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, WindowExt as _};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, IconName, Sizable as _, WindowExt as _,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hostwick_core::{
@@ -75,7 +77,7 @@ pub fn parse_forwards(text: &str) -> Result<Vec<ForwardSpec>, String> {
             // `-L 8080:host:80`: the spec is the next token.
             spec = tokens
                 .next()
-                .ok_or_else(|| format!("`{tok}` needs a port specification"))?
+                .ok_or_else(|| t!("form-forward-needs-spec", token = tok).to_string())?
                 .to_owned();
         }
         out.push(ForwardSpec::parse(flag, &spec)?);
@@ -102,7 +104,9 @@ pub fn parse_jumps(text: &str) -> Result<Vec<Endpoint>, String> {
         .map(str::trim)
         .filter(|t| !t.is_empty())
         .map(|t| {
-            let target = Target::parse(t).map_err(|e| format!("jump host `{t}`: {e}"))?;
+            let target = Target::parse(t).map_err(|e| {
+                t!("form-jump-invalid", host = t, error = e.to_string()).to_string()
+            })?;
             Ok(Endpoint {
                 port: target.port_or_default(),
                 host: target.host,
@@ -118,7 +122,7 @@ pub fn parse_port(text: &str, what: &str) -> Result<u16, String> {
         .parse::<u16>()
         .ok()
         .filter(|p| *p != 0)
-        .ok_or_else(|| format!("{what} must be a number from 1 to 65535"))
+        .ok_or_else(|| t!("form-port-invalid", field = what).to_string())
 }
 
 /// Serial line settings from the form's fields.
@@ -134,9 +138,9 @@ pub fn parse_serial(
         .parse::<u32>()
         .ok()
         .filter(|b| (50..=4_000_000).contains(b))
-        .ok_or("Speed (baud) must be a number such as 9600 or 115200")?;
+        .ok_or_else(|| t!("form-baud-invalid").to_string())?;
     if !(5..=8).contains(&data_bits) || !(1..=2).contains(&stop_bits) {
-        return Err("Data bits must be 5–8 and stop bits 1 or 2".into());
+        return Err(t!("form-bits-invalid").into());
     }
     Ok(SerialSettings {
         baud,
@@ -179,14 +183,14 @@ impl Section {
         Section::Advanced,
     ];
 
-    fn label(self) -> &'static str {
+    fn label(self) -> SharedString {
         match self {
-            Section::General => "General",
-            Section::Auth => "Authentication",
-            Section::Connection => "Connection",
-            Section::Terminal => "Terminal",
-            Section::Files => "Files",
-            Section::Advanced => "Advanced",
+            Section::General => t!("host-section-general"),
+            Section::Auth => t!("host-section-auth"),
+            Section::Connection => t!("host-section-connection"),
+            Section::Terminal => t!("host-section-terminal"),
+            Section::Files => t!("host-section-files"),
+            Section::Advanced => t!("host-section-advanced"),
         }
     }
 }
@@ -259,6 +263,10 @@ pub struct HostForm {
     sudo: bool,
     sudo_user: Entity<InputState>,
     sftp_server: Entity<InputState>,
+    /// "Test connection" for the proxy: running, and the last result
+    /// (ok, text).
+    proxy_testing: bool,
+    proxy_test: Option<(bool, String)>,
     // Advanced
     legacy: bool,
     error: Option<(Section, String)>,
@@ -287,8 +295,7 @@ impl HostForm {
     ) -> Self {
         let editing = existing.is_some();
         let base = existing.unwrap_or_else(|| HostProfile::new("", ""));
-        let mk = |value: String, ph: &str, window: &mut Window, cx: &mut Context<Self>| {
-            let ph = ph.to_owned();
+        let mk = |value: String, ph: SharedString, window: &mut Window, cx: &mut Context<Self>| {
             cx.new(|cx| {
                 InputState::new(window, cx)
                     .placeholder(ph)
@@ -306,18 +313,18 @@ impl HostForm {
             .iter()
             .any(|a| matches!(a, AuthMethod::Gssapi { delegate: true }));
         let mut form = Self {
-            name: mk(base.name.clone(), "prod-web-1", window, cx),
-            folder: mk(base.folder.clone(), "prod/web (optional)", window, cx),
-            host: mk(
-                base.host.clone(),
-                "10.0.0.5 or host.example.com",
+            name: mk(base.name.clone(), "prod-web-1".into(), window, cx),
+            folder: mk(
+                base.folder.clone(),
+                t!("host-folder-placeholder"),
                 window,
                 cx,
             ),
-            port: mk(base.port.to_string(), "22", window, cx),
+            host: mk(base.host.clone(), t!("host-host-placeholder"), window, cx),
+            port: mk(base.port.to_string(), "22".into(), window, cx),
             user: mk(
                 base.user.clone().unwrap_or_default(),
-                "deploy (empty = your local user name)",
+                t!("host-user-placeholder"),
                 window,
                 cx,
             ),
@@ -330,7 +337,7 @@ impl HostForm {
                 Protocol::Telnet => ProtoChoice::Telnet,
                 Protocol::Serial(_) => ProtoChoice::Serial,
             },
-            baud: mk(serial.baud.to_string(), "9600", window, cx),
+            baud: mk(serial.baud.to_string(), "9600".into(), window, cx),
             data_bits: serial.data_bits,
             parity: serial.parity,
             stop_bits: serial.stop_bits,
@@ -343,26 +350,26 @@ impl HostForm {
             kerberos_delegate,
             keys: mk(
                 key_paths(&base),
-                "~/.ssh/id_ed25519, C:\\keys\\work.ppk",
+                "~/.ssh/id_ed25519, C:\\keys\\work.ppk".into(),
                 window,
                 cx,
             ),
             forget: Vec::new(),
             jump: mk(
                 jumps_to_text(&base.jump),
-                "user@bastion:22, inner-host",
+                "user@bastion:22, inner-host".into(),
                 window,
                 cx,
             ),
             forwards: mk(
                 forwards_to_text(&base.forwards),
-                "L8080:localhost:80 R9000:localhost:3000 D1080",
+                "L8080:localhost:80 R9000:localhost:3000 D1080".into(),
                 window,
                 cx,
             ),
             keepalive: mk(
                 base.keepalive_secs.to_string(),
-                "seconds, 0 = off",
+                t!("host-keepalive-placeholder"),
                 window,
                 cx,
             ),
@@ -374,7 +381,7 @@ impl HostForm {
             },
             proxy_host: mk(
                 proxy.as_ref().map(|p| p.host.clone()).unwrap_or_default(),
-                "proxy.example.com",
+                "proxy.example.com".into(),
                 window,
                 cx,
             ),
@@ -383,7 +390,7 @@ impl HostForm {
                     .as_ref()
                     .map(|p| p.port.to_string())
                     .unwrap_or_default(),
-                "1080",
+                "1080".into(),
                 window,
                 cx,
             ),
@@ -392,7 +399,7 @@ impl HostForm {
                     .as_ref()
                     .and_then(|p| p.user.clone())
                     .unwrap_or_default(),
-                "optional",
+                t!("host-optional-placeholder"),
                 window,
                 cx,
             ),
@@ -401,38 +408,36 @@ impl HostForm {
             x11_display: mk(
                 base.x11_display.clone().unwrap_or_default(),
                 if cfg!(windows) {
-                    "empty = localhost:0 (VcXsrv, Xming)"
+                    t!("host-x11-placeholder-windows")
                 } else {
-                    "empty = $DISPLAY"
+                    t!("host-x11-placeholder")
                 },
                 window,
                 cx,
             ),
-            term: mk(base.term.clone(), "xterm-256color", window, cx),
+            term: mk(base.term.clone(), "xterm-256color".into(), window, cx),
             script: {
                 let s = base.login_script.clone();
                 cx.new(|cx| {
                     TextareaState::new(window, cx)
                         .rows(5)
-                        .placeholder("# Example:\n# sudo -i\n# @wait #\n# cd /srv/app")
+                        .placeholder(format!(
+                            "# {}\n# sudo -i\n# @wait #\n# cd /srv/app",
+                            t!("host-script-example")
+                        ))
                         .default_value(s)
                 })
             },
             shell_integration: base.shell_integration,
             snippets: cx.new(|cx| {
-                SnippetEditor::new(
-                    &base.snippets,
-                    "No snippets for this host. Global snippets are in Settings → Snippets.",
-                    window,
-                    cx,
-                )
+                SnippetEditor::new(&base.snippets, t!("host-snippets-empty"), window, cx)
             }),
             log: mk(
                 base.session_log
                     .as_ref()
                     .map(|l| l.path.clone())
                     .unwrap_or_default(),
-                "empty = off, or e.g. &S-&Y&M&D-&T.log",
+                t!("host-log-placeholder"),
                 window,
                 cx,
             ),
@@ -442,14 +447,16 @@ impl HostForm {
                 .is_some_and(|l| l.mode == LogMode::Raw),
             file_protocol: base.file_protocol,
             sudo: base.sudo.enabled,
-            sudo_user: mk(base.sudo.user.clone(), "root", window, cx),
+            sudo_user: mk(base.sudo.user.clone(), "root".into(), window, cx),
             sftp_server: mk(
                 base.sudo.sftp_server.clone(),
-                "empty = detect (/usr/lib/openssh/sftp-server, …)",
+                t!("host-sftp-server-placeholder"),
                 window,
                 cx,
             ),
             legacy: base.allow_legacy_algorithms,
+            proxy_testing: false,
+            proxy_test: None,
             error: None,
             on_save,
             section: Section::General,
@@ -509,10 +516,10 @@ impl HostForm {
         if p == ProtoChoice::Serial && self.ports.is_none() {
             self.refresh_ports(window, cx);
         }
-        let ph = match p {
-            ProtoChoice::Serial if cfg!(windows) => "COM3",
-            ProtoChoice::Serial => "/dev/ttyUSB0",
-            _ => "10.0.0.5 or host.example.com",
+        let ph: SharedString = match p {
+            ProtoChoice::Serial if cfg!(windows) => "COM3".into(),
+            ProtoChoice::Serial => "/dev/ttyUSB0".into(),
+            _ => t!("host-host-placeholder"),
         };
         self.host
             .update(cx, |s, cx| s.set_placeholder(ph, window, cx));
@@ -534,9 +541,9 @@ impl HostForm {
             return Err((
                 General,
                 if serial {
-                    "Choose the serial port (device)".into()
+                    t!("host-error-no-device").into()
                 } else {
-                    "Enter the host name or address".into()
+                    t!("host-error-no-host").into()
                 },
             ));
         }
@@ -560,7 +567,7 @@ impl HostForm {
             ),
         };
         if !serial {
-            p.port = parse_port(&v(&self.port), "Port").map_err(|e| (General, e))?;
+            p.port = parse_port(&v(&self.port), &t!("host-port")).map_err(|e| (General, e))?;
         }
         p.user = Some(v(&self.user)).filter(|u| !u.is_empty());
 
@@ -603,7 +610,7 @@ impl HostForm {
             auth.push(AuthMethod::KeyboardInteractive);
         }
         if auth.is_empty() && self.proto == ProtoChoice::Ssh {
-            return Err((Auth, "Choose at least one way to log in".into()));
+            return Err((Auth, t!("host-error-no-auth").into()));
         }
         if !auth.is_empty() {
             p.auth = auth;
@@ -611,52 +618,23 @@ impl HostForm {
 
         p.jump = parse_jumps(&v(&self.jump)).map_err(|e| (Connection, e))?;
         p.forwards = parse_forwards(&v(&self.forwards))
-            .map_err(|e| (Connection, format!("Port forwards: {e}")))?;
+            .map_err(|e| (Connection, t!("host-error-forwards", error = e).into()))?;
         p.keepalive_secs = v(&self.keepalive)
             .parse::<u32>()
             .ok()
             .filter(|k| *k <= 3600)
-            .ok_or((
-                Connection,
-                "Keepalive must be seconds (0 to 3600)".to_owned(),
-            ))?;
-        p.proxy = match self.proxy {
-            ProxyChoice::None => None,
-            kind => {
-                let kind = match kind {
-                    ProxyChoice::Socks4 => ProxyKind::Socks4,
-                    ProxyChoice::Http => ProxyKind::Http,
-                    _ => ProxyKind::Socks5,
-                };
-                let host = v(&self.proxy_host);
-                if host.is_empty() {
-                    return Err((Connection, "Enter the proxy's host name".into()));
-                }
-                let port_text = v(&self.proxy_port);
-                let port = if port_text.is_empty() {
-                    kind.default_port()
-                } else {
-                    parse_port(&port_text, "Proxy port").map_err(|e| (Connection, e))?
-                };
-                let user = Some(v(&self.proxy_user)).filter(|u| !u.is_empty());
-                let keep = self.base.proxy.as_ref().filter(|old| {
-                    old.host == host && old.user == user && !self.forget.contains(&CredKind::Proxy)
-                });
-                Some(ProxySpec {
-                    kind,
-                    host,
-                    port,
-                    password_credential: keep.and_then(|o| o.password_credential.clone()),
-                    user,
-                })
-            }
-        };
+            .ok_or_else(|| (Connection, t!("host-error-keepalive").to_string()))?;
+        p.proxy = self.proxy_spec(cx).map_err(|e| (Connection, e))?;
         p.agent_forwarding = self.agent_fwd;
         p.x11_forwarding = self.x11;
         let display = v(&self.x11_display);
         if !display.is_empty() {
-            hostwick_ssh::X11Display::parse(&display)
-                .map_err(|e| (Connection, format!("X11 display: {e}")))?;
+            hostwick_ssh::X11Display::parse(&display).map_err(|e| {
+                (
+                    Connection,
+                    t!("host-error-x11", error = e.to_string()).into(),
+                )
+            })?;
         }
         p.x11_display = Some(display).filter(|d| !d.is_empty());
 
@@ -668,7 +646,7 @@ impl HostForm {
         };
         let script = self.script.read(cx).value().to_string();
         if let Some(e) = script_problem(&script) {
-            return Err((Terminal, format!("Login script, {e}")));
+            return Err((Terminal, t!("host-error-script", error = e).into()));
         }
         p.login_script = script.trim_end().to_owned();
         p.shell_integration = self.shell_integration;
@@ -697,6 +675,98 @@ impl HostForm {
         };
         p.allow_legacy_algorithms = self.legacy;
         Ok(p)
+    }
+
+    /// The proxy as the form describes it (None = no proxy).
+    fn proxy_spec(&self, cx: &App) -> Result<Option<ProxySpec>, String> {
+        let v = |i: &Entity<InputState>| self.val(i, cx);
+        let kind = match self.proxy {
+            ProxyChoice::None => return Ok(None),
+            ProxyChoice::Socks4 => ProxyKind::Socks4,
+            ProxyChoice::Http => ProxyKind::Http,
+            ProxyChoice::Socks5 => ProxyKind::Socks5,
+        };
+        let host = v(&self.proxy_host);
+        if host.is_empty() {
+            return Err(t!("host-error-proxy-host").into());
+        }
+        let port_text = v(&self.proxy_port);
+        let port = if port_text.is_empty() {
+            kind.default_port()
+        } else {
+            parse_port(&port_text, &t!("host-proxy-port"))?
+        };
+        let user = Some(v(&self.proxy_user)).filter(|u| !u.is_empty());
+        let keep = self.base.proxy.as_ref().filter(|old| {
+            old.host == host && old.user == user && !self.forget.contains(&CredKind::Proxy)
+        });
+        Ok(Some(ProxySpec {
+            kind,
+            host,
+            port,
+            password_credential: keep.and_then(|o| o.password_credential.clone()),
+            user,
+        }))
+    }
+
+    /// "Test connection": through the proxy to the first hop (the first
+    /// jump host, else the host) on its port, off the UI thread.
+    fn test_proxy(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.proxy_testing {
+            return;
+        }
+        let spec = match self.proxy_spec(cx) {
+            Ok(Some(s)) => s,
+            Ok(None) => return,
+            Err(e) => {
+                self.proxy_test = Some((false, e));
+                cx.notify();
+                return;
+            }
+        };
+        let jumps = parse_jumps(&self.val(&self.jump, cx));
+        let target = match jumps.as_deref() {
+            Ok([first, ..]) if self.proto == ProtoChoice::Ssh => {
+                Ok((first.host.clone(), first.port))
+            }
+            Err(e) => Err(e.clone()),
+            _ => {
+                let host = self.val(&self.host, cx);
+                if host.is_empty() {
+                    Err(t!("host-error-no-host").to_string())
+                } else {
+                    parse_port(&self.val(&self.port, cx), &t!("host-port")).map(|p| (host, p))
+                }
+            }
+        };
+        let (host, port) = match target {
+            Ok(t) => t,
+            Err(e) => {
+                self.proxy_test = Some((false, e));
+                cx.notify();
+                return;
+            }
+        };
+        self.proxy_testing = true;
+        self.proxy_test = None;
+        let job = self
+            .backend
+            .rt
+            .spawn(self.backend.clone().test_proxy(spec, host, port));
+        cx.spawn_in(window, async move |this, cx| {
+            let res = job.await;
+            let _ = this.update(cx, |f, cx| {
+                f.proxy_testing = false;
+                f.proxy_test = Some(match res {
+                    Ok(Ok(text)) => (true, text),
+                    Ok(Err(e)) => (false, e),
+                    Err(e) => (false, t!("error-internal", error = e.to_string()).into()),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -735,7 +805,8 @@ impl HostForm {
 
     // ---- rendering ----------------------------------------------------------
 
-    fn row(label: &'static str, el: impl IntoElement) -> Div {
+    fn row(label: impl Into<SharedString>, el: impl IntoElement) -> Div {
+        let label: SharedString = label.into();
         div()
             .flex()
             .items_center()
@@ -745,9 +816,19 @@ impl HostForm {
                     .w(px(130.0))
                     .flex_none()
                     .text_size(px(13.0))
-                    .child(label),
+                    .child(label.clone()),
             )
-            .child(div().flex_1().min_w_0().child(el))
+            // Named after the label, so a screen reader says what a field,
+            // or a row of choices, is for.
+            .child(
+                div()
+                    .id(ElementId::Name(label.clone()))
+                    .role(Role::Group)
+                    .aria_label(label)
+                    .flex_1()
+                    .min_w_0()
+                    .child(el),
+            )
     }
 
     fn hint(text: impl Into<SharedString>, cx: &App) -> Div {
@@ -756,42 +837,40 @@ impl HostForm {
             .text_size(px(11.0))
             .whitespace_normal()
             .text_color(cx.theme().muted_foreground)
-            .child(text.into())
+            .child(crate::a11y::text(text))
     }
 
     fn check(
         id: &'static str,
-        label: &'static str,
+        label: SharedString,
         value: bool,
         cx: &mut Context<Self>,
         set: fn(&mut Self, bool),
     ) -> Div {
-        div()
-            .pl(px(138.0))
-            .child(
-                Checkbox::new(id)
-                    .label(label)
-                    .checked(value)
-                    .on_click(cx.listener(move |f, v: &bool, _, cx| {
-                        set(f, *v);
-                        cx.notify();
-                    })),
-            )
+        div().pl(px(138.0)).child(
+            crate::a11y::checkbox(id, label, false, cx)
+                .checked(value)
+                .on_click(cx.listener(move |f, v: &bool, _, cx| {
+                    set(f, *v);
+                    cx.notify();
+                })),
+        )
     }
 
     fn choice<T: Copy + PartialEq + 'static>(
         id: &'static str,
         current: T,
-        options: &[(T, &'static str)],
+        options: &[(T, SharedString)],
         cx: &mut Context<Self>,
         set: fn(&mut Self, T, &mut Window, &mut Context<Self>),
     ) -> Div {
         let mut row = div().flex().gap(px(4.0)).flex_wrap();
-        for (i, (value, label)) in options.iter().copied().enumerate() {
+        for (i, (value, label)) in options.iter().cloned().enumerate() {
             row = row.child(
                 Button::new((id, i))
                     .xsmall()
                     .label(label)
+                    .toggled(current == value)
                     .when(current == value, |b| b.primary())
                     .on_click(cx.listener(move |f, _, w, cx| {
                         set(f, value, w, cx);
@@ -806,7 +885,7 @@ impl HostForm {
     fn saved_secret(
         &self,
         kind: CredKind,
-        what: &'static str,
+        what: SharedString,
         cx: &mut Context<Self>,
     ) -> Option<Div> {
         let id = existing_id(&self.base, &kind)?;
@@ -814,13 +893,13 @@ impl HostForm {
         let forgotten = self.forget.contains(&kind);
         let unlocked = self.backend.vault.is_unlocked();
         let text = if forgotten {
-            format!("The saved {what} will be forgotten when you save.")
+            t!("host-saved-forget-pending", what = what)
         } else if !unlocked {
-            format!("{what} saved in your vault (locked).")
+            t!("host-saved-locked", what = what)
         } else if self.backend.vault.has(&id) {
-            format!("{what} saved in your vault.")
+            t!("host-saved", what = what)
         } else {
-            format!("{what} is not in your vault any more; you'll be asked.")
+            t!("host-saved-missing", what = what)
         };
         let k = kind.clone();
         Some(
@@ -833,10 +912,14 @@ impl HostForm {
                 .text_color(theme.muted_foreground)
                 .child(text)
                 .child(
-                    Button::new(SharedString::from(format!("forget-{what}")))
+                    Button::new(SharedString::from(format!("forget-{kind:?}")))
                         .xsmall()
                         .ghost()
-                        .label(if forgotten { "Keep" } else { "Forget" })
+                        .label(if forgotten {
+                            t!("host-saved-keep")
+                        } else {
+                            t!("host-saved-forget")
+                        })
                         .on_click(cx.listener(move |f, _, _, cx| {
                             if let Some(i) = f.forget.iter().position(|x| *x == k) {
                                 f.forget.remove(i);
@@ -853,13 +936,13 @@ impl HostForm {
         let key_input = self.keys.clone();
         Button::new("browse-key")
             .small()
-            .label("Browse…")
+            .label(t!("button-browse"))
             .on_click(move |_, window, cx| {
                 let picked = cx.prompt_for_paths(PathPromptOptions {
                     files: true,
                     directories: false,
                     multiple: true,
-                    prompt: Some("Private key (OpenSSH or .ppk)".into()),
+                    prompt: Some(t!("host-pick-key")),
                 });
                 let input = key_input.clone();
                 window
@@ -890,17 +973,25 @@ impl HostForm {
     fn render_general(&mut self, body: Div, cx: &mut Context<Self>) -> Div {
         let serial = self.proto == ProtoChoice::Serial;
         let body = body
-            .child(Self::row("Name", Input::new(&self.name).small()))
-            .child(Self::row("Folder", Input::new(&self.folder).small()))
             .child(Self::row(
-                "Protocol",
+                t!("host-name"),
+                Input::new(&self.name).small().aria_label(t!("host-name")),
+            ))
+            .child(Self::row(
+                t!("host-folder"),
+                Input::new(&self.folder)
+                    .small()
+                    .aria_label(t!("host-folder")),
+            ))
+            .child(Self::row(
+                t!("host-protocol"),
                 Self::choice(
                     "proto",
                     self.proto,
                     &[
-                        (ProtoChoice::Ssh, "SSH"),
-                        (ProtoChoice::Telnet, "Telnet"),
-                        (ProtoChoice::Serial, "Serial"),
+                        (ProtoChoice::Ssh, t!("protocol-ssh")),
+                        (ProtoChoice::Telnet, t!("protocol-telnet")),
+                        (ProtoChoice::Serial, t!("protocol-serial")),
                     ],
                     cx,
                     |f, v, w, cx| f.set_proto(v, w, cx),
@@ -909,17 +1000,30 @@ impl HostForm {
         let body = if serial {
             self.render_serial(body, cx)
         } else {
-            body.child(Self::row("Host", Input::new(&self.host).small()))
-                .child(Self::row(
-                    "Port",
-                    div().w(px(120.0)).child(Input::new(&self.port).small()),
-                ))
-                .child(Self::row("User", Input::new(&self.user).small()))
-                .when(self.proto == ProtoChoice::Telnet, |d| {
-                    d.child(Self::hint("Telnet sends everything unencrypted; use it for network gear on a trusted network. The user name is sent if the server asks for it.", cx))
-                })
+            body.child(Self::row(
+                t!("host-host"),
+                Input::new(&self.host).small().aria_label(t!("host-host")),
+            ))
+            .child(Self::row(
+                t!("host-port"),
+                div()
+                    .w(px(120.0))
+                    .child(Input::new(&self.port).small().aria_label(t!("host-port"))),
+            ))
+            .child(Self::row(
+                t!("host-user"),
+                Input::new(&self.user).small().aria_label(t!("host-user")),
+            ))
+            .when(self.proto == ProtoChoice::Telnet, |d| {
+                d.child(Self::hint(t!("host-telnet-hint"), cx))
+            })
         };
-        body.child(Self::row("Notes", Textarea::new(&self.notes).small()))
+        body.child(Self::row(
+            t!("host-notes"),
+            Textarea::new(&self.notes)
+                .small()
+                .aria_label(t!("host-notes")),
+        ))
     }
 
     fn render_serial(&mut self, body: Div, cx: &mut Context<Self>) -> Div {
@@ -929,9 +1033,9 @@ impl HostForm {
         let picker = Button::new("ports")
             .small()
             .label(match &ports {
-                None => "Looking…".to_owned(),
-                Some(p) if p.is_empty() => "No ports found".to_owned(),
-                Some(p) => format!("Ports ({})", p.len()),
+                None => t!("host-ports-looking"),
+                Some(p) if p.is_empty() => t!("host-ports-none"),
+                Some(p) => t!("host-ports-count", count = p.len()),
             })
             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
                 let mut menu = menu;
@@ -953,10 +1057,8 @@ impl HostForm {
                         }
                     }
                     _ => {
-                        menu = menu.item(
-                            PopupMenuItem::new("No serial ports found — type the device name")
-                                .disabled(true),
-                        );
+                        menu = menu
+                            .item(PopupMenuItem::new(t!("host-ports-none-menu")).disabled(true));
                     }
                 }
                 menu
@@ -965,6 +1067,7 @@ impl HostForm {
         let bauds = Button::new("bauds")
             .small()
             .icon(IconName::ChevronDown)
+            .accessibility_label(t!("host-baud-common"))
             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
                 let mut menu = menu;
                 for b in BAUDS {
@@ -978,64 +1081,95 @@ impl HostForm {
                 menu
             });
         body.child(Self::row(
-            "Port (device)",
+            t!("host-device"),
             div()
                 .flex()
                 .gap(px(6.0))
-                .child(div().flex_1().min_w_0().child(Input::new(&self.host).small()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(Input::new(&self.host).small().aria_label(t!("host-device"))),
+                )
                 .child(picker)
                 .child(
                     Button::new("refresh-ports")
                         .small()
                         .ghost()
                         .icon(IconName::RefreshCw)
-                        .tooltip("Look for serial ports again")
+                        .tooltip(t!("host-ports-refresh"))
+                        .accessibility_label(t!("host-ports-refresh"))
                         .on_click(cx.listener(|f, _, w, cx| f.refresh_ports(w, cx))),
                 ),
         ))
         .child(Self::hint(
             if cfg!(windows) {
-                "COM3, COM4… Pick one or type its name."
+                t!("host-device-hint-windows")
             } else {
-                "/dev/ttyUSB0, /dev/ttyACM0, /dev/serial/by-id/… Pick one or type its path."
+                t!("host-device-hint")
             },
             cx,
         ))
         .child(Self::row(
-            "Speed (baud)",
+            t!("host-baud"),
             div()
                 .flex()
                 .gap(px(4.0))
-                .child(div().w(px(120.0)).child(Input::new(&self.baud).small()))
+                .child(
+                    div()
+                        .w(px(120.0))
+                        .child(Input::new(&self.baud).small().aria_label(t!("host-baud"))),
+                )
                 .child(bauds),
         ))
         .child(Self::row(
-            "Data bits",
-            Self::choice("bits", self.data_bits, &[(5, "5"), (6, "6"), (7, "7"), (8, "8")], cx, |f, v, _, _| f.data_bits = v),
+            t!("host-data-bits"),
+            Self::choice(
+                "bits",
+                self.data_bits,
+                &[
+                    (5, "5".into()),
+                    (6, "6".into()),
+                    (7, "7".into()),
+                    (8, "8".into()),
+                ],
+                cx,
+                |f, v, _, _| f.data_bits = v,
+            ),
         ))
         .child(Self::row(
-            "Parity",
+            t!("host-parity"),
             Self::choice(
                 "parity",
                 self.parity,
-                &[(Parity::None, "None"), (Parity::Odd, "Odd"), (Parity::Even, "Even")],
+                &[
+                    (Parity::None, t!("host-parity-none")),
+                    (Parity::Odd, t!("host-parity-odd")),
+                    (Parity::Even, t!("host-parity-even")),
+                ],
                 cx,
                 |f, v, _, _| f.parity = v,
             ),
         ))
         .child(Self::row(
-            "Stop bits",
-            Self::choice("stop", self.stop_bits, &[(1, "1"), (2, "2")], cx, |f, v, _, _| f.stop_bits = v),
+            t!("host-stop-bits"),
+            Self::choice(
+                "stop",
+                self.stop_bits,
+                &[(1, "1".into()), (2, "2".into())],
+                cx,
+                |f, v, _, _| f.stop_bits = v,
+            ),
         ))
         .child(Self::row(
-            "Flow control",
+            t!("host-flow"),
             Self::choice(
                 "flow",
                 self.flow,
                 &[
-                    (FlowControl::None, "None"),
-                    (FlowControl::Software, "XON/XOFF"),
-                    (FlowControl::Hardware, "RTS/CTS"),
+                    (FlowControl::None, t!("host-flow-none")),
+                    (FlowControl::Software, "XON/XOFF".into()),
+                    (FlowControl::Hardware, "RTS/CTS".into()),
                 ],
                 cx,
                 |f, v, _, _| f.flow = v,
@@ -1047,17 +1181,17 @@ impl HostForm {
                 .text_size(px(11.0))
                 .text_color(theme.muted_foreground)
                 .child(match self.ports.as_ref().map(|p| p.len()) {
-                    Some(0) if cfg!(target_os = "linux") => "No ports found. USB adapters appear as /dev/ttyUSB*; you may need to be in the dialout group.",
-                    _ => "Most consoles use 9600 8N1 or 115200 8N1 without flow control.",
+                    Some(0) if cfg!(target_os = "linux") => t!("host-serial-none-linux"),
+                    _ => t!("host-serial-hint"),
                 }),
         )
     }
 
     fn render_auth(&mut self, body: Div, cx: &mut Context<Self>) -> Div {
         if self.proto != ProtoChoice::Ssh {
-            return body.child(Self::hint("Telnet and serial connections log in inside the terminal. Use a login script (Terminal) to automate it.", cx).pl(px(0.0)));
+            return body.child(Self::hint(t!("host-auth-not-ssh"), cx).pl(px(0.0)));
         }
-        let pw = self.saved_secret(CredKind::Password, "Password", cx);
+        let pw = self.saved_secret(CredKind::Password, t!("host-what-password"), cx);
         let keys_text = self.val(&self.keys, cx);
         let key_saved: Vec<Div> = keys_text
             .split(',')
@@ -1066,47 +1200,76 @@ impl HostForm {
             .filter_map(|k| {
                 let kind = CredKind::KeyPassphrase(k.into());
                 existing_id(&self.base, &kind)?;
-                self.saved_secret(kind, "Key passphrase", cx)
+                self.saved_secret(kind, t!("host-what-key-passphrase"), cx)
             })
             .collect();
         body.child(Self::row(
-            "Key files",
+            t!("host-key-files"),
             div()
                 .flex()
                 .gap(px(6.0))
-                .child(div().flex_1().min_w_0().child(Input::new(&self.keys).small()))
+                .child(
+                    div().flex_1().min_w_0().child(
+                        Input::new(&self.keys)
+                            .small()
+                            .aria_label(t!("host-key-files")),
+                    ),
+                )
                 .child(self.browse_keys()),
         ))
-        .child(Self::hint("OpenSSH or PuTTY .ppk keys, comma-separated. A certificate next to a key (id_ed25519-cert.pub) is used automatically. Security keys (sk-…) work through the agent.", cx))
+        .child(Self::hint(t!("host-keys-hint"), cx))
         .children(key_saved)
-        .child(Self::check("auth-agent", "Keys in the SSH agent (Pageant, ssh-agent, 1Password…)", self.use_agent, cx, |f, v| f.use_agent = v))
-        .child(Self::check("auth-pw", "Password", self.use_password, cx, |f, v| f.use_password = v))
+        .child(Self::check(
+            "auth-agent",
+            t!("host-auth-agent"),
+            self.use_agent,
+            cx,
+            |f, v| f.use_agent = v,
+        ))
+        .child(Self::check(
+            "auth-pw",
+            t!("host-auth-password"),
+            self.use_password,
+            cx,
+            |f, v| f.use_password = v,
+        ))
         .children(pw)
-        .when(self.use_password && existing_id(&self.base, &CredKind::Password).is_none(), |d| {
-            d.child(Self::hint("Tick “Remember password” when asked to log in automatically next time.", cx))
-        })
-        .child(Self::check("auth-kbd", "Keyboard-interactive (one-time codes, MFA)", self.use_kbd, cx, |f, v| f.use_kbd = v))
-        .child(Self::check("auth-krb", "Kerberos (single sign-on)", self.use_kerberos, cx, |f, v| f.use_kerberos = v))
+        .when(
+            self.use_password && existing_id(&self.base, &CredKind::Password).is_none(),
+            |d| d.child(Self::hint(t!("host-auth-remember-hint"), cx)),
+        )
+        .child(Self::check(
+            "auth-kbd",
+            t!("host-auth-kbd"),
+            self.use_kbd,
+            cx,
+            |f, v| f.use_kbd = v,
+        ))
+        .child(Self::check(
+            "auth-krb",
+            t!("host-auth-kerberos"),
+            self.use_kerberos,
+            cx,
+            |f, v| f.use_kerberos = v,
+        ))
         .when(self.use_kerberos, |d| {
-            d.child(
-                div().pl(px(24.0)).child(Self::check(
-                    "auth-krb-fwd",
-                    "Forward my Kerberos ticket to the server",
-                    self.kerberos_delegate,
-                    cx,
-                    |f, v| f.kerberos_delegate = v,
-                )),
-            )
+            d.child(div().pl(px(24.0)).child(Self::check(
+                "auth-krb-fwd",
+                t!("host-auth-kerberos-forward"),
+                self.kerberos_delegate,
+                cx,
+                |f, v| f.kerberos_delegate = v,
+            )))
             .child(Self::hint(
                 if cfg!(windows) {
-                    "Uses your Windows domain login."
+                    t!("host-auth-kerberos-hint-windows")
                 } else {
-                    "Uses the ticket from kinit (see klist). Without one, the next method is tried."
+                    t!("host-auth-kerberos-hint")
                 },
                 cx,
             ))
         })
-        .child(Self::hint("Methods are tried in this order: Kerberos, agent, key files, password, keyboard-interactive.", cx))
+        .child(Self::hint(t!("host-auth-order"), cx))
     }
 
     fn render_connection(&mut self, body: Div, cx: &mut Context<Self>) -> Div {
@@ -1114,30 +1277,24 @@ impl HostForm {
         let ssh = self.proto == ProtoChoice::Ssh;
         let serial = self.proto == ProtoChoice::Serial;
         if serial {
-            return body.child(
-                Self::hint(
-                    "Serial ports are local: no proxy, jump hosts or forwards.",
-                    cx,
-                )
-                .pl(px(0.0)),
-            );
+            return body.child(Self::hint(t!("host-connection-serial"), cx).pl(px(0.0)));
         }
         let display = self.val(&self.x11_display, cx);
         let display_err = (!display.is_empty())
             .then(|| hostwick_ssh::X11Display::parse(&display).err())
             .flatten();
-        let proxy_saved = self.saved_secret(CredKind::Proxy, "Proxy password", cx);
+        let proxy_saved = self.saved_secret(CredKind::Proxy, t!("host-what-proxy-password"), cx);
         let body = body
             .child(Self::row(
-                "Proxy",
+                t!("host-proxy"),
                 Self::choice(
                     "proxy",
                     self.proxy,
                     &[
-                        (ProxyChoice::None, "None"),
-                        (ProxyChoice::Socks5, "SOCKS5"),
-                        (ProxyChoice::Socks4, "SOCKS4"),
-                        (ProxyChoice::Http, "HTTP"),
+                        (ProxyChoice::None, t!("host-proxy-none")),
+                        (ProxyChoice::Socks5, "SOCKS5".into()),
+                        (ProxyChoice::Socks4, "SOCKS4".into()),
+                        (ProxyChoice::Http, "HTTP".into()),
                     ],
                     cx,
                     |f, v, _, _| f.proxy = v,
@@ -1145,55 +1302,132 @@ impl HostForm {
             ))
             .when(self.proxy != ProxyChoice::None, |d| {
                 d.child(Self::row(
-                    "Proxy host / port",
+                    t!("host-proxy-host-port"),
                     div()
                         .flex()
                         .gap(px(6.0))
-                        .child(div().flex_1().child(Input::new(&self.proxy_host).small()))
-                        .child(div().w(px(90.0)).child(Input::new(&self.proxy_port).small())),
+                        .child(
+                            div().flex_1().child(
+                                Input::new(&self.proxy_host)
+                                    .small()
+                                    .aria_label(t!("host-proxy")),
+                            ),
+                        )
+                        .child(
+                            div().w(px(90.0)).child(
+                                Input::new(&self.proxy_port)
+                                    .small()
+                                    .aria_label(t!("host-proxy-port")),
+                            ),
+                        ),
                 ))
                 .when(self.proxy != ProxyChoice::Socks4, |d| {
-                    d.child(Self::row("Proxy user", Input::new(&self.proxy_user).small()))
-                        .children(proxy_saved)
-                        .child(Self::hint("The proxy password is asked for when connecting (tick Remember to save it).", cx))
+                    d.child(Self::row(
+                        t!("host-proxy-user"),
+                        Input::new(&self.proxy_user)
+                            .small()
+                            .aria_label(t!("host-proxy-user")),
+                    ))
+                    .children(proxy_saved)
+                    .child(Self::hint(t!("host-proxy-password-hint"), cx))
                 })
+                .child(
+                    div()
+                        .pl(px(138.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(
+                            Button::new("proxy-test")
+                                .small()
+                                .label(if self.proxy_testing {
+                                    t!("host-proxy-testing")
+                                } else {
+                                    t!("host-proxy-test")
+                                })
+                                .disabled(self.proxy_testing)
+                                .tooltip(t!("host-proxy-test-tooltip"))
+                                .on_click(cx.listener(|f, _, w, cx| f.test_proxy(w, cx))),
+                        )
+                        .when_some(self.proxy_test.clone(), |d, (ok, text)| {
+                            d.child(
+                                div()
+                                    .id("proxy-test-result")
+                                    .role(Role::Status)
+                                    .aria_label(text.clone())
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(12.0))
+                                    .whitespace_normal()
+                                    .text_color(if ok { theme.success } else { theme.danger })
+                                    .child(text),
+                            )
+                        }),
+                )
             });
         if !ssh {
             return body;
         }
-        body.child(Self::row("Jump hosts", Input::new(&self.jump).small()))
-            .child(Self::hint("Comma-separated, outermost first (like ssh -J).", cx))
-            .child(Self::row("Port forwards", Input::new(&self.forwards).small()))
-            .child(Self::hint("L = local → remote, R = remote → local, D = SOCKS proxy. Started with the terminal.", cx))
-            .child(Self::row(
-                "Keepalive (s)",
-                div().w(px(120.0)).child(Input::new(&self.keepalive).small()),
+        body.child(Self::row(
+            t!("host-jump-hosts"),
+            Input::new(&self.jump)
+                .small()
+                .aria_label(t!("host-jump-hosts")),
+        ))
+        .child(Self::hint(t!("host-jump-hint"), cx))
+        .child(Self::row(
+            t!("host-forwards"),
+            Input::new(&self.forwards)
+                .small()
+                .aria_label(t!("host-forwards")),
+        ))
+        .child(Self::hint(t!("host-forwards-hint"), cx))
+        .child(Self::row(
+            t!("host-keepalive"),
+            div().w(px(120.0)).child(
+                Input::new(&self.keepalive)
+                    .small()
+                    .aria_label(t!("host-keepalive")),
+            ),
+        ))
+        .child(Self::check(
+            "agent-fwd",
+            t!("host-agent-forwarding"),
+            self.agent_fwd,
+            cx,
+            |f, v| f.agent_fwd = v,
+        ))
+        .child(Self::hint(t!("host-agent-forwarding-hint"), cx))
+        .child(Self::check("x11", t!("host-x11"), self.x11, cx, |f, v| {
+            f.x11 = v
+        }))
+        .when(self.x11, |d| {
+            d.child(Self::row(
+                t!("host-x11-display"),
+                Input::new(&self.x11_display)
+                    .small()
+                    .aria_label(t!("host-x11-display")),
             ))
-            .child(Self::check("agent-fwd", "Forward my SSH agent (git on the server uses my keys)", self.agent_fwd, cx, |f, v| f.agent_fwd = v))
-            .child(Self::hint("Only on servers you trust: their admins can use your keys while you are connected.", cx))
-            .child(Self::check("x11", "Forward X11 (show remote GUI programs here)", self.x11, cx, |f, v| f.x11 = v))
-            .when(self.x11, |d| {
-                d.child(Self::row("X display", Input::new(&self.x11_display).small()))
-                    .when_some(display_err, |d, e| {
-                        d.child(
-                            div()
-                                .pl(px(138.0))
-                                .text_size(px(11.0))
-                                .text_color(theme.danger)
-                                .child(e),
-                        )
-                    })
-                    .child(Self::hint(
-                        if cfg!(windows) {
-                            "Needs an X server such as VcXsrv or Xming running."
-                        } else if cfg!(target_os = "macos") {
-                            "Needs XQuartz."
-                        } else {
-                            "Uses your desktop's X server (or XWayland)."
-                        },
-                        cx,
-                    ))
+            .when_some(display_err, |d, e| {
+                d.child(
+                    div()
+                        .pl(px(138.0))
+                        .text_size(px(11.0))
+                        .text_color(theme.danger)
+                        .child(e),
+                )
             })
+            .child(Self::hint(
+                if cfg!(windows) {
+                    t!("host-x11-hint-windows")
+                } else if cfg!(target_os = "macos") {
+                    t!("host-x11-hint-macos")
+                } else {
+                    t!("host-x11-hint")
+                },
+                cx,
+            ))
+        })
     }
 
     fn render_terminal(&mut self, body: Div, cx: &mut Context<Self>) -> Div {
@@ -1201,15 +1435,31 @@ impl HostForm {
         let script = self.script.read(cx).value().to_string();
         let problem = script_problem(&script);
         body.child(Self::row(
-            "Terminal type",
-            div().w(px(200.0)).child(Input::new(&self.term).small()),
+            t!("host-terminal-type"),
+            div().w(px(200.0)).child(
+                Input::new(&self.term)
+                    .small()
+                    .aria_label(t!("host-terminal-type")),
+            ),
         ))
         .child(
             div()
                 .flex()
                 .gap(px(8.0))
-                .child(div().w(px(130.0)).flex_none().text_size(px(13.0)).child("Login script"))
-                .child(div().flex_1().min_w_0().child(Textarea::new(&self.script).small())),
+                .child(
+                    div()
+                        .w(px(130.0))
+                        .flex_none()
+                        .text_size(px(13.0))
+                        .child(t!("host-login-script")),
+                )
+                .child(
+                    div().flex_1().min_w_0().child(
+                        Textarea::new(&self.script)
+                            .small()
+                            .aria_label(t!("host-login-script")),
+                    ),
+                ),
         )
         .child(match problem {
             Some(e) => div()
@@ -1217,72 +1467,104 @@ impl HostForm {
                 .text_size(px(11.0))
                 .text_color(theme.danger)
                 .child(e),
-            None => Self::hint("One line per command, typed after login. @wait TEXT waits for output (10 s), @wait 30000 TEXT for longer, @sleep 500 pauses; # starts a comment.", cx),
+            None => Self::hint(t!("host-login-script-hint"), cx),
         })
         .when(self.proto == ProtoChoice::Ssh, |d| {
-            d.child(Self::check("shell-int", "Shell integration (bash, zsh)", self.shell_integration, cx, |f, v| f.shell_integration = v))
-                .child(Self::hint("Lets the file browser follow the terminal's folder (right-click → Open files here). Adds a prompt hook quietly when the shell starts; nothing is installed on the server.", cx))
+            d.child(Self::check(
+                "shell-int",
+                t!("host-shell-integration"),
+                self.shell_integration,
+                cx,
+                |f, v| f.shell_integration = v,
+            ))
+            .child(Self::hint(t!("host-shell-integration-hint"), cx))
         })
         .child(
             div()
                 .pt(px(4.0))
                 .text_size(px(13.0))
                 .font_weight(FontWeight::SEMIBOLD)
-                .child("Snippets for this host"),
+                .child(t!("host-snippets-title")),
         )
         .child(self.snippets.clone())
-        .child(Self::row("Session log", Input::new(&self.log).small()))
-        .child(Self::hint("Tokens: &S session, &H host, &P port, &U user, &Y&M&D date, &T time. Relative paths go to the log folder.", cx))
-        .child(Self::check("raw-log", "Log raw output (with escape codes)", self.raw_log, cx, |f, v| f.raw_log = v))
+        .child(Self::row(
+            t!("host-session-log"),
+            Input::new(&self.log)
+                .small()
+                .aria_label(t!("host-session-log")),
+        ))
+        .child(Self::hint(t!("host-session-log-hint"), cx))
+        .child(Self::check(
+            "raw-log",
+            t!("host-raw-log"),
+            self.raw_log,
+            cx,
+            |f, v| f.raw_log = v,
+        ))
     }
 
     fn render_files(&mut self, body: Div, cx: &mut Context<Self>) -> Div {
         if self.proto != ProtoChoice::Ssh {
-            return body.child(Self::hint("The file browser needs SSH.", cx).pl(px(0.0)));
+            return body.child(Self::hint(t!("host-files-not-ssh"), cx).pl(px(0.0)));
         }
-        let sudo_saved = self.saved_secret(CredKind::Sudo, "sudo password", cx);
+        let sudo_saved = self.saved_secret(CredKind::Sudo, t!("host-what-sudo-password"), cx);
         body.child(Self::row(
-            "File protocol",
+            t!("host-file-protocol"),
             Self::choice(
                 "fproto",
                 self.file_protocol,
                 &[
-                    (FileProtocol::Auto, "Auto"),
-                    (FileProtocol::Sftp, "SFTP"),
-                    (FileProtocol::Scp, "SCP"),
+                    (FileProtocol::Auto, t!("host-file-protocol-auto")),
+                    (FileProtocol::Sftp, "SFTP".into()),
+                    (FileProtocol::Scp, "SCP".into()),
                 ],
                 cx,
                 |f, v, _, _| f.file_protocol = v,
             ),
         ))
-        .child(Self::hint("Auto uses SFTP and falls back to SCP on servers without it (routers, ESXi, busybox).", cx))
-        .child(Self::check("sudo", "Open the file browser as root (sudo)", self.sudo, cx, |f, v| f.sudo = v))
-        .child(Self::row("As user", div().w(px(200.0)).child(Input::new(&self.sudo_user).small())))
-        .child(Self::row("sftp-server", Input::new(&self.sftp_server).small()))
+        .child(Self::hint(t!("host-file-protocol-hint"), cx))
+        .child(Self::check(
+            "sudo",
+            t!("host-sudo"),
+            self.sudo,
+            cx,
+            |f, v| f.sudo = v,
+        ))
+        .child(Self::row(
+            t!("host-sudo-user"),
+            div().w(px(200.0)).child(
+                Input::new(&self.sudo_user)
+                    .small()
+                    .aria_label(t!("host-sudo-user")),
+            ),
+        ))
+        .child(Self::row(
+            "sftp-server",
+            Input::new(&self.sftp_server)
+                .small()
+                .aria_label("sftp-server"),
+        ))
         .children(sudo_saved)
-        .child(Self::hint("Works with passwordless sudo or a sudo password (asked for, or saved). “Reopen as root” in the browser switches at any time.", cx))
+        .child(Self::hint(t!("host-sudo-hint"), cx))
     }
 
     fn render_advanced(&mut self, body: Div, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
         body.child(Self::check(
             "legacy",
-            "Allow legacy algorithms (ssh-rsa/SHA-1, old key exchange) for old devices",
+            t!("host-legacy"),
             self.legacy,
             cx,
             |f, v| f.legacy = v,
         ))
-        .child(Self::hint(
-            "Only for old switches, routers and appliances that need them.",
-            cx,
-        ))
+        .child(Self::hint(t!("host-legacy-hint"), cx))
         .when(self.editing, |d| {
             d.child(
                 div()
                     .pt(px(8.0))
                     .text_size(px(11.0))
                     .text_color(theme.muted_foreground)
-                    .child(format!("Host id: {}", self.base.id.0)),
+                    .child(t!("host-id", id = self.base.id.0.to_string())),
             )
         })
     }
@@ -1293,7 +1575,16 @@ impl Render for HostForm {
         let theme = cx.theme().clone();
         let current = self.section;
         let err_section = self.error.as_ref().map(|(s, _)| *s);
+        let title = if self.editing {
+            t!("host-title-edit")
+        } else {
+            t!("host-title-new")
+        };
+        // Sections: buttons, so Tab reaches them and Enter/Space opens one.
         let nav = div()
+            .id("host-sections")
+            .role(Role::Toolbar)
+            .aria_label(t!("a11y-sections"))
             .w(px(150.0))
             .flex_none()
             .flex()
@@ -1304,23 +1595,11 @@ impl Render for HostForm {
             .border_color(theme.border)
             .children(Section::ALL.iter().enumerate().map(|(i, s)| {
                 let s = *s;
-                div()
-                    .id(("hsec", i))
-                    .px(px(10.0))
-                    .py(px(5.0))
-                    .rounded(px(4.0))
-                    .text_size(px(13.0))
-                    .cursor_pointer()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .when(s == current, |d| {
-                        d.bg(theme.accent).text_color(theme.accent_foreground)
-                    })
-                    .when(s != current, |d| d.hover(|h| h.bg(theme.muted)))
-                    .child(s.label())
-                    .when(err_section == Some(s), |d| {
-                        d.child(div().size(px(6.0)).rounded_full().bg(theme.danger))
+                let problem = err_section == Some(s);
+                crate::a11y::section_button(("hsec", i), s.label(), s == current, cx)
+                    .when(problem, |b| {
+                        b.accessibility_label(t!("a11y-section-problem", section = s.label()))
+                            .child(div().size(px(6.0)).rounded_full().bg(theme.danger))
                     })
                     .on_click(cx.listener(move |f, _, _, cx| {
                         f.section = s;
@@ -1337,6 +1616,9 @@ impl Render for HostForm {
             Section::Advanced => self.render_advanced(body, cx),
         };
         div()
+            .id("host-form")
+            .role(Role::Group)
+            .aria_label(title)
             .flex()
             .flex_col()
             .gap(px(8.0))
@@ -1355,6 +1637,10 @@ impl Render for HostForm {
             .when_some(self.error.clone(), |d, (_, e)| {
                 d.child(
                     div()
+                        .id("host-error")
+                        .role(Role::Alert)
+                        .aria_label(e.clone())
+                        .aria_value(e.clone())
                         .text_size(px(13.0))
                         .text_color(theme.danger)
                         .whitespace_normal()
@@ -1382,25 +1668,38 @@ pub fn open(
             let input = form.read(cx).name.clone();
             input.update(cx, |s, cx| s.focus(window, cx));
         }
-        let f1 = form.clone();
+        let (f1, f2) = (form.clone(), form.clone());
         dialog
-            .title(if editing { "Edit host" } else { "New host" })
+            .title(crate::a11y::text(if editing {
+                t!("host-title-edit")
+            } else {
+                t!("host-title-new")
+            }))
             .w(px(860.0))
             .margin_top(px(40.0))
             .child(form.clone())
+            // Enter (outside multi-line fields) saves; `save` closes the
+            // dialog itself when the host is valid.
+            .on_ok(move |_, window, cx| {
+                f2.update(cx, |f, cx| f.save(window, cx));
+                false
+            })
             .footer(
                 div()
                     .flex()
                     .gap(px(8.0))
                     .child(
                         Button::new("cancel")
-                            .label("Cancel")
+                            .label(t!("button-cancel"))
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                     )
                     .child(
-                        Button::new("save").primary().label("Save").on_click(
-                            move |_, window, cx| f1.update(cx, |f, cx| f.save(window, cx)),
-                        ),
+                        Button::new("save")
+                            .primary()
+                            .label(t!("button-save"))
+                            .on_click(move |_, window, cx| {
+                                f1.update(cx, |f, cx| f.save(window, cx))
+                            }),
                     ),
             )
     });

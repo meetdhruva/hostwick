@@ -5,7 +5,6 @@
 use std::sync::Arc;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -31,7 +30,7 @@ pub fn open(
         let busy = props.read(cx).busy;
         let (apply, close) = (props.clone(), props.clone());
         dialog
-            .title("Properties")
+            .title(crate::a11y::text(t!("props-title")))
             .w(px(560.0))
             .child(props.clone())
             .on_ok(move |_, window, cx| {
@@ -42,22 +41,24 @@ pub fn open(
                 div()
                     .flex()
                     .gap(px(8.0))
-                    .child(
-                        Button::new("close")
-                            .label("Close")
-                            .on_click(move |_, window, cx| {
-                                window.close_dialog(cx);
-                                close.update(cx, |p, cx| {
-                                    p.cancel_work();
-                                    let _ = p.view.update(cx, |v, cx| v.refocus(window, cx));
-                                });
-                            }),
-                    )
+                    .child(Button::new("close").label(t!("button-close")).on_click(
+                        move |_, window, cx| {
+                            window.close_dialog(cx);
+                            close.update(cx, |p, cx| {
+                                p.cancel_work();
+                                let _ = p.view.update(cx, |v, cx| v.refocus(window, cx));
+                            });
+                        },
+                    ))
                     .child({
                         let props = props.clone();
                         Button::new("apply")
                             .primary()
-                            .label(if busy { "Applying…" } else { "Apply" })
+                            .label(if busy {
+                                t!("props-applying")
+                            } else {
+                                t!("props-apply")
+                            })
                             .disabled(busy)
                             .on_click(move |_, window, cx| {
                                 props.update(cx, |p, cx| p.apply(window, cx));
@@ -207,7 +208,7 @@ impl Props {
     }
 
     fn calc_checksum(&mut self, cx: &mut Context<Self>) {
-        self.checksum = Some("calculating…".into());
+        self.checksum = Some(t!("props-calculating").into());
         let (fs, path) = (self.fs.clone(), self.entry.path.clone());
         let (tx, rx) = futures::channel::oneshot::channel();
         self.work.push(self.rt.spawn(async move {
@@ -217,7 +218,7 @@ impl Props {
         cx.spawn(async move |this, cx| {
             let text = match rx.await {
                 Ok(Ok(h)) => h,
-                Ok(Err(e)) => format!("error: {e}"),
+                Ok(Err(e)) => t!("props-error", error = e.to_string()).into(),
                 Err(_) => return,
             };
             let _ = this.update(cx, |p, cx| {
@@ -230,7 +231,7 @@ impl Props {
     }
 
     fn calc_usage(&mut self, cx: &mut Context<Self>) {
-        self.usage = Some("calculating…".into());
+        self.usage = Some(t!("props-calculating").into());
         let (fs, path) = (self.fs.clone(), self.entry.path.clone());
         let (tx, rx) = futures::channel::oneshot::channel();
         self.work.push(self.rt.spawn(async move {
@@ -239,19 +240,21 @@ impl Props {
         }));
         cx.spawn(async move |this, cx| {
             let text = match rx.await {
-                Ok(Ok(u)) => format!(
-                    "{} ({} bytes) in {} files, {} folders{}",
-                    human_size(u.bytes),
-                    u.bytes,
-                    u.files,
-                    u.dirs,
+                Ok(Ok(u)) => {
+                    let text = t!(
+                        "props-usage",
+                        size = human_size(u.bytes),
+                        bytes = u.bytes,
+                        files = u.files,
+                        folders = u.dirs
+                    );
                     if u.complete {
-                        ""
+                        text.into()
                     } else {
-                        " (stopped early: too many entries)"
+                        format!("{text} {}", t!("props-usage-partial"))
                     }
-                ),
-                Ok(Err(e)) => format!("error: {e}"),
+                }
+                Ok(Err(e)) => t!("props-error", error = e.to_string()).into(),
                 Err(_) => return,
             };
             let _ = this.update(cx, |p, cx| {
@@ -274,7 +277,7 @@ impl Props {
             }
             t.parse::<u32>()
                 .map(Some)
-                .map_err(|_| format!("“{t}” is not a numeric id"))
+                .map_err(|_| t!("props-bad-id", id = &t).to_string())
         };
         let (uid, gid) = match (parse_id(&self.uid, cx), parse_id(&self.gid, cx)) {
             (Ok(u), Ok(g)) => (u, g),
@@ -285,7 +288,7 @@ impl Props {
             }
         };
         if parse_octal(&self.octal.read(cx).value()).is_none() {
-            self.error = Some("Permissions must be octal, e.g. 0644".into());
+            self.error = Some(t!("props-bad-octal").into());
             cx.notify();
             return;
         }
@@ -345,7 +348,7 @@ impl Props {
                         let _ = p.view.update(cx, |v, cx| v.refocus(window, cx));
                     }
                     Ok(Err(e)) => p.error = Some(e.to_string()),
-                    Err(e) => p.error = Some(format!("internal error: {e}")),
+                    Err(e) => p.error = Some(t!("error-internal", error = e.to_string()).into()),
                 }
                 cx.notify();
             });
@@ -355,11 +358,22 @@ impl Props {
     }
 }
 
+/// "Owner: Read" for the permission checkbox `id` (ur, gw, ox, suid …).
+fn permission_bit_name(id: &str, label: &SharedString) -> String {
+    let who = match id.as_bytes().first() {
+        Some(b'u') if id.len() == 2 => t!("props-owner"),
+        Some(b'g') if id.len() == 2 => t!("props-group"),
+        Some(b'o') if id.len() == 2 => t!("props-others"),
+        _ => t!("props-special"),
+    };
+    format!("{who}: {label}")
+}
+
 impl Render for Props {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let e = &self.entry;
-        let row = |label: &str, value: AnyElement| {
+        let row = |label: SharedString, value: AnyElement| {
             div()
                 .flex()
                 .items_center()
@@ -370,32 +384,36 @@ impl Render for Props {
                         .w(px(110.0))
                         .flex_none()
                         .text_color(theme.muted_foreground)
-                        .child(label.to_owned()),
+                        .child(label),
                 )
                 .child(div().flex_1().min_w(px(0.0)).child(value))
         };
         let text = |s: String| div().child(s).into_any_element();
-        let kind = match e.kind {
-            EntryKind::Dir => "Folder".to_owned(),
-            EntryKind::File => "File".to_owned(),
-            EntryKind::Symlink => format!(
-                "Symbolic link → {}",
-                self.link_target.as_deref().unwrap_or("…")
-            ),
-            EntryKind::Other => "Special file".to_owned(),
+        let kind: String = match e.kind {
+            EntryKind::Dir => t!("props-kind-folder").into(),
+            EntryKind::File => t!("props-kind-file").into(),
+            EntryKind::Symlink => t!(
+                "props-kind-symlink",
+                target = self.link_target.as_deref().unwrap_or("…")
+            )
+            .into(),
+            EntryKind::Other => t!("props-kind-special").into(),
         };
-        let name_with_id = |id: Option<u32>, name: &Option<String>| match (id, name) {
-            (_, Some(n)) => n.clone(),
-            (Some(_), None) => "(unknown name)".into(),
-            (None, _) => "not reported by the server".into(),
+        let name_with_id = |id: Option<u32>, name: &Option<String>| -> SharedString {
+            match (id, name) {
+                (_, Some(n)) => n.clone().into(),
+                (Some(_), None) => t!("props-unknown-name"),
+                (None, _) => t!("props-not-reported"),
+            }
         };
 
         // Permission grid: rows owner/group/others, columns r/w/x.
         let view = cx.entity().downgrade();
-        let bit = |id: &'static str, label: &'static str, mask: u32, mode: u32| {
+        let bit = |id: &'static str, label: SharedString, mask: u32, mode: u32| {
             let view = view.clone();
-            Checkbox::new(id)
-                .label(label)
+            let spoken = permission_bit_name(id, &label);
+            crate::a11y::checkbox(id, label, false, cx)
+                .accessibility_label(spoken)
                 .checked(mode & mask != 0)
                 .on_click(move |on, window, cx| {
                     let _ = view.update(cx, |p, cx| {
@@ -405,40 +423,46 @@ impl Render for Props {
                 })
         };
         let m = self.mode;
-        let who = |name: &'static str, shift: u32, ids: [&'static str; 3]| {
+        let who = |name: SharedString, shift: u32, ids: [&'static str; 3]| {
             div()
                 .flex()
                 .gap(px(14.0))
                 .items_center()
-                .child(div().w(px(56.0)).child(name))
-                .child(bit(ids[0], "Read", 0o4 << shift, m))
-                .child(bit(ids[1], "Write", 0o2 << shift, m))
-                .child(bit(ids[2], "Execute", 0o1 << shift, m))
+                .child(div().w(px(90.0)).child(name))
+                .child(bit(ids[0], t!("props-read"), 0o4 << shift, m))
+                .child(bit(ids[1], t!("props-write"), 0o2 << shift, m))
+                .child(bit(ids[2], t!("props-execute"), 0o1 << shift, m))
         };
         let perms = div()
             .flex()
             .flex_col()
             .gap(px(4.0))
-            .child(who("Owner", 6, ["ur", "uw", "ux"]))
-            .child(who("Group", 3, ["gr", "gw", "gx"]))
-            .child(who("Others", 0, ["or", "ow", "ox"]))
+            .child(who(t!("props-owner"), 6, ["ur", "uw", "ux"]))
+            .child(who(t!("props-group"), 3, ["gr", "gw", "gx"]))
+            .child(who(t!("props-others"), 0, ["or", "ow", "ox"]))
             .child(
                 div()
                     .flex()
                     .gap(px(14.0))
                     .items_center()
-                    .child(div().w(px(56.0)).child("Special"))
-                    .child(bit("suid", "Set UID", 0o4000, m))
-                    .child(bit("sgid", "Set GID", 0o2000, m))
-                    .child(bit("sticky", "Sticky", 0o1000, m)),
+                    .child(div().w(px(90.0)).child(t!("props-special")))
+                    .child(bit("suid", "Set UID".into(), 0o4000, m))
+                    .child(bit("sgid", "Set GID".into(), 0o2000, m))
+                    .child(bit("sticky", "Sticky".into(), 0o1000, m)),
             )
             .child(
                 div()
                     .flex()
                     .gap(px(8.0))
                     .items_center()
-                    .child(div().w(px(56.0)).child("Octal"))
-                    .child(div().w(px(80.0)).child(Input::new(&self.octal).small())),
+                    .child(div().w(px(90.0)).child(t!("props-octal")))
+                    .child(
+                        div().w(px(80.0)).child(
+                            Input::new(&self.octal)
+                                .small()
+                                .aria_label(t!("props-octal")),
+                        ),
+                    ),
             );
 
         let size: AnyElement = if e.is_dir() {
@@ -450,13 +474,13 @@ impl Render for Props {
                 .child(
                     Button::new("calc-size")
                         .xsmall()
-                        .label("Calculate")
+                        .label(t!("props-calculate"))
                         .on_click(cx.listener(|p, _, _, cx| p.calc_usage(cx))),
                 )
                 .child(label)
                 .into_any_element()
         } else {
-            text(format!("{} ({} bytes)", human_size(e.size), e.size))
+            text(t!("props-size", size = human_size(e.size), bytes = e.size).into())
         };
 
         let checksum: Option<AnyElement> = (e.kind == EntryKind::File).then(|| {
@@ -486,7 +510,7 @@ impl Render for Props {
                         Button::new("copy-sum")
                             .xsmall()
                             .ghost()
-                            .label("Copy")
+                            .label(t!("term-menu-copy"))
                             .on_click(move |_, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))
                             }),
@@ -500,46 +524,56 @@ impl Render for Props {
             .flex_col()
             .gap(px(4.0))
             .text_size(px(13.0))
-            .child(row("Name", text(e.name.clone())))
-            .child(row("Location", text(hostwick_sftp::parent(&e.path))))
-            .child(row("Type", text(kind)))
-            .child(row("Size", size))
-            .when_some(checksum, |d, c| d.child(row("Checksum", c)))
+            .child(row(t!("files-col-name"), text(e.name.clone())))
             .child(row(
-                "Modified",
+                t!("props-location"),
+                text(hostwick_sftp::parent(&e.path)),
+            ))
+            .child(row(t!("props-type"), text(kind)))
+            .child(row(t!("files-col-size"), size))
+            .when_some(checksum, |d, c| d.child(row(t!("props-checksum"), c)))
+            .child(row(
+                t!("files-col-modified"),
                 text(
                     e.modified
                         .map(local_time)
-                        .unwrap_or_else(|| "unknown".into()),
+                        .unwrap_or_else(|| t!("props-unknown").into()),
                 ),
             ))
             .child(row(
-                "Owner",
+                t!("props-owner"),
                 div()
                     .flex()
                     .gap(px(8.0))
                     .items_center()
-                    .child(div().w(px(80.0)).child(Input::new(&self.uid).small()))
+                    .child(
+                        div()
+                            .w(px(80.0))
+                            .child(Input::new(&self.uid).small().aria_label(t!("props-owner"))),
+                    )
                     .child(name_with_id(e.uid, &self.names.0))
                     .into_any_element(),
             ))
             .child(row(
-                "Group",
+                t!("props-group"),
                 div()
                     .flex()
                     .gap(px(8.0))
                     .items_center()
-                    .child(div().w(px(80.0)).child(Input::new(&self.gid).small()))
+                    .child(
+                        div()
+                            .w(px(80.0))
+                            .child(Input::new(&self.gid).small().aria_label(t!("props-group"))),
+                    )
                     .child(name_with_id(e.gid, &self.names.1))
                     .into_any_element(),
             ))
-            .child(row("Permissions", perms.into_any_element()))
+            .child(row(t!("props-permissions"), perms.into_any_element()))
             .when(e.is_dir(), |d| {
                 let recursive = self.recursive;
                 d.child(row(
-                    "",
-                    Checkbox::new("recursive")
-                        .label("Apply to everything inside (files keep their execute bits)")
+                    SharedString::default(),
+                    crate::a11y::checkbox("recursive", t!("props-recursive"), false, cx)
                         .checked(recursive)
                         .on_click(cx.listener(|p, on: &bool, _, cx| {
                             p.recursive = *on;

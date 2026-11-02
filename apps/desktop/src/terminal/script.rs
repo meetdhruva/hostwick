@@ -149,6 +149,20 @@ impl Watch {
             .map(|i| r.start + (skip + i + n.len()) as u64)
     }
 
+    /// The text after offset `from` (at most the last `max` bytes, cut at
+    /// a character boundary), and the offset just past it.
+    pub fn since(&self, from: u64, max: usize) -> (String, u64) {
+        let Ok(r) = self.recent.lock() else {
+            return (String::new(), from);
+        };
+        let skip = (from.saturating_sub(r.start) as usize).min(r.text.len());
+        let mut bytes = &r.text[skip..];
+        if bytes.len() > max {
+            bytes = &bytes[bytes.len() - max..];
+        }
+        (String::from_utf8_lossy(bytes).into_owned(), r.end())
+    }
+
     /// Time since the last output, or None if there was none yet.
     pub fn idle(&self) -> Option<Duration> {
         self.recent.lock().ok()?.last_output.map(|t| t.elapsed())
@@ -217,12 +231,10 @@ pub enum ScriptError {
 impl std::fmt::Display for ScriptError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Timeout { text, after } => write!(
-                f,
-                "waited {} for “{text}”, which never appeared",
-                human_ms(*after)
-            ),
-            Self::Ended => f.write_str("the session ended first"),
+            Self::Timeout { text, after } => {
+                f.write_str(&t!("script-timeout", after = human_ms(*after), text = text))
+            }
+            Self::Ended => f.write_str(&t!("script-session-ended")),
         }
     }
 }

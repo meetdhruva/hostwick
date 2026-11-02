@@ -5,9 +5,10 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
+use gpui_kit::accesskit::Role;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -45,17 +46,17 @@ impl Section {
         Section::Diagnostics,
     ];
 
-    fn label(self) -> &'static str {
+    fn label(self) -> SharedString {
         match self {
-            Section::Appearance => "Appearance",
-            Section::Terminal => "Terminal",
-            Section::Snippets => "Snippets",
-            Section::Connections => "Connections",
-            Section::Files => "Files",
-            Section::Logging => "Session logging",
-            Section::Passwords => "Saved passwords",
-            Section::Sync => "Settings sync",
-            Section::Diagnostics => "Diagnostics",
+            Section::Appearance => t!("settings-section-appearance"),
+            Section::Terminal => t!("settings-section-terminal"),
+            Section::Snippets => t!("settings-section-snippets"),
+            Section::Connections => t!("settings-section-connections"),
+            Section::Files => t!("settings-section-files"),
+            Section::Logging => t!("settings-section-logging"),
+            Section::Passwords => t!("settings-section-passwords"),
+            Section::Sync => t!("settings-section-sync"),
+            Section::Diagnostics => t!("settings-section-diagnostics"),
         }
     }
 }
@@ -84,6 +85,8 @@ pub struct SettingsForm {
     sync_folder: Entity<InputState>,
     sync_pass: Entity<InputState>,
     theme: ThemeChoice,
+    /// `Settings.language`: "" follows the OS.
+    language: String,
     right: RightClick,
     mode: LogMode,
     level: usize,
@@ -112,7 +115,7 @@ impl SettingsForm {
         cx: &mut Context<Self>,
     ) -> Self {
         let s = Settings::get(cx).clone();
-        let mk = |v: String, ph: String, window: &mut Window, cx: &mut Context<Self>| {
+        let mk = |v: String, ph: SharedString, window: &mut Window, cx: &mut Context<Self>| {
             cx.new(|cx| InputState::new(window, cx).placeholder(ph).default_value(v))
         };
         let default_dir = s.session_log_dir(&backend.paths).display().to_string();
@@ -124,33 +127,39 @@ impl SettingsForm {
             .unwrap_or_default();
         let has_pass = backend.vault.is_unlocked() && backend.vault.has(SYNC_PASSPHRASE_ID);
         let mut form = Self {
-            font: mk(s.font_family.clone(), "empty = system monospace".into(), window, cx),
+            font: mk(
+                s.font_family.clone(),
+                t!("settings-font-placeholder"),
+                window,
+                cx,
+            ),
             size: mk(s.font_size.to_string(), "14".into(), window, cx),
             scroll: mk(s.scrollback_lines.to_string(), "10000".into(), window, cx),
-            logdir: mk(s.session_log_dir.clone(), default_dir, window, cx),
+            logdir: mk(s.session_log_dir.clone(), default_dir.into(), window, cx),
             editor: mk(
                 s.external_editor.clone(),
-                "empty = the system's default app (e.g. code -w {file})".into(),
+                t!("settings-editor-placeholder"),
                 window,
                 cx,
             ),
             auto_lock: mk(
                 s.vault_auto_lock_minutes.to_string(),
-                "0 = keep unlocked until Hostwick quits".into(),
+                t!("settings-auto-lock-placeholder"),
                 window,
                 cx,
             ),
-            sync_folder: mk(folder, "OneDrive, Dropbox, iCloud Drive or git folder".into(), window, cx),
+            sync_folder: mk(folder, t!("settings-sync-folder-placeholder"), window, cx),
             sync_pass: cx.new(|cx| {
                 InputState::new(window, cx)
                     .masked(true)
                     .placeholder(if has_pass {
-                        "Saved in your vault — type to change"
+                        t!("settings-sync-pass-saved")
                     } else {
-                        "Same passphrase on every computer"
+                        t!("settings-sync-pass-placeholder")
                     })
             }),
             theme: s.theme,
+            language: s.language.clone(),
             right: s.right_click,
             mode: s.session_log_mode,
             level: LEVELS.iter().position(|l| *l == s.log_level).unwrap_or(2),
@@ -163,12 +172,7 @@ impl SettingsForm {
             sync_auto: s.sync_auto,
             rules: cx.new(|cx| RuleEditor::new(&s.highlight_rules, window, cx)),
             snippets: cx.new(|cx| {
-                SnippetEditor::new(
-                    &s.snippets,
-                    "No snippets yet. Snippets appear as buttons above every terminal and under right-click → Snippets.",
-                    window,
-                    cx,
-                )
+                SnippetEditor::new(&s.snippets, t!("settings-snippets-empty"), window, cx)
             }),
             base: s,
             backend,
@@ -242,8 +246,8 @@ impl SettingsForm {
                         }
                         f.error = None;
                     }
-                    Ok(Err(e)) => f.error = Some(format!("Could not remove it: {e}")),
-                    Err(e) => f.error = Some(format!("internal error: {e}")),
+                    Ok(Err(e)) => f.error = Some(t!("settings-remove-failed", error = e).into()),
+                    Err(e) => f.error = Some(t!("error-internal", error = e.to_string()).into()),
                 }
                 f.load_creds(window, cx);
                 cx.notify();
@@ -277,30 +281,29 @@ impl SettingsForm {
             .parse::<f32>()
             .ok()
             .filter(|s| (6.0..=48.0).contains(s))
-            .ok_or("Terminal → Font size must be a number from 6 to 48")?;
+            .ok_or_else(|| t!("settings-error-font-size").to_string())?;
         let scrollback = v(&self.scroll)
             .parse::<usize>()
             .ok()
             .filter(|s| (100..=1_000_000).contains(s))
-            .ok_or("Terminal → Scrollback must be a whole number from 100 to 1000000")?;
+            .ok_or_else(|| t!("settings-error-scrollback").to_string())?;
         let auto_lock = v(&self.auto_lock)
             .parse::<u32>()
             .ok()
             .filter(|m| *m <= 24 * 60)
-            .ok_or("Saved passwords → Lock after must be minutes (0 to 1440)")?;
+            .ok_or_else(|| t!("settings-error-auto-lock").to_string())?;
         if let Some(p) = self.rules.read(cx).problem(cx) {
-            return Err(format!("Terminal → {p}"));
+            return Err(t!("settings-error-rules", error = p).into());
         }
         let folder = v(&self.sync_folder);
         if !folder.is_empty() && !std::path::Path::new(&folder).is_dir() {
-            return Err(format!(
-                "Settings sync → the folder {folder} does not exist"
-            ));
+            return Err(t!("settings-error-sync-folder", folder = folder).into());
         }
         Ok(Settings {
             font_family: v(&self.font),
             font_size,
             theme: self.theme,
+            language: self.language.clone(),
             scrollback_lines: scrollback,
             right_click: self.right,
             copy_on_select: self.copy_sel,
@@ -332,7 +335,7 @@ impl SettingsForm {
     ) {
         let folder = self.sync_folder.read(cx).value().trim().to_owned();
         if !folder.is_empty() && !std::path::Path::new(&folder).is_dir() {
-            self.error = Some(format!("The folder {folder} does not exist."));
+            self.error = Some(t!("settings-folder-missing", folder = folder).into());
             cx.notify();
             return;
         }
@@ -346,7 +349,7 @@ impl SettingsForm {
             return;
         }
         if pass.chars().count() < 8 {
-            self.error = Some("Use a sync passphrase of at least 8 characters.".into());
+            self.error = Some(t!("settings-sync-pass-short").into());
             cx.notify();
             return;
         }
@@ -359,11 +362,11 @@ impl SettingsForm {
                 Ok(()) => {
                     f.sync_pass.update(cx, |s, cx| {
                         s.set_value("", window, cx);
-                        s.set_placeholder("Saved in your vault — type to change", window, cx);
+                        s.set_placeholder(t!("settings-sync-pass-saved"), window, cx);
                     });
                     then(f, window, cx);
                 }
-                Err(e) => f.error = Some(format!("Could not save the passphrase: {e}")),
+                Err(e) => f.error = Some(t!("settings-sync-pass-save-failed", error = e).into()),
             }
             cx.notify();
         };
@@ -375,7 +378,7 @@ impl SettingsForm {
         crate::vaultui::open_unlock(
             self.backend.clone(),
             !self.backend.vault.exists(),
-            "The sync passphrase is kept in your password vault.".into(),
+            t!("vault-reason-sync-passphrase").into(),
             window,
             cx,
             move |ok, window, cx| {
@@ -404,7 +407,7 @@ impl SettingsForm {
             }
         };
         if let Err(e) = new.save(&self.backend.store) {
-            self.error = Some(format!("Cannot save settings: {e}"));
+            self.error = Some(t!("settings-save-failed", error = e).into());
             cx.notify();
             return;
         }
@@ -413,6 +416,9 @@ impl SettingsForm {
         }
         if new.theme != self.base.theme {
             apply_theme(new.theme, cx);
+        }
+        if new.language != self.base.language {
+            crate::i18n::set_language(&new.language);
         }
         self.base = new.clone();
         cx.set_global(new);
@@ -427,7 +433,8 @@ impl SettingsForm {
 
     // ---- rendering helpers ------------------------------------------------------
 
-    fn row(label: &'static str, el: impl IntoElement) -> Div {
+    fn row(label: impl Into<SharedString>, el: impl IntoElement) -> Div {
+        let label: SharedString = label.into();
         div()
             .flex()
             .items_center()
@@ -437,9 +444,19 @@ impl SettingsForm {
                     .w(px(150.0))
                     .flex_none()
                     .text_size(px(13.0))
-                    .child(label),
+                    .child(label.clone()),
             )
-            .child(div().flex_1().min_w_0().child(el))
+            // Named after the label, so a screen reader says what a field,
+            // or a row of choices, is for.
+            .child(
+                div()
+                    .id(ElementId::Name(label.clone()))
+                    .role(Role::Group)
+                    .aria_label(label)
+                    .flex_1()
+                    .min_w_0()
+                    .child(el),
+            )
     }
 
     fn hint(text: impl Into<SharedString>, cx: &App) -> Div {
@@ -448,10 +465,10 @@ impl SettingsForm {
             .text_size(px(11.0))
             .whitespace_normal()
             .text_color(cx.theme().muted_foreground)
-            .child(text.into())
+            .child(crate::a11y::text(text))
     }
 
-    fn heading(text: &'static str) -> Div {
+    fn heading(text: SharedString) -> Div {
         div()
             .pt(px(6.0))
             .text_size(px(15.0))
@@ -461,37 +478,35 @@ impl SettingsForm {
 
     fn check(
         id: &'static str,
-        label: &'static str,
+        label: SharedString,
         value: bool,
         cx: &mut Context<Self>,
         set: fn(&mut Self, bool),
     ) -> Div {
-        div()
-            .pl(px(158.0))
-            .child(
-                Checkbox::new(id)
-                    .label(label)
-                    .checked(value)
-                    .on_click(cx.listener(move |f, v: &bool, _, cx| {
-                        set(f, *v);
-                        cx.notify();
-                    })),
-            )
+        div().pl(px(158.0)).child(
+            crate::a11y::checkbox(id, label, false, cx)
+                .checked(value)
+                .on_click(cx.listener(move |f, v: &bool, _, cx| {
+                    set(f, *v);
+                    cx.notify();
+                })),
+        )
     }
 
     fn choice<T: Copy + PartialEq + 'static>(
         id: &'static str,
         current: T,
-        options: &[(T, &'static str)],
+        options: &[(T, SharedString)],
         cx: &mut Context<Self>,
         set: fn(&mut Self, T),
     ) -> Div {
         let mut row = div().flex().gap(px(4.0)).flex_wrap();
-        for (i, (value, label)) in options.iter().copied().enumerate() {
+        for (i, (value, label)) in options.iter().cloned().enumerate() {
             row = row.child(
                 Button::new((id, i))
                     .xsmall()
                     .label(label)
+                    .toggled(current == value)
                     .when(current == value, |b| b.primary())
                     .on_click(cx.listener(move |f, _, _, cx| {
                         set(f, value);
@@ -502,22 +517,70 @@ impl SettingsForm {
         row
     }
 
+    /// Language picker: "System (…)" and every language in its own script.
+    fn language_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let system_code = crate::i18n::resolve("");
+        let name_of = |code: &str| {
+            crate::i18n::LANGUAGES
+                .iter()
+                .find(|l| l.code == code)
+                .map_or("English", |l| l.native_name)
+        };
+        let system = t!("settings-language-system", language = name_of(system_code));
+        let current: SharedString = if self.language.is_empty() {
+            system.clone()
+        } else {
+            name_of(&self.language).into()
+        };
+        let this = cx.entity().downgrade();
+        let selected = self.language.clone();
+        Button::new("language")
+            .small()
+            .label(current)
+            .dropdown_caret(true)
+            .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
+                let pick = |code: &'static str| {
+                    let this = this.clone();
+                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                        let _ = this.update(cx, |f, cx| {
+                            f.language = code.to_owned();
+                            cx.notify();
+                        });
+                    }
+                };
+                let mut menu = menu.item(
+                    PopupMenuItem::new(system.clone())
+                        .checked(selected.is_empty())
+                        .on_click(pick("")),
+                );
+                menu = menu.separator();
+                for l in crate::i18n::LANGUAGES {
+                    menu = menu.item(
+                        PopupMenuItem::new(l.native_name)
+                            .checked(selected == l.code)
+                            .on_click(pick(l.code)),
+                    );
+                }
+                menu
+            })
+    }
+
     fn browse(
         id: &'static str,
         input: &Entity<InputState>,
         directories: bool,
-        prompt: &'static str,
+        prompt: SharedString,
     ) -> Button {
         let input = input.clone();
         Button::new(id)
             .small()
-            .label("Browse…")
+            .label(t!("button-browse"))
             .on_click(move |_, window, cx| {
                 let picked = cx.prompt_for_paths(PathPromptOptions {
                     files: !directories,
                     directories,
                     multiple: false,
-                    prompt: Some(prompt.into()),
+                    prompt: Some(prompt.clone()),
                 });
                 let input = input.clone();
                 window
@@ -541,99 +604,171 @@ impl SettingsForm {
         let body = div().flex().flex_col().gap(px(8.0));
         match self.section {
             Section::Appearance => body
-                .child(Self::heading("Appearance"))
+                .child(Self::heading(t!("settings-section-appearance")))
+                .child(Self::row(t!("settings-language"), self.language_picker(cx)))
+                .child(Self::hint(t!("settings-language-hint"), cx))
                 .child(Self::row(
-                    "Theme",
+                    t!("settings-theme"),
                     Self::choice(
                         "theme",
                         self.theme,
-                        &[(ThemeChoice::Dark, "Dark"), (ThemeChoice::Light, "Light")],
+                        &[
+                            (ThemeChoice::Dark, t!("settings-theme-dark")),
+                            (ThemeChoice::Light, t!("settings-theme-light")),
+                        ],
                         cx,
                         |f, v| f.theme = v,
                     ),
                 ))
-                .child(Self::row("Terminal font", Input::new(&self.font).small()))
-                .child(Self::row("Font size", Input::new(&self.size).small()))
-                .child(Self::hint("Font changes apply to open terminals when you save.", cx)),
-            Section::Terminal => body
-                .child(Self::heading("Terminal"))
-                .child(Self::row("Scrollback lines", Input::new(&self.scroll).small()))
                 .child(Self::row(
-                    "Right-click",
+                    t!("settings-terminal-font"),
+                    Input::new(&self.font)
+                        .small()
+                        .aria_label(t!("settings-terminal-font")),
+                ))
+                .child(Self::row(
+                    t!("settings-font-size"),
+                    Input::new(&self.size)
+                        .small()
+                        .aria_label(t!("settings-font-size")),
+                ))
+                .child(Self::hint(t!("settings-font-hint"), cx)),
+            Section::Terminal => body
+                .child(Self::heading(t!("settings-section-terminal")))
+                .child(Self::row(
+                    t!("settings-scrollback"),
+                    Input::new(&self.scroll)
+                        .small()
+                        .aria_label(t!("settings-scrollback")),
+                ))
+                .child(Self::row(
+                    t!("settings-right-click"),
                     Self::choice(
                         "rc",
                         self.right,
                         &[
-                            (RightClick::Menu, "Show menu"),
-                            (RightClick::Paste, "Paste (PuTTY)"),
+                            (RightClick::Menu, t!("settings-right-click-menu")),
+                            (RightClick::Paste, t!("settings-right-click-paste")),
                         ],
                         cx,
                         |f, v| f.right = v,
                     ),
                 ))
-                .child(Self::check("copy-sel", "Copy selected text automatically", self.copy_sel, cx, |f, v| f.copy_sel = v))
-                .child(Self::check("mouse", "Send mouse clicks and scrolling to programs (htop, mc, vim)", self.mouse, cx, |f, v| f.mouse = v))
-                .child(Self::hint("Hold Shift to select text while a program uses the mouse.", cx))
-                .child(Self::check("bar", "Show the snippet button bar above terminals", self.button_bar, cx, |f, v| f.button_bar = v))
+                .child(Self::check(
+                    "copy-sel",
+                    t!("settings-copy-on-select"),
+                    self.copy_sel,
+                    cx,
+                    |f, v| f.copy_sel = v,
+                ))
+                .child(Self::check(
+                    "mouse",
+                    t!("settings-mouse"),
+                    self.mouse,
+                    cx,
+                    |f, v| f.mouse = v,
+                ))
+                .child(Self::hint(t!("settings-mouse-hint"), cx))
+                .child(Self::check(
+                    "bar",
+                    t!("settings-button-bar"),
+                    self.button_bar,
+                    cx,
+                    |f, v| f.button_bar = v,
+                ))
                 .child(
                     div()
                         .pt(px(6.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_size(px(13.0))
-                        .child("Keyword highlighting"),
+                        .child(t!("settings-highlighting")),
                 )
                 .child(
                     div()
                         .text_size(px(11.0))
                         .text_color(muted)
-                        .child("Colours matching text on screen. Earlier rules win where they overlap."),
+                        .child(t!("settings-highlighting-hint")),
                 )
                 .child(self.rules.clone()),
             Section::Snippets => body
-                .child(Self::heading("Snippets"))
+                .child(Self::heading(t!("settings-section-snippets")))
                 .child(
                     div()
                         .text_size(px(12.0))
                         .text_color(muted)
                         .whitespace_normal()
-                        .child("Available in every terminal. Hosts can add their own in Edit host → Terminal."),
+                        .child(t!("settings-snippets-hint")),
                 )
                 .child(self.snippets.clone()),
             Section::Connections => body
-                .child(Self::heading("Connections"))
-                .child(Self::check("auto-rc", "Reconnect automatically when a connection drops", self.auto_reconnect, cx, |f, v| f.auto_reconnect = v))
-                .child(Self::hint("SSH and telnet: after 1, 2, 5, 10, then every 30 seconds, keeping the scrollback. Not after you type exit, nor after a login or host-key failure.", cx))
-                .child(Self::check("restore", "Reopen my tabs when Hostwick starts", self.restore_tabs, cx, |f, v| f.restore_tabs = v))
-                .child(Self::hint("Including split panes. Tabs connect when you first switch to them.", cx)),
+                .child(Self::heading(t!("settings-section-connections")))
+                .child(Self::check(
+                    "auto-rc",
+                    t!("settings-auto-reconnect"),
+                    self.auto_reconnect,
+                    cx,
+                    |f, v| f.auto_reconnect = v,
+                ))
+                .child(Self::hint(t!("settings-auto-reconnect-hint"), cx))
+                .child(Self::check(
+                    "restore",
+                    t!("settings-restore-tabs"),
+                    self.restore_tabs,
+                    cx,
+                    |f, v| f.restore_tabs = v,
+                ))
+                .child(Self::hint(t!("settings-restore-tabs-hint"), cx)),
             Section::Files => body
-                .child(Self::heading("Files"))
+                .child(Self::heading(t!("settings-section-files")))
                 .child(Self::row(
-                    "External editor",
+                    t!("settings-editor"),
                     div()
                         .flex()
                         .gap(px(6.0))
-                        .child(div().flex_1().child(Input::new(&self.editor).small()))
-                        .child(Self::browse("browse-editor", &self.editor, false, "Editor program")),
+                        .child(
+                            div().flex_1().child(
+                                Input::new(&self.editor)
+                                    .small()
+                                    .aria_label(t!("settings-editor")),
+                            ),
+                        )
+                        .child(Self::browse(
+                            "browse-editor",
+                            &self.editor,
+                            false,
+                            t!("settings-editor-pick"),
+                        )),
                 ))
-                .child(Self::hint("Used by Edit (F4). {file} is replaced by the file's path, otherwise the path is added at the end. Use the editor's wait flag (code -w, subl -w) if it has one.", cx)),
+                .child(Self::hint(t!("settings-editor-hint"), cx)),
             Section::Logging => body
-                .child(Self::heading("Session logging"))
-                .child(Self::check("log-all", "Log every session to a file", self.log_all, cx, |f, v| f.log_all = v))
-                .child(Self::row("Log folder", Input::new(&self.logdir).small()))
+                .child(Self::heading(t!("settings-section-logging")))
+                .child(Self::check(
+                    "log-all",
+                    t!("settings-log-all"),
+                    self.log_all,
+                    cx,
+                    |f, v| f.log_all = v,
+                ))
                 .child(Self::row(
-                    "Log content",
+                    t!("settings-log-folder"),
+                    Input::new(&self.logdir)
+                        .small()
+                        .aria_label(t!("settings-log-folder")),
+                ))
+                .child(Self::row(
+                    t!("settings-log-content"),
                     Self::choice(
                         "lm",
                         self.mode,
                         &[
-                            (LogMode::Printable, "Printable text"),
-                            (LogMode::Raw, "Raw (with escape codes)"),
+                            (LogMode::Printable, t!("settings-log-printable")),
+                            (LogMode::Raw, t!("settings-log-raw")),
                         ],
                         cx,
                         |f, v| f.mode = v,
                     ),
                 ))
-                .child(Self::hint("A host's own session-log setting (Edit host → Terminal) overrides these.", cx)),
+                .child(Self::hint(t!("settings-log-hint"), cx)),
             Section::Passwords => self.render_passwords(body, cx),
             Section::Sync => self.render_sync(body, cx),
             Section::Diagnostics => {
@@ -651,20 +786,23 @@ impl SettingsForm {
                             })),
                     );
                 }
-                body.child(Self::heading("Diagnostics"))
-                    .child(Self::row("App log level", levels))
+                body.child(Self::heading(t!("settings-section-diagnostics")))
+                    .child(Self::row(t!("settings-log-level"), levels))
                     .child(
                         div()
                             .pl(px(158.0))
                             .flex()
                             .items_center()
                             .gap(px(8.0))
-                            .child(Button::new("open-logs").xsmall().label("Open log folder").on_click(
-                                move |_, _, cx| {
-                                    let _ = std::fs::create_dir_all(&dir);
-                                    cx.open_with_system(&dir);
-                                },
-                            ))
+                            .child(
+                                Button::new("open-logs")
+                                    .xsmall()
+                                    .label(t!("settings-open-log-folder"))
+                                    .on_click(move |_, _, cx| {
+                                        let _ = std::fs::create_dir_all(&dir);
+                                        cx.open_with_system(&dir);
+                                    }),
+                            )
                             .child(
                                 div()
                                     .text_size(px(11.0))
@@ -674,7 +812,13 @@ impl SettingsForm {
                                     .child(self.backend.paths.logs.display().to_string()),
                             ),
                     )
-                    .child(Self::hint(format!("Data folder: {}", self.backend.paths.data_dir.display()), cx))
+                    .child(Self::hint(
+                        t!(
+                            "settings-data-folder",
+                            path = self.backend.paths.data_dir.display().to_string()
+                        ),
+                        cx,
+                    ))
             }
         }
     }
@@ -684,11 +828,9 @@ impl SettingsForm {
         let vault = &self.backend.vault;
         let (exists, unlocked) = (vault.exists(), vault.is_unlocked());
         let status = match (exists, unlocked) {
-            (false, _) => {
-                "No vault yet. Tick “Remember” when Hostwick asks for a password, or create one now."
-            }
-            (true, false) => "Locked. Saved passwords are used after you unlock them.",
-            (true, true) => "Unlocked for this session.",
+            (false, _) => t!("settings-vault-none"),
+            (true, false) => t!("settings-vault-locked"),
+            (true, true) => t!("settings-vault-unlocked"),
         };
         let mut actions = div().flex().gap(px(6.0));
         if !unlocked {
@@ -697,9 +839,9 @@ impl SettingsForm {
                     .small()
                     .primary()
                     .label(if exists {
-                        "Unlock…"
+                        t!("settings-vault-unlock")
                     } else {
-                        "Create vault…"
+                        t!("settings-vault-create")
                     })
                     .on_click(cx.listener(|f, _, w, cx| f.unlock_vault(w, cx))),
             );
@@ -708,7 +850,7 @@ impl SettingsForm {
                 .child(
                     Button::new("vault-lock")
                         .small()
-                        .label("Lock now")
+                        .label(t!("settings-vault-lock"))
                         .on_click(cx.listener(|f, _, w, cx| {
                             f.backend.vault.lock();
                             f.load_creds(w, cx);
@@ -718,7 +860,7 @@ impl SettingsForm {
                 .child(
                     Button::new("vault-change")
                         .small()
-                        .label("Change master password…")
+                        .label(t!("settings-vault-change"))
                         .on_click(cx.listener(|f, _, w, cx| {
                             crate::vaultui::open_change(f.backend.clone(), w, cx, |_, _, _| {});
                         })),
@@ -729,12 +871,12 @@ impl SettingsForm {
             (None, true) => div()
                 .text_size(px(12.0))
                 .text_color(theme.muted_foreground)
-                .child("Loading…")
+                .child(t!("loading"))
                 .into_any_element(),
             (Some(rows), true) if rows.is_empty() => div()
                 .text_size(px(12.0))
                 .text_color(theme.muted_foreground)
-                .child("Nothing saved yet.")
+                .child(t!("settings-vault-empty"))
                 .into_any_element(),
             (Some(rows), true) => div()
                 .id("creds")
@@ -765,7 +907,7 @@ impl SettingsForm {
                             Button::new(("forget", i))
                                 .xsmall()
                                 .ghost()
-                                .label("Remove")
+                                .label(t!("settings-vault-remove"))
                                 .on_click(
                                     cx.listener(move |f, _, w, cx| f.forget(id.clone(), w, cx)),
                                 ),
@@ -773,25 +915,30 @@ impl SettingsForm {
                 }))
                 .into_any_element(),
         };
-        body.child(Self::heading("Saved passwords"))
+        body.child(Self::heading(t!("settings-section-passwords")))
             .child(
                 div()
                     .text_size(px(13.0))
                     .whitespace_normal()
-                    .child(status),
+                    .child(crate::a11y::text(status)),
             )
             .child(actions)
-            .child(Self::row("Lock after (min)", Input::new(&self.auto_lock).small()))
-            .child(Self::hint("Idle minutes before saved passwords are locked again; 0 keeps them unlocked until Hostwick quits.", cx))
+            .child(Self::row(
+                t!("settings-auto-lock"),
+                Input::new(&self.auto_lock)
+                    .small()
+                    .aria_label(t!("settings-auto-lock")),
+            ))
+            .child(Self::hint(t!("settings-auto-lock-hint"), cx))
             .child(list)
             .child(
                 div()
                     .text_size(px(11.0))
                     .text_color(theme.muted_foreground)
                     .whitespace_normal()
-                    .child(format!(
-                        "Encrypted with Argon2id + XChaCha20-Poly1305 in {} — the same vault as `hostwick vault`. Never synced.",
-                        vault.path().display()
+                    .child(t!(
+                        "settings-vault-file",
+                        path = vault.path().display().to_string()
                     )),
             )
     }
@@ -804,51 +951,78 @@ impl SettingsForm {
             .setting(crate::app::sync_last_key())
             .ok()
             .flatten()
-            .unwrap_or_else(|| "Never synced on this computer.".into());
-        body.child(Self::heading("Settings sync"))
+            .unwrap_or_else(|| t!("settings-sync-never").into());
+        body.child(Self::heading(t!("settings-section-sync")))
             .child(
                 div()
                     .text_size(px(12.0))
                     .text_color(theme.muted_foreground)
                     .whitespace_normal()
-                    .child("Hosts and settings go into one encrypted file in a folder your cloud drive or git keeps in step. Saved passwords never leave this computer."),
+                    .child(t!("settings-sync-intro")),
             )
             .child(Self::row(
-                "Folder",
+                t!("settings-sync-folder"),
                 div()
                     .flex()
                     .gap(px(6.0))
-                    .child(div().flex_1().min_w_0().child(Input::new(&self.sync_folder).small()))
-                    .child(Self::browse("browse-sync", &self.sync_folder, true, "Sync folder")),
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            Input::new(&self.sync_folder)
+                                .small()
+                                .aria_label(t!("settings-sync-folder")),
+                        ),
+                    )
+                    .child(Self::browse(
+                        "browse-sync",
+                        &self.sync_folder,
+                        true,
+                        t!("settings-sync-folder-pick"),
+                    )),
             ))
-            .child(Self::row("Passphrase", Input::new(&self.sync_pass).small().mask_toggle()))
-            .child(Self::hint("Kept in your password vault. Every computer needs the same one.", cx))
-            .child(Self::check("sync-auto", "Sync at startup, after changes and every 5 minutes", self.sync_auto, cx, |f, v| f.sync_auto = v))
+            .child(Self::row(
+                t!("settings-sync-passphrase"),
+                Input::new(&self.sync_pass)
+                    .small()
+                    .aria_label(t!("settings-sync-passphrase"))
+                    .mask_toggle(),
+            ))
+            .child(Self::hint(t!("settings-sync-passphrase-hint"), cx))
+            .child(Self::check(
+                "sync-auto",
+                t!("settings-sync-auto"),
+                self.sync_auto,
+                cx,
+                |f, v| f.sync_auto = v,
+            ))
             .child(
                 div()
                     .pl(px(158.0))
                     .flex()
                     .gap(px(6.0))
-                    .child(Button::new("sync-now").small().primary().label("Sync now").on_click(
-                        cx.listener(|f, _, w, cx| f.sync_now(SyncMode::Sync, w, cx)),
-                    ))
+                    .child(
+                        Button::new("sync-now")
+                            .small()
+                            .primary()
+                            .label(t!("settings-sync-now"))
+                            .on_click(cx.listener(|f, _, w, cx| f.sync_now(SyncMode::Sync, w, cx))),
+                    )
                     .child(
                         Button::new("sync-push")
                             .small()
-                            .label("Replace sync file")
-                            .tooltip("Make the sync file match this computer (also changes its passphrase)")
+                            .label(t!("settings-sync-push"))
+                            .tooltip(t!("settings-sync-push-tooltip"))
                             .on_click(cx.listener(|f, _, w, cx| f.sync_now(SyncMode::Push, w, cx))),
                     )
                     .child(
                         Button::new("sync-pull")
                             .small()
-                            .label("Replace this computer's")
-                            .tooltip("Make this computer's hosts and settings match the sync file")
+                            .label(t!("settings-sync-pull"))
+                            .tooltip(t!("settings-sync-pull-tooltip"))
                             .on_click(cx.listener(|f, _, w, cx| f.sync_now(SyncMode::Pull, w, cx))),
                     ),
             )
             .child(Self::row(
-                "Last sync",
+                t!("settings-sync-last"),
                 div()
                     .text_size(px(12.0))
                     .whitespace_normal()
@@ -862,7 +1036,11 @@ impl Render for SettingsForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let current = self.section;
+        // Sections: buttons, so Tab reaches them and Enter/Space opens one.
         let nav = div()
+            .id("settings-sections")
+            .role(Role::Toolbar)
+            .aria_label(t!("a11y-sections"))
             .w(px(170.0))
             .flex_none()
             .flex()
@@ -873,28 +1051,21 @@ impl Render for SettingsForm {
             .border_color(theme.border)
             .children(Section::ALL.iter().enumerate().map(|(i, s)| {
                 let s = *s;
-                div()
-                    .id(("sec", i))
-                    .px(px(10.0))
-                    .py(px(5.0))
-                    .rounded(px(4.0))
-                    .text_size(px(13.0))
-                    .cursor_pointer()
-                    .when(s == current, |d| {
-                        d.bg(theme.accent).text_color(theme.accent_foreground)
-                    })
-                    .when(s != current, |d| d.hover(|h| h.bg(theme.muted)))
-                    .child(s.label())
-                    .on_click(cx.listener(move |f, _, w, cx| {
+                crate::a11y::section_button(("sec", i), s.label(), s == current, cx).on_click(
+                    cx.listener(move |f, _, w, cx| {
                         f.section = s;
                         if s == Section::Passwords {
                             f.load_creds(w, cx);
                         }
                         cx.notify();
-                    }))
+                    }),
+                )
             }));
         let content = self.render_section(cx);
         div()
+            .id("settings-form")
+            .role(Role::Group)
+            .aria_label(t!("settings-title"))
             .flex()
             .flex_col()
             .gap(px(8.0))
@@ -913,6 +1084,10 @@ impl Render for SettingsForm {
             .when_some(self.error.clone(), |d, e| {
                 d.child(
                     div()
+                        .id("settings-error")
+                        .role(Role::Alert)
+                        .aria_label(e.clone())
+                        .aria_value(e.clone())
                         .text_size(px(13.0))
                         .text_color(theme.danger)
                         .whitespace_normal()
@@ -942,25 +1117,33 @@ pub fn open(
         )
     });
     window.open_dialog(cx, move |dialog, _, _| {
-        let f1 = form.clone();
+        let (f1, f2) = (form.clone(), form.clone());
         dialog
-            .title("Settings")
+            .title(crate::a11y::text(t!("settings-title")))
             .w(px(900.0))
             .margin_top(px(40.0))
             .child(form.clone())
+            // Enter (outside multi-line fields) saves.
+            .on_ok(move |_, window, cx| {
+                f2.update(cx, |f, cx| f.save(window, cx));
+                false
+            })
             .footer(
                 div()
                     .flex()
                     .gap(px(8.0))
                     .child(
                         Button::new("cancel")
-                            .label("Cancel")
+                            .label(t!("button-cancel"))
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                     )
                     .child(
-                        Button::new("save").primary().label("Save").on_click(
-                            move |_, window, cx| f1.update(cx, |f, cx| f.save(window, cx)),
-                        ),
+                        Button::new("save")
+                            .primary()
+                            .label(t!("button-save"))
+                            .on_click(move |_, window, cx| {
+                                f1.update(cx, |f, cx| f.save(window, cx))
+                            }),
                     ),
             )
     });

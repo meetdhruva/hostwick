@@ -2,9 +2,9 @@
 
 use std::rc::Rc;
 
+use crate::notify::{Toast, ToastExt as _};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
-use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -26,31 +26,37 @@ impl HostwickApp {
         window.open_dialog(cx, move |dialog, _, _| {
             let (app2, p2) = (app.clone(), p.clone());
             dialog
-                .title("Delete host")
-                .child(format!("Delete the saved host “{}”?", p.path()))
+                .title(crate::a11y::text(t!("host-delete-title")))
+                .child(crate::a11y::text(t!(
+                    "host-delete-confirm",
+                    name = p.path()
+                )))
                 .footer(
                     div()
                         .flex()
                         .gap(px(8.0))
                         .child(
                             Button::new("cancel")
-                                .label("Cancel")
+                                .label(t!("button-cancel"))
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
-                        .child(Button::new("del").danger().label("Delete").on_click(
-                            move |_, window, cx| {
-                                let _ = app2.update(cx, |a, cx| {
-                                    let _ = a.backend.store.delete(p2.id);
-                                    if a.selected == Some(p2.id) {
-                                        a.selected = None;
-                                    }
-                                    a.reload_profiles();
-                                    a.mark_sync_dirty();
-                                    cx.notify();
-                                });
-                                window.close_dialog(cx);
-                            },
-                        )),
+                        .child(
+                            Button::new("del")
+                                .danger()
+                                .label(t!("button-delete"))
+                                .on_click(move |_, window, cx| {
+                                    let _ = app2.update(cx, |a, cx| {
+                                        let _ = a.backend.store.delete(p2.id);
+                                        if a.selected == Some(p2.id) {
+                                            a.selected = None;
+                                        }
+                                        a.reload_profiles();
+                                        a.mark_sync_dirty();
+                                        cx.notify();
+                                    });
+                                    window.close_dialog(cx);
+                                }),
+                        ),
                 )
         });
     }
@@ -64,7 +70,7 @@ impl HostwickApp {
                 "ssh" => std::env::var_os("HOME")
                     .or_else(|| std::env::var_os("USERPROFILE"))
                     .map(|h| std::path::Path::new(&h).join(".ssh").join("config"))
-                    .ok_or_else(|| "no home directory".to_owned())
+                    .ok_or_else(|| t!("import-no-home").to_string())
                     .and_then(|p| {
                         hostwick_import::load_ssh_config(&p)
                             .map_err(|e| format!("{}: {e}", p.display()))
@@ -80,14 +86,11 @@ impl HostwickApp {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some(
-                match which {
-                    "putty" => "PuTTY .reg export",
-                    "solar" => "Solar-PuTTY export (.json)",
-                    _ => "WinSCP.ini",
-                }
-                .into(),
-            ),
+            prompt: Some(match which {
+                "putty" => t!("import-pick-putty"),
+                "solar" => t!("import-pick-solar"),
+                _ => t!("import-pick-winscp"),
+            }),
         });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = picked.await else {
@@ -124,7 +127,7 @@ impl HostwickApp {
         let r = match result {
             Ok(r) => r,
             Err(e) => {
-                window.push_notification(Notification::error(format!("Import failed: {e}")), cx);
+                window.toast(Toast::error(t!("import-failed", error = e)), cx);
                 return;
             }
         };
@@ -152,15 +155,20 @@ impl HostwickApp {
         for w in &r.warnings {
             tracing::warn!("import: {w}");
         }
-        let summary = format!(
-            "{} added, {} updated, {} with notes",
-            added.len(),
-            updated.len(),
-            r.warnings.len() + failed.len()
+        let summary = t!(
+            "import-summary",
+            added = added.len(),
+            updated = updated.len(),
+            notes = r.warnings.len() + failed.len()
         );
-        tracing::info!("import: {summary}");
+        tracing::info!(
+            added = added.len(),
+            updated = updated.len(),
+            notes = r.warnings.len() + failed.len(),
+            "import"
+        );
         if r.warnings.is_empty() && failed.is_empty() {
-            window.push_notification(Notification::success(format!("Imported: {summary}")), cx);
+            window.toast(Toast::success(t!("import-done", summary = summary)), cx);
             cx.notify();
             return;
         }
@@ -169,12 +177,17 @@ impl HostwickApp {
         let lists = Rc::new((added, updated, notes));
         window.open_dialog(cx, move |dialog, _, cx| {
             let muted = cx.theme().muted_foreground;
-            let section = |title: String, items: &[String]| {
+            let section = |title: SharedString, items: &[String]| {
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(2.0))
-                    .child(div().pt(px(6.0)).font_weight(FontWeight::SEMIBOLD).child(title))
+                    .child(
+                        div()
+                            .pt(px(6.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
                     .children(items.iter().map(|i| {
                         div()
                             .pl(px(10.0))
@@ -184,7 +197,7 @@ impl HostwickApp {
             };
             let (added, updated, notes) = &*lists;
             dialog
-                .title("Import report")
+                .title(crate::a11y::text(t!("import-report-title")))
                 .w(px(640.0))
                 .child(
                     div()
@@ -194,26 +207,35 @@ impl HostwickApp {
                         .flex()
                         .flex_col()
                         .when(!notes.is_empty(), |d| {
-                            d.child(section(format!("Needs attention ({})", notes.len()), notes))
+                            d.child(section(
+                                t!("import-report-attention", count = notes.len()),
+                                notes,
+                            ))
                         })
                         .when(!added.is_empty(), |d| {
-                            d.child(section(format!("Added ({})", added.len()), added))
+                            d.child(section(
+                                t!("import-report-added", count = added.len()),
+                                added,
+                            ))
                         })
                         .when(!updated.is_empty(), |d| {
-                            d.child(section(format!("Updated ({})", updated.len()), updated))
+                            d.child(section(
+                                t!("import-report-updated", count = updated.len()),
+                                updated,
+                            ))
                         })
                         .child(
                             div()
                                 .pt(px(8.0))
                                 .text_size(px(11.0))
                                 .text_color(muted)
-                                .child("Hosts listed under “Needs attention” were still imported unless the note says skipped. Right-click a host → Edit… to adjust it."),
+                                .child(crate::a11y::text(t!("import-report-note"))),
                         ),
                 )
                 .footer(
                     Button::new("ok")
                         .primary()
-                        .label("OK")
+                        .label(t!("button-ok"))
                         .on_click(|_, window, cx| window.close_dialog(cx)),
                 )
         });
@@ -221,7 +243,7 @@ impl HostwickApp {
     }
 
     pub(super) fn import_button(app: WeakEntity<Self>) -> impl IntoElement {
-        let item = move |label: &'static str, which: &'static str| {
+        let item = move |label: SharedString, which: &'static str| {
             let app = app.clone();
             PopupMenuItem::new(label).on_click(move |_, window, cx| {
                 let _ = app.update(cx, |a, cx| a.import(which, window, cx));
@@ -229,18 +251,18 @@ impl HostwickApp {
         };
         Button::new("import")
             .small()
-            .label("Import…")
+            .label(t!("sidebar-import"))
             .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
-                let m = menu.item(item("OpenSSH ~/.ssh/config", "ssh"));
+                let m = menu.item(item(t!("import-menu-ssh-config"), "ssh"));
                 let m = if cfg!(windows) {
-                    m.item(item("PuTTY (this PC's saved sessions)", "putty"))
-                        .item(item("WinSCP (this PC's saved sites)", "winscp"))
+                    m.item(item(t!("import-menu-putty-registry"), "putty"))
+                        .item(item(t!("import-menu-winscp-registry"), "winscp"))
                 } else {
                     m
                 };
-                m.item(item("PuTTY .reg export file…", "putty-file"))
-                    .item(item("WinSCP.ini file…", "winscp-file"))
-                    .item(item("Solar-PuTTY .json export…", "solar"))
+                m.item(item(t!("import-menu-putty-file"), "putty-file"))
+                    .item(item(t!("import-menu-winscp-file"), "winscp-file"))
+                    .item(item(t!("import-menu-solar-file"), "solar"))
             })
     }
 
@@ -257,28 +279,30 @@ impl HostwickApp {
                 }
             };
             menu.item(
-                PopupMenuItem::new("Open terminal").on_click(act(|a, id, w, cx| {
+                PopupMenuItem::new(t!("menu-open-terminal")).on_click(act(|a, id, w, cx| {
                     a.open_profile(id, TabKind::Terminal, w, cx)
                 })),
             )
             .item(
-                PopupMenuItem::new("Open files (SFTP)").on_click(act(|a, id, w, cx| {
+                PopupMenuItem::new(t!("menu-open-files")).on_click(act(|a, id, w, cx| {
                     a.open_profile(id, TabKind::Files, w, cx)
                 })),
             )
             .separator()
-            .item(PopupMenuItem::new("Edit…").on_click(act(|a, id, w, cx| {
-                let p = a.profiles.iter().find(|p| p.id == id).cloned();
-                if p.is_some() {
-                    a.host_dialog(p, w, cx);
-                }
-            })))
             .item(
-                PopupMenuItem::new("Duplicate")
+                PopupMenuItem::new(t!("menu-edit")).on_click(act(|a, id, w, cx| {
+                    let p = a.profiles.iter().find(|p| p.id == id).cloned();
+                    if p.is_some() {
+                        a.host_dialog(p, w, cx);
+                    }
+                })),
+            )
+            .item(
+                PopupMenuItem::new(t!("menu-duplicate"))
                     .on_click(act(|a, id, _, cx| a.duplicate_profile(id, cx))),
             )
             .item(
-                PopupMenuItem::new("Copy address").on_click(act(|a, id, _, cx| {
+                PopupMenuItem::new(t!("menu-copy-address")).on_click(act(|a, id, _, cx| {
                     if let Some(p) = a.profiles.iter().find(|p| p.id == id) {
                         let user = p.user.as_ref().map(|u| format!("{u}@")).unwrap_or_default();
                         let port = if p.port == 22 {
@@ -295,7 +319,7 @@ impl HostwickApp {
             )
             .separator()
             .item(
-                PopupMenuItem::new("Delete…")
+                PopupMenuItem::new(t!("menu-delete"))
                     .on_click(act(|a, id, w, cx| a.delete_profile(id, w, cx))),
             )
         }
@@ -334,38 +358,38 @@ impl HostwickApp {
                 })
                 .unwrap_or((TabKind::Terminal, false, false, false));
             let mut menu = menu.item(
-                PopupMenuItem::new("Reconnect")
+                PopupMenuItem::new(t!("menu-reconnect"))
                     .on_click(act(|a, ix, w, cx| a.reconnect_focused(ix, w, cx))),
             );
             if kind == TabKind::Terminal {
                 menu = menu
-                    .item(
-                        PopupMenuItem::new("Split right").on_click(act(|a, ix, w, cx| {
+                    .item(PopupMenuItem::new(t!("menu-split-right")).on_click(act(
+                        |a, ix, w, cx| {
                             a.activate_tab(ix, w, cx);
                             a.split_focused(false, w, cx);
-                        })),
-                    )
-                    .item(
-                        PopupMenuItem::new("Split down").on_click(act(|a, ix, w, cx| {
+                        },
+                    )))
+                    .item(PopupMenuItem::new(t!("menu-split-down")).on_click(act(
+                        |a, ix, w, cx| {
                             a.activate_tab(ix, w, cx);
                             a.split_focused(true, w, cx);
-                        })),
-                    );
+                        },
+                    )));
             }
             if can_break {
-                menu = menu.item(
-                    PopupMenuItem::new("Send break").on_click(act(|a, ix, _, cx| {
+                menu = menu.item(PopupMenuItem::new(t!("menu-send-break")).on_click(act(
+                    |a, ix, _, cx| {
                         if let Some(PaneBody::Terminal(v)) =
                             a.tabs[ix].focused_pane().map(|p| &p.body)
                         {
                             v.update(cx, |v, cx| v.send_break(cx));
                         }
-                    })),
-                );
+                    },
+                )));
             }
             if linked {
                 menu = menu.item(
-                    PopupMenuItem::new("Follow terminal folder")
+                    PopupMenuItem::new(t!("menu-follow-terminal"))
                         .checked(following)
                         .on_click(act(|a, ix, _, cx| {
                             if let Some(PaneBody::Files(v)) =
@@ -378,7 +402,7 @@ impl HostwickApp {
             }
             menu.separator()
                 .item(
-                    PopupMenuItem::new("Duplicate").on_click(act(|a, ix, w, cx| {
+                    PopupMenuItem::new(t!("menu-duplicate")).on_click(act(|a, ix, w, cx| {
                         if let Some(p) = a.tabs[ix].focused_pane() {
                             let (profile, quick, kind) =
                                 (p.profile.clone(), p.quick.clone(), a.tabs[ix].kind);
@@ -387,7 +411,7 @@ impl HostwickApp {
                     })),
                 )
                 .item(
-                    PopupMenuItem::new("Open files (SFTP)").on_click(act(|a, ix, w, cx| {
+                    PopupMenuItem::new(t!("menu-open-files")).on_click(act(|a, ix, w, cx| {
                         if let Some(p) = a.tabs[ix].focused_pane() {
                             let (profile, quick) = (p.profile.clone(), p.quick.clone());
                             a.open_tab_quick(profile, quick, TabKind::Files, w, cx);
@@ -395,7 +419,7 @@ impl HostwickApp {
                     })),
                 )
                 .item(
-                    PopupMenuItem::new("Open terminal").on_click(act(|a, ix, w, cx| {
+                    PopupMenuItem::new(t!("menu-open-terminal")).on_click(act(|a, ix, w, cx| {
                         if let Some(p) = a.tabs[ix].focused_pane() {
                             let (profile, quick) = (p.profile.clone(), p.quick.clone());
                             a.open_tab_quick(profile, quick, TabKind::Terminal, w, cx);
@@ -403,9 +427,12 @@ impl HostwickApp {
                     })),
                 )
                 .separator()
-                .item(PopupMenuItem::new("Close").on_click(act(|a, ix, _, cx| a.close_tab(ix, cx))))
                 .item(
-                    PopupMenuItem::new("Close others").on_click(act(|a, ix, _, cx| {
+                    PopupMenuItem::new(t!("menu-close"))
+                        .on_click(act(|a, ix, _, cx| a.close_tab(ix, cx))),
+                )
+                .item(
+                    PopupMenuItem::new(t!("menu-close-others")).on_click(act(|a, ix, _, cx| {
                         let keep = a.tabs.remove(ix);
                         a.tabs = vec![keep];
                         a.active = Some(0);
@@ -414,18 +441,20 @@ impl HostwickApp {
                         cx.notify();
                     })),
                 )
-                .item(PopupMenuItem::new("Close all").on_click(act(|a, _, _, cx| {
-                    a.tabs.clear();
-                    a.active = None;
-                    a.persist_tabs(cx);
-                    cx.notify();
-                })))
+                .item(
+                    PopupMenuItem::new(t!("menu-close-all")).on_click(act(|a, _, _, cx| {
+                        a.tabs.clear();
+                        a.active = None;
+                        a.persist_tabs(cx);
+                        cx.notify();
+                    })),
+                )
         }
     }
 
     /// The Tools menu in the sidebar header.
     pub(super) fn tools_button(app: WeakEntity<Self>) -> impl IntoElement {
-        let item = move |label: &'static str, f: fn(&mut Self, &mut Window, &mut Context<Self>)| {
+        let item = move |label: SharedString, f: fn(&mut Self, &mut Window, &mut Context<Self>)| {
             let app = app.clone();
             PopupMenuItem::new(label).on_click(move |_, window, cx| {
                 let _ = app.update(cx, |a, cx| f(a, window, cx));
@@ -435,22 +464,23 @@ impl HostwickApp {
             .ghost()
             .small()
             .icon(gpui_kit::assets::IconName::Wrench)
-            .tooltip("Tools")
+            .tooltip(t!("sidebar-tools"))
+            .accessibility_label(t!("sidebar-tools"))
             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                menu.item(item("Generate key…", |a, w, cx| {
+                menu.item(item(t!("tools-generate-key"), |a, w, cx| {
                     crate::tools::keygen::open(a.backend.clone(), cx.entity().downgrade(), w, cx)
                 }))
-                .item(item("Inspect or convert key…", |a, w, cx| {
+                .item(item(t!("tools-inspect-key"), |a, w, cx| {
                     crate::tools::keyconv::open(a.backend.clone(), w, cx)
                 }))
-                .item(item("Known hosts…", |a, w, cx| {
+                .item(item(t!("tools-known-hosts"), |a, w, cx| {
                     crate::tools::knownhosts::open(a.backend.clone(), w, cx)
                 }))
                 .separator()
-                .item(item("Saved passwords…", |a, w, cx| {
+                .item(item(t!("tools-saved-passwords"), |a, w, cx| {
                     a.open_settings(Some(crate::settingsform::Section::Passwords), w, cx)
                 }))
-                .item(item("Settings sync…", |a, w, cx| {
+                .item(item(t!("tools-settings-sync"), |a, w, cx| {
                     a.open_settings(Some(crate::settingsform::Section::Sync), w, cx)
                 }))
             })

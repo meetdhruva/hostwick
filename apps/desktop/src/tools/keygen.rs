@@ -3,11 +3,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::notify::{Toast, ToastExt as _};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -81,12 +80,12 @@ impl KeyGen {
         let pass = cx.new(|cx| {
             InputState::new(window, cx)
                 .masked(true)
-                .placeholder("Passphrase (recommended; empty = none)")
+                .placeholder(t!("keygen-passphrase-placeholder"))
         });
         let confirm = cx.new(|cx| {
             InputState::new(window, cx)
                 .masked(true)
-                .placeholder("Repeat")
+                .placeholder(t!("keygen-repeat"))
         });
         let path = cx.new(|cx| InputState::new(window, cx).default_value(path));
         let mut subs = Vec::new();
@@ -137,13 +136,13 @@ impl KeyGen {
         }
         let pass = self.pass.read(cx).value().to_string();
         if pass != self.confirm.read(cx).value().as_ref() {
-            self.error = Some("The passphrases do not match.".into());
+            self.error = Some(t!("keygen-mismatch").into());
             cx.notify();
             return;
         }
         let path_text = self.path.read(cx).value().trim().to_owned();
         if path_text.is_empty() {
-            self.error = Some("Choose where to save the key.".into());
+            self.error = Some(t!("keygen-no-path").into());
             cx.notify();
             return;
         }
@@ -186,10 +185,7 @@ impl KeyGen {
             match res {
                 Ok(()) => {}
                 Err(KeyError::Exists(p)) => {
-                    return Err(format!(
-                        "{} already exists. Choose another name, or tick “Overwrite”.",
-                        p.display()
-                    ));
+                    return Err(t!("keygen-exists", path = p.display().to_string()).into());
                 }
                 Err(e) => return Err(e.to_string()),
             }
@@ -214,7 +210,7 @@ impl KeyGen {
                         }
                     }
                     Ok(Err(e)) => f.error = Some(e),
-                    Err(e) => f.error = Some(format!("internal error: {e}")),
+                    Err(e) => f.error = Some(t!("error-internal", error = e.to_string()).into()),
                 }
                 cx.notify();
             });
@@ -235,14 +231,21 @@ impl KeyGen {
             Ok(mut p) => {
                 let added = crate::hostform::add_key_to_profile(&mut p, g.path.clone());
                 if added && let Err(e) = self.backend.store.upsert(&p) {
-                    self.error = Some(format!("Could not update {}: {e}", p.name));
+                    self.error = Some(
+                        t!(
+                            "notice-update-host-failed",
+                            name = &p.name,
+                            error = e.to_string()
+                        )
+                        .into(),
+                    );
                 } else {
                     self.backend.send(Prompt::ProfilesChanged);
-                    window.push_notification(
-                        Notification::success(format!(
-                            "{} now logs in with {}. Add the public key to the server's ~/.ssh/authorized_keys.",
-                            p.name,
-                            g.path.display()
+                    window.toast(
+                        Toast::success(t!(
+                            "keygen-used-in-host",
+                            name = &p.name,
+                            path = g.path.display().to_string()
                         )),
                         cx,
                     );
@@ -257,7 +260,7 @@ impl KeyGen {
 impl Render for KeyGen {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let row = |label: &'static str, el: AnyElement| {
+        let row = |label: SharedString, el: AnyElement| {
             div()
                 .flex()
                 .items_center()
@@ -277,10 +280,11 @@ impl Render for KeyGen {
                 Button::new(("kt", i))
                     .xsmall()
                     .label(if k == KeyType::Ed25519 {
-                        "Ed25519 (recommended)".to_owned()
+                        t!("keygen-ed25519-recommended").to_string()
                     } else {
                         k.label()
                     })
+                    .toggled(self.kind == k)
                     .when(self.kind == k, |b| b.primary())
                     .on_click(cx.listener(move |f, _, w, cx| {
                         f.kind = k;
@@ -295,6 +299,7 @@ impl Render for KeyGen {
                 Button::new(("kf", i))
                     .xsmall()
                     .label(fmt.label())
+                    .toggled(self.format == fmt)
                     .when(self.format == fmt, |b| b.primary())
                     .on_click(cx.listener(move |f, _, w, cx| {
                         f.format = fmt;
@@ -304,26 +309,25 @@ impl Render for KeyGen {
             );
         }
         let path_input = self.path.clone();
-        let browse =
-            Button::new("kg-browse")
-                .small()
-                .label("Browse…")
-                .on_click(move |_, window, cx| {
-                    let dir = default_key_dir();
-                    let _ = std::fs::create_dir_all(&dir);
-                    let picked = cx.prompt_for_new_path(&dir, None);
-                    let input = path_input.clone();
-                    window
-                        .spawn(cx, async move |cx| {
-                            if let Ok(Ok(Some(p))) = picked.await {
-                                let text = p.display().to_string();
-                                let _ = cx.update(|window, cx| {
-                                    input.update(cx, |s, cx| s.set_value(text, window, cx))
-                                });
-                            }
-                        })
-                        .detach();
-                });
+        let browse = Button::new("kg-browse")
+            .small()
+            .label(t!("button-browse"))
+            .on_click(move |_, window, cx| {
+                let dir = default_key_dir();
+                let _ = std::fs::create_dir_all(&dir);
+                let picked = cx.prompt_for_new_path(&dir, None);
+                let input = path_input.clone();
+                window
+                    .spawn(cx, async move |cx| {
+                        if let Ok(Ok(Some(p))) = picked.await {
+                            let text = p.display().to_string();
+                            let _ = cx.update(|window, cx| {
+                                input.update(cx, |s, cx| s.set_value(text, window, cx))
+                            });
+                        }
+                    })
+                    .detach();
+            });
         let result = self.result.clone().map(|g| {
             let public = g.public.clone();
             let profiles = self.backend.store.list().unwrap_or_default();
@@ -340,17 +344,15 @@ impl Render for KeyGen {
                     div()
                         .text_size(px(13.0))
                         .text_color(theme.success)
-                        .child(format!(
-                            "Saved {} (private key) and {}.pub in {}",
-                            g.path
+                        .child(t!(
+                            "keygen-saved",
+                            file = g
+                                .path
                                 .file_name()
                                 .map(|n| n.to_string_lossy().into_owned())
                                 .unwrap_or_default(),
-                            g.path
-                                .file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_default(),
-                            g.path
+                            dir = g
+                                .path
                                 .parent()
                                 .map(|d| d.display().to_string())
                                 .unwrap_or_default()
@@ -369,11 +371,11 @@ impl Render for KeyGen {
                                 .flex_col()
                                 .gap(px(4.0))
                                 .text_size(px(12.0))
-                                .child(format!("Fingerprint: {}", g.fingerprint))
+                                .child(t!("key-fingerprint", fingerprint = &g.fingerprint))
                                 .child(
                                     div()
                                         .text_color(theme.muted_foreground)
-                                        .child("Public key (for ~/.ssh/authorized_keys):"),
+                                        .child(t!("keygen-public-key")),
                                 )
                                 .child(mono(super::wrap_chars(&g.public, 64), cx))
                                 .child(
@@ -383,7 +385,7 @@ impl Render for KeyGen {
                                         .child(
                                             Button::new("copy-pub")
                                                 .small()
-                                                .label("Copy public key")
+                                                .label(t!("keygen-copy-public"))
                                                 .on_click(move |_, _, cx| {
                                                     cx.write_to_clipboard(
                                                         ClipboardItem::new_string(public.clone()),
@@ -393,7 +395,7 @@ impl Render for KeyGen {
                                         .child(
                                             Button::new("use-in-host")
                                                 .small()
-                                                .label("Use in host…")
+                                                .label(t!("keygen-use-in-host"))
                                                 .disabled(profiles.is_empty())
                                                 .dropdown_menu_with_anchor(
                                                     Anchor::BottomLeft,
@@ -436,26 +438,31 @@ impl Render for KeyGen {
             .gap(px(8.0))
             .max_h(px(560.0))
             .overflow_y_scroll()
-            .child(row("Type", types.into_any_element()))
+            .child(row(t!("keygen-type"), types.into_any_element()))
             .child(row(
-                "Comment",
-                Input::new(&self.comment).small().into_any_element(),
+                t!("keygen-comment"),
+                Input::new(&self.comment)
+                    .small()
+                    .aria_label(t!("keygen-comment"))
+                    .into_any_element(),
             ))
             .child(row(
-                "Passphrase",
+                t!("prompt-passphrase-label"),
                 Input::new(&self.pass)
                     .small()
+                    .aria_label(t!("prompt-passphrase-label"))
                     .mask_toggle()
                     .into_any_element(),
             ))
             .child(row(
-                "Repeat",
+                t!("keygen-repeat"),
                 Input::new(&self.confirm)
                     .small()
+                    .aria_label(t!("keygen-repeat"))
                     .mask_toggle()
                     .into_any_element(),
             ))
-            .child(row("Format", formats.into_any_element()))
+            .child(row(t!("keygen-format"), formats.into_any_element()))
             .child(
                 div()
                     .pl(px(118.0))
@@ -464,23 +471,23 @@ impl Render for KeyGen {
                     .child(self.format.hint()),
             )
             .child(row(
-                "Save as",
+                t!("keygen-save-as"),
                 div()
                     .flex()
                     .gap(px(6.0))
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(Input::new(&self.path).small()),
+                        div().flex_1().min_w_0().child(
+                            Input::new(&self.path)
+                                .small()
+                                .aria_label(t!("keygen-save-as")),
+                        ),
                     )
                     .child(browse)
                     .into_any_element(),
             ))
             .child(
                 div().pl(px(118.0)).child(
-                    Checkbox::new("kg-overwrite")
-                        .label("Overwrite an existing file")
+                    crate::a11y::checkbox("kg-overwrite", t!("keygen-overwrite"), false, cx)
                         .checked(self.overwrite)
                         .on_click(cx.listener(|f, v: &bool, _, cx| {
                             f.overwrite = *v;
@@ -504,9 +511,9 @@ impl Render for KeyGen {
                         .text_color(theme.muted_foreground)
                         .child(
                             if matches!(self.kind, KeyType::Rsa { bits } if bits >= 4096) {
-                                "Generating… RSA 4096 can take a few seconds."
+                                t!("keygen-generating-rsa")
                             } else {
-                                "Generating…"
+                                t!("keygen-generating")
                             },
                         ),
                 )
@@ -526,7 +533,7 @@ pub fn open(
         let busy = form.read(cx).busy;
         let f1 = form.clone();
         dialog
-            .title("Generate key")
+            .title(crate::a11y::text(t!("keygen-title")))
             .w(px(720.0))
             .margin_top(px(40.0))
             .child(form.clone())
@@ -536,13 +543,13 @@ pub fn open(
                     .gap(px(8.0))
                     .child(
                         Button::new("close")
-                            .label("Close")
+                            .label(t!("button-close"))
                             .on_click(|_, w, cx| w.close_dialog(cx)),
                     )
                     .child(
                         Button::new("generate")
                             .primary()
-                            .label("Generate")
+                            .label(t!("keygen-generate"))
                             .disabled(busy)
                             .on_click(move |_, w, cx| f1.update(cx, |f, cx| f.generate(w, cx))),
                     ),

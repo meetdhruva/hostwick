@@ -15,7 +15,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hostwick_sftp::{LocalFs, RemoteFs};
 use hostwick_transfer::{
-    ActionKind, PlanItem, PlanOptions, SyncDirection, SyncPlan, build_plan, execute_plan,
+    ActionKind, PlanItem, PlanOptions, PlanReport, Reason, SyncDirection, SyncPlan, build_plan,
+    execute_plan,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -39,47 +40,53 @@ pub fn open(view: &mut FilesView, window: &mut Window, cx: &mut Context<FilesVie
         );
         let (preview, run, keep) = (dlg.clone(), dlg.clone(), dlg.clone());
         dialog
-            .title("Synchronize")
+            .title(crate::a11y::text(t!("files-synchronize-title")))
             .w(px(820.0))
             .child(dlg.clone())
             .footer(
-            div()
-                .flex()
-                .gap(px(8.0))
-                .child(
-                    Button::new("close")
-                        .label("Close")
-                        .on_click(|_, window, cx| window.close_dialog(cx)),
-                )
-                .child(
-                    Button::new("keep")
-                        .label("Keep remote up to date")
-                        .disabled(!one_way_up)
-                        .tooltip(
-                            "Watch the local folder and upload every change (local → remote only)",
-                        )
-                        .on_click(move |_, window, cx| {
-                            keep.update(cx, |d, cx| d.keep_up_to_date(window, cx));
-                        }),
-                )
-                .child(
-                    Button::new("preview")
-                        .label(if building { "Comparing…" } else { "Preview" })
-                        .disabled(building)
-                        .on_click(move |_, _, cx| preview.update(cx, |d, cx| d.preview(false, cx))),
-                )
-                .child(
-                    Button::new("run")
-                        .primary()
-                        .label(if has_plan {
-                            "Synchronize checked"
-                        } else {
-                            "Synchronize"
-                        })
-                        .disabled(building)
-                        .on_click(move |_, window, cx| run.update(cx, |d, cx| d.run(window, cx))),
-                ),
-        )
+                div()
+                    .flex()
+                    .gap(px(8.0))
+                    .child(
+                        Button::new("close")
+                            .label(t!("button-close"))
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("keep")
+                            .label(t!("sync-keep"))
+                            .disabled(!one_way_up)
+                            .tooltip(t!("sync-keep-tooltip"))
+                            .on_click(move |_, window, cx| {
+                                keep.update(cx, |d, cx| d.keep_up_to_date(window, cx));
+                            }),
+                    )
+                    .child(
+                        Button::new("preview")
+                            .label(if building {
+                                t!("sync-comparing")
+                            } else {
+                                t!("sync-preview")
+                            })
+                            .disabled(building)
+                            .on_click(move |_, _, cx| {
+                                preview.update(cx, |d, cx| d.preview(false, cx))
+                            }),
+                    )
+                    .child(
+                        Button::new("run")
+                            .primary()
+                            .label(if has_plan {
+                                t!("sync-run-checked")
+                            } else {
+                                t!("files-synchronize-title")
+                            })
+                            .disabled(building)
+                            .on_click(move |_, window, cx| {
+                                run.update(cx, |d, cx| d.run(window, cx))
+                            }),
+                    ),
+            )
     });
 }
 
@@ -122,7 +129,7 @@ impl SyncDialog {
         let remote_dir = cx.new(|cx| InputState::new(window, cx).default_value(remote));
         let excludes = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("e.g. .git, *.tmp, node_modules")
+                .placeholder(t!("sync-exclude-placeholder"))
                 .default_value(".git")
         });
         let mut subs = Vec::new();
@@ -174,7 +181,7 @@ impl SyncDialog {
     fn preview(&mut self, then_run: bool, cx: &mut Context<Self>) {
         let (l, r, opts) = self.inputs(cx);
         if l.is_empty() || r.is_empty() {
-            self.error = Some("Choose both folders".into());
+            self.error = Some(t!("sync-choose-folders").into());
             cx.notify();
             return;
         }
@@ -201,7 +208,7 @@ impl SyncDialog {
                         }
                     }
                     Ok(Err(e)) => d.error = Some(e.to_string()),
-                    Err(e) => d.error = Some(format!("internal error: {e}")),
+                    Err(e) => d.error = Some(t!("error-internal", error = e.to_string()).into()),
                 }
                 cx.notify();
             });
@@ -220,7 +227,7 @@ impl SyncDialog {
                 // Compare and run in the view: this dialog is going away.
                 let (l, r, opts) = self.inputs(cx);
                 if l.is_empty() || r.is_empty() {
-                    self.error = Some("Choose both folders".into());
+                    self.error = Some(t!("sync-choose-folders").into());
                     cx.notify();
                     return;
                 }
@@ -239,7 +246,7 @@ impl SyncDialog {
     fn keep_up_to_date(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (l, r, opts) = self.inputs(cx);
         if l.is_empty() || r.is_empty() {
-            self.error = Some("Choose both folders".into());
+            self.error = Some(t!("sync-choose-folders").into());
             cx.notify();
             return;
         }
@@ -266,8 +273,7 @@ impl SyncDialog {
         let arrow = match it.kind {
             ActionKind::Upload => "→",
             ActionKind::Download => "←",
-            ActionKind::DeleteLocal => "✕ local",
-            ActionKind::DeleteRemote => "✕ remote",
+            ActionKind::DeleteLocal | ActionKind::DeleteRemote => "✕",
             ActionKind::Conflict => "⚠",
             ActionKind::Skip => "·",
         };
@@ -288,6 +294,7 @@ impl SyncDialog {
             .hover(|s| s.bg(theme.list_hover))
             .child(
                 Checkbox::new(("plan-check", ix))
+                    .accessibility_label(format!("{} {}", kind_label(it.kind), path))
                     .checked(checked && it.kind.is_action())
                     .disabled(!it.kind.is_action())
                     .on_click(cx.listener(move |d, on: &bool, _, cx| {
@@ -302,7 +309,7 @@ impl SyncDialog {
                     .w(px(110.0))
                     .flex_none()
                     .text_color(color)
-                    .child(format!("{arrow} {}", it.kind.label())),
+                    .child(format!("{arrow} {}", kind_label(it.kind))),
             )
             .child(
                 div()
@@ -321,7 +328,7 @@ impl SyncDialog {
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .text_color(theme.muted_foreground)
-                    .child(it.reason.describe()),
+                    .child(reason_label(it.reason)),
             )
             .child(
                 div()
@@ -339,7 +346,7 @@ impl SyncDialog {
                 d.child(
                     Button::new(("use-local", ix))
                         .xsmall()
-                        .label("Use local")
+                        .label(t!("sync-use-local"))
                         .disabled(it.local.is_none())
                         .on_click(
                             cx.listener(move |d, _, _, cx| d.resolve(ix, ActionKind::Upload, cx)),
@@ -348,7 +355,7 @@ impl SyncDialog {
                 .child(
                     Button::new(("use-remote", ix))
                         .xsmall()
-                        .label("Use remote")
+                        .label(t!("sync-use-remote"))
                         .disabled(it.remote.is_none())
                         .on_click(
                             cx.listener(move |d, _, _, cx| d.resolve(ix, ActionKind::Download, cx)),
@@ -374,11 +381,12 @@ impl Render for SyncDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let dir_button =
-            |id: &'static str, label: &'static str, dir: SyncDirection, cur: SyncDirection| {
+            |id: &'static str, label: SharedString, dir: SyncDirection, cur: SyncDirection| {
                 Button::new(id)
                     .small()
                     .label(label)
                     .selected(dir == cur)
+                    .toggled(dir == cur)
                     .when(dir == cur, |b| b.primary())
             };
         let cur = self.direction;
@@ -389,7 +397,7 @@ impl Render for SyncDialog {
                 cx.notify();
             })
         };
-        let label = |s: &'static str| {
+        let label = |s: SharedString| {
             div()
                 .w(px(110.0))
                 .flex_none()
@@ -400,26 +408,35 @@ impl Render for SyncDialog {
             let checked = &self.checked;
             let t = p.totals(|i, _| checked.get(i).copied().unwrap_or(false));
             let mut parts = vec![
-                format!("{} upload(s), {}", t.uploads, human_size(t.upload_bytes)),
-                format!(
-                    "{} download(s), {}",
-                    t.downloads,
-                    human_size(t.download_bytes)
-                ),
+                t!(
+                    "sync-total-uploads",
+                    count = t.uploads,
+                    size = human_size(t.upload_bytes)
+                )
+                .to_string(),
+                t!(
+                    "sync-total-downloads",
+                    count = t.downloads,
+                    size = human_size(t.download_bytes)
+                )
+                .to_string(),
             ];
             if t.delete_local + t.delete_remote > 0 {
-                parts.push(format!("{} deletion(s)", t.delete_local + t.delete_remote));
+                parts.push(
+                    t!(
+                        "sync-total-deletions",
+                        count = t.delete_local + t.delete_remote
+                    )
+                    .to_string(),
+                );
             }
             if t.conflicts > 0 {
-                parts.push(format!(
-                    "{} conflict(s) — pick a side or leave them",
-                    t.conflicts
-                ));
+                parts.push(t!("sync-total-conflicts", count = t.conflicts).to_string());
             }
             if p.items.is_empty() {
-                "Both folders are already in sync.".to_owned()
+                t!("sync-in-sync").to_string()
             } else {
-                format!("Checked: {}", parts.join(" · "))
+                t!("sync-checked", items = parts.join(" · ")).to_string()
             }
         });
         let count = self.plan.as_ref().map_or(0, |p| p.items.len());
@@ -434,27 +451,39 @@ impl Render for SyncDialog {
                     .flex()
                     .items_center()
                     .gap(px(8.0))
-                    .child(label("Local folder"))
-                    .child(div().flex_1().child(Input::new(&self.local_dir).small())),
+                    .child(label(t!("sync-local-folder")))
+                    .child(
+                        div().flex_1().child(
+                            Input::new(&self.local_dir)
+                                .small()
+                                .aria_label(t!("sync-local-folder")),
+                        ),
+                    ),
             )
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(8.0))
-                    .child(label("Remote folder"))
-                    .child(div().flex_1().child(Input::new(&self.remote_dir).small())),
+                    .child(label(t!("sync-remote-folder")))
+                    .child(
+                        div().flex_1().child(
+                            Input::new(&self.remote_dir)
+                                .small()
+                                .aria_label(t!("sync-remote-folder")),
+                        ),
+                    ),
             )
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .child(label("Direction"))
+                    .child(label(t!("sync-direction")))
                     .child(
                         dir_button(
                             "dir-up",
-                            "Local → remote",
+                            t!("sync-dir-up"),
                             SyncDirection::LocalToRemote,
                             cur,
                         )
@@ -463,14 +492,14 @@ impl Render for SyncDialog {
                     .child(
                         dir_button(
                             "dir-down",
-                            "Remote → local",
+                            t!("sync-dir-down"),
                             SyncDirection::RemoteToLocal,
                             cur,
                         )
                         .on_click(set_dir(SyncDirection::RemoteToLocal)),
                     )
                     .child(
-                        dir_button("dir-both", "Both (newer wins)", SyncDirection::Both, cur)
+                        dir_button("dir-both", t!("sync-dir-both"), SyncDirection::Both, cur)
                             .on_click(set_dir(SyncDirection::Both)),
                     ),
             )
@@ -479,17 +508,20 @@ impl Render for SyncDialog {
                     .flex()
                     .items_center()
                     .gap(px(8.0))
-                    .child(label(""))
+                    .child(label(SharedString::default()))
                     .child(
-                        Checkbox::new("delete")
-                            .label("Delete files missing from the source (mirror)")
-                            .checked(self.delete && cur != SyncDirection::Both)
-                            .disabled(cur == SyncDirection::Both)
-                            .on_click(cx.listener(|d, on: &bool, _, cx| {
-                                d.delete = *on;
-                                d.plan = None;
-                                cx.notify();
-                            })),
+                        crate::a11y::checkbox(
+                            "delete",
+                            t!("sync-mirror"),
+                            cur == SyncDirection::Both,
+                            cx,
+                        )
+                        .checked(self.delete && cur != SyncDirection::Both)
+                        .on_click(cx.listener(|d, on: &bool, _, cx| {
+                            d.delete = *on;
+                            d.plan = None;
+                            cx.notify();
+                        })),
                     ),
             )
             .child(
@@ -497,8 +529,14 @@ impl Render for SyncDialog {
                     .flex()
                     .items_center()
                     .gap(px(8.0))
-                    .child(label("Exclude"))
-                    .child(div().flex_1().child(Input::new(&self.excludes).small())),
+                    .child(label(t!("sync-exclude")))
+                    .child(
+                        div().flex_1().child(
+                            Input::new(&self.excludes)
+                                .small()
+                                .aria_label(t!("sync-exclude")),
+                        ),
+                    ),
             )
             .when_some(self.error.clone(), |d, e| {
                 d.child(div().text_color(theme.danger).child(e))
@@ -547,7 +585,7 @@ impl FilesView {
         cx: &mut Context<Self>,
     ) {
         let remote = self.remote.fs.clone();
-        self.banner = Some((false, "Comparing folders…".into()));
+        self.banner = Some((false, t!("sync-comparing-folders").into()));
         let job = self.backend.rt.spawn(async move {
             let local = LocalFs::system();
             let remote_abs = remote.canonicalize(&remote_dir).await.unwrap_or(remote_dir);
@@ -561,11 +599,11 @@ impl FilesView {
                     v.run_plan(plan, checked, cx);
                 }
                 Ok(Err(e)) => {
-                    v.banner = Some((true, format!("Synchronize: {e}")));
+                    v.banner = Some((true, t!("sync-result", summary = e.to_string()).into()));
                     cx.notify();
                 }
                 Err(e) => {
-                    v.banner = Some((true, format!("internal error: {e}")));
+                    v.banner = Some((true, t!("error-internal", error = e.to_string()).into()));
                     cx.notify();
                 }
             });
@@ -581,7 +619,7 @@ impl FilesView {
         let local: Arc<dyn RemoteFs> = Arc::new(LocalFs::system());
         let remote = self.remote.fs.clone();
         let cancel = CancellationToken::new();
-        self.banner = Some((false, "Synchronizing…".into()));
+        self.banner = Some((false, t!("sync-running").into()));
         let job = self.backend.rt.spawn(async move {
             execute_plan(
                 &engine,
@@ -597,14 +635,15 @@ impl FilesView {
             let res = job.await;
             let _ = this.update(cx, |v, cx| {
                 v.banner = Some(match res {
-                    Ok(r) if r.failed.is_empty() => {
-                        (false, format!("Synchronize: {}", r.summary()))
-                    }
+                    Ok(r) if r.failed.is_empty() => (
+                        false,
+                        t!("sync-result", summary = report_summary(&r)).into(),
+                    ),
                     Ok(r) => (
                         true,
                         format!(
-                            "Synchronize: {} — {}",
-                            r.summary(),
+                            "{} — {}",
+                            t!("sync-result", summary = report_summary(&r)),
                             r.failed
                                 .iter()
                                 .take(5)
@@ -613,7 +652,7 @@ impl FilesView {
                                 .join("; ")
                         ),
                     ),
-                    Err(e) => (true, format!("Synchronize failed: {e}")),
+                    Err(e) => (true, t!("sync-run-failed", error = e.to_string()).into()),
                 });
                 v.refresh(Side::Local, cx);
                 v.refresh(Side::Remote, cx);
@@ -621,6 +660,59 @@ impl FilesView {
         })
         .detach();
         cx.notify();
+    }
+}
+
+/// The plan action, in the UI language.
+fn kind_label(k: ActionKind) -> SharedString {
+    match k {
+        ActionKind::Upload => t!("sync-kind-upload"),
+        ActionKind::Download => t!("sync-kind-download"),
+        ActionKind::DeleteLocal => t!("sync-kind-delete-local"),
+        ActionKind::DeleteRemote => t!("sync-kind-delete-remote"),
+        ActionKind::Conflict => t!("sync-kind-conflict"),
+        ActionKind::Skip => t!("sync-kind-skip"),
+    }
+}
+
+/// Why the plan does it, in the UI language.
+fn reason_label(r: Reason) -> SharedString {
+    match r {
+        Reason::New => t!("sync-reason-new"),
+        Reason::Newer => t!("sync-reason-newer"),
+        Reason::SizeDiffers => t!("sync-reason-size"),
+        Reason::Differs => t!("sync-reason-differs"),
+        Reason::NotInSource => t!("sync-reason-not-in-source"),
+        Reason::BothChanged => t!("sync-reason-both-changed"),
+        Reason::Unknown => t!("sync-reason-unknown"),
+        Reason::DestinationNewer => t!("sync-reason-destination-newer"),
+        Reason::NewFolder => t!("sync-reason-new-folder"),
+    }
+}
+
+/// What a run did ("3 uploaded, 1 failed").
+fn report_summary(r: &PlanReport) -> String {
+    let mut parts = Vec::new();
+    let deleted = r.deleted_local.len() + r.deleted_remote.len();
+    if !r.uploaded.is_empty() {
+        parts.push(t!("sync-report-uploaded", count = r.uploaded.len()).to_string());
+    }
+    if !r.downloaded.is_empty() {
+        parts.push(t!("sync-report-downloaded", count = r.downloaded.len()).to_string());
+    }
+    if deleted > 0 {
+        parts.push(t!("sync-report-deleted", count = deleted).to_string());
+    }
+    if !r.created_dirs.is_empty() {
+        parts.push(t!("sync-report-folders", count = r.created_dirs.len()).to_string());
+    }
+    if !r.failed.is_empty() {
+        parts.push(t!("sync-report-failed", count = r.failed.len()).to_string());
+    }
+    if parts.is_empty() {
+        t!("sync-report-nothing").into()
+    } else {
+        parts.join(", ")
     }
 }
 

@@ -28,13 +28,11 @@ impl OutFormat {
         }
     }
 
-    pub fn hint(self) -> &'static str {
+    pub fn hint(self) -> gpui_kit::SharedString {
         match self {
-            OutFormat::OpenSsh => {
-                "For OpenSSH, Hostwick, Git and most tools (a .pub file is written too)."
-            }
-            OutFormat::Ppk3 => "For PuTTY 0.75+ and WinSCP (Argon2-protected).",
-            OutFormat::Ppk2 => "For older PuTTY, WinSCP and FileZilla versions.",
+            OutFormat::OpenSsh => t!("keyformat-openssh-hint"),
+            OutFormat::Ppk3 => t!("keyformat-ppk3-hint"),
+            OutFormat::Ppk2 => t!("keyformat-ppk2-hint"),
         }
     }
 }

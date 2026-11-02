@@ -201,6 +201,14 @@ pub fn apply_theme(theme: ThemeChoice, cx: &mut App) {
         ThemeChoice::Light => ThemeMode::Light,
     };
     Theme::change(mode, None, cx);
+    if theme == ThemeChoice::Light {
+        // The stock light theme's muted text (#737373) falls to about 4.3:1
+        // on its grey panels and 3.8:1 on secondary buttons, under the WCAG
+        // 4.5:1 for normal text. #595959 keeps 6.5:1 or better on all of them
+        // and still reads as secondary. The dark theme's muted text is
+        // already 6:1 or better.
+        Theme::global_mut(cx).muted_foreground = gpui_kit::rgb(0x595959).into();
+    }
 }
 
 #[cfg(test)]

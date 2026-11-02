@@ -13,6 +13,11 @@
 //! - `%` and spaces in the path are percent-encoded (the rest is sent as
 //!   is; the parser decodes `%XX`).
 
+/// The name of the prompt hook. The shell's echo of the setup command
+/// contains it; that line is erased on screen and is left out of what
+/// screen readers hear too.
+pub const HOOK: &str = "__hw_osc7";
+
 /// The command as typed, without the final Enter. `cursor_col` is where
 /// the cursor sits after the prompt (0-based) and `cols` the terminal
 /// width: together they tell how many screen rows prompt + command take.
@@ -59,6 +64,7 @@ mod tests {
         let rows = rows_used(20, c.chars().count(), 80);
         assert!(c.ends_with(&format!("' {rows:03}")), "{c}");
         assert!(!c.contains('\n'));
+        assert!(c.contains(HOOK));
     }
 
     /// Run the command in real shells (when installed) and check that the

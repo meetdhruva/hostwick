@@ -4,6 +4,10 @@
 // GPUI code idiomatically writes `Context<Self>`, not `Context<'_, Self>`.
 #![allow(elided_lifetimes_in_paths)]
 
+#[macro_use]
+mod i18n;
+
+mod a11y;
 mod app;
 mod backend;
 mod editors;
@@ -11,6 +15,7 @@ mod files;
 mod hostform;
 mod layout;
 mod logging;
+mod notify;
 mod settings;
 mod settingsform;
 mod terminal;
@@ -57,7 +62,8 @@ fn main() {
     };
     let settings = settings::Settings::load(&backend.store);
     logging::init(&backend.paths.logs, &settings.log_level);
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), data = %backend.paths.data_dir.display(), "starting");
+    let lang = i18n::set_language(&settings.language);
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), data = %backend.paths.data_dir.display(), lang, "starting");
 
     gpui_kit::application()
         .with_assets(AppAssets)

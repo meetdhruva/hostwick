@@ -60,10 +60,10 @@ pub fn parse_host_port(text: &str) -> Option<(String, u16)> {
 
 impl KnownHostsView {
     fn new(backend: Arc<Backend>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Search host, key type or fingerprint")
-        });
-        let forget = cx.new(|cx| InputState::new(window, cx).placeholder("host or host:port"));
+        let search =
+            cx.new(|cx| InputState::new(window, cx).placeholder(t!("kh-search-placeholder")));
+        let forget =
+            cx.new(|cx| InputState::new(window, cx).placeholder(t!("kh-forget-placeholder")));
         let subs = vec![cx.subscribe(&search, |_, _, ev: &InputEvent, cx| {
             if let InputEvent::Change = ev {
                 cx.notify();
@@ -99,7 +99,9 @@ impl KnownHostsView {
                         v.entries = Some(Vec::new());
                         v.message = Some((true, e.to_string()));
                     }
-                    Err(e) => v.message = Some((true, format!("internal error: {e}"))),
+                    Err(e) => {
+                        v.message = Some((true, t!("error-internal", error = e.to_string()).into()))
+                    }
                 }
                 v.selected.retain(|l| {
                     v.entries
@@ -129,10 +131,10 @@ impl KnownHostsView {
             let _ = this.update_in(cx, |v, window, cx| {
                 v.busy = false;
                 v.message = Some(match res {
-                    Ok(Ok(0)) => (false, "Nothing matched; the file is unchanged.".into()),
-                    Ok(Ok(n)) => (false, format!("Removed {n} key(s).")),
+                    Ok(Ok(0)) => (false, t!("kh-nothing-matched").into()),
+                    Ok(Ok(n)) => (false, t!("kh-removed", count = n).into()),
                     Ok(Err(e)) => (true, e),
-                    Err(e) => (true, format!("internal error: {e}")),
+                    Err(e) => (true, t!("error-internal", error = e.to_string()).into()),
                 });
                 v.selected.clear();
                 v.reload(window, cx);
@@ -151,7 +153,7 @@ impl KnownHostsView {
     fn forget_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.forget.read(cx).value().to_string();
         let Some((host, port)) = parse_host_port(&text) else {
-            self.message = Some((true, "Type a host name, or host:port.".into()));
+            self.message = Some((true, t!("kh-type-host").into()));
             cx.notify();
             return;
         };
@@ -181,10 +183,10 @@ impl Render for KnownHostsView {
             .border_b_1()
             .border_color(theme.border)
             .child(div().w(px(24.0)))
-            .child(div().w(px(44.0)).child("Line"))
-            .child(div().flex_1().child("Host(s)"))
-            .child(div().w(px(150.0)).child("Type"))
-            .child(div().w(px(250.0)).child("Fingerprint"));
+            .child(div().w(px(44.0)).child(t!("kh-col-line")))
+            .child(div().flex_1().child(t!("kh-col-hosts")))
+            .child(div().w(px(150.0)).child(t!("keygen-type")))
+            .child(div().w(px(250.0)).child(t!("keyconv-fingerprint")));
         let list =
             div()
                 .id("kh-list")
@@ -199,15 +201,15 @@ impl Render for KnownHostsView {
                         div()
                             .p(px(8.0))
                             .text_color(theme.muted_foreground)
-                            .child("Loading…"),
+                            .child(t!("loading")),
                     )
                 })
                 .when(self.entries.is_some() && rows.is_empty(), |d| {
                     d.child(div().p(px(8.0)).text_color(theme.muted_foreground).child(
                         if total == 0 {
-                            "No known hosts yet. Keys are added when you trust a server."
+                            t!("kh-empty")
                         } else {
-                            "Nothing matches the search."
+                            t!("kh-no-match")
                         },
                     ))
                 })
@@ -236,6 +238,11 @@ impl Render for KnownHostsView {
                         .child(
                             div().w(px(24.0)).child(
                                 Checkbox::new(("khc", line))
+                                    .accessibility_label(t!(
+                                        "kh-row-label",
+                                        line = line,
+                                        hosts = hosts.clone()
+                                    ))
                                     .checked(sel)
                                     .on_click(cx.listener(move |v, on: &bool, _, cx| {
                                         if *on {
@@ -288,11 +295,15 @@ impl Render for KnownHostsView {
                 div()
                     .flex()
                     .gap(px(6.0))
-                    .child(div().flex_1().child(Input::new(&self.search).small().cleanable(true)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(Input::new(&self.search).small().cleanable(true)),
+                    )
                     .child(
                         Button::new("kh-reload")
                             .small()
-                            .label("Reload")
+                            .label(t!("kh-reload"))
                             .on_click(cx.listener(|v, _, w, cx| v.reload(w, cx))),
                     ),
             )
@@ -306,17 +317,23 @@ impl Render for KnownHostsView {
                         Button::new("kh-remove")
                             .small()
                             .danger()
-                            .label(format!("Remove selected ({})", self.selected.len()))
+                            .label(t!("kh-remove-selected", count = self.selected.len()))
                             .disabled(self.selected.is_empty() || self.busy)
                             .on_click(cx.listener(|v, _, w, cx| v.remove_selected(w, cx))),
                     )
                     .child(div().flex_1())
-                    .child(div().text_size(px(13.0)).child("Forget host"))
-                    .child(div().w(px(200.0)).child(Input::new(&self.forget).small()))
+                    .child(div().text_size(px(13.0)).child(t!("kh-forget-host")))
+                    .child(
+                        div().w(px(200.0)).child(
+                            Input::new(&self.forget)
+                                .small()
+                                .aria_label(t!("kh-forget-host")),
+                        ),
+                    )
                     .child(
                         Button::new("kh-forget")
                             .small()
-                            .label("Remove all its keys")
+                            .label(t!("kh-forget-button"))
                             .disabled(self.busy)
                             .on_click(cx.listener(|v, _, w, cx| v.forget_host(w, cx))),
                     ),
@@ -326,10 +343,11 @@ impl Render for KnownHostsView {
                     .text_size(px(11.0))
                     .whitespace_normal()
                     .text_color(theme.muted_foreground)
-                    .child(format!(
-                        "{} — {} of {total} shown. Hashed names are matched when you forget a host by name.",
-                        self.backend.paths.known_hosts.display(),
-                        rows.len()
+                    .child(t!(
+                        "kh-footer",
+                        path = self.backend.paths.known_hosts.display().to_string(),
+                        shown = rows.len(),
+                        total = total
                     )),
             )
             .when_some(self.message.clone(), |d, (err, m)| {
@@ -347,14 +365,14 @@ pub fn open(backend: Arc<Backend>, window: &mut Window, cx: &mut App) {
     let view = cx.new(|cx| KnownHostsView::new(backend, window, cx));
     window.open_dialog(cx, move |dialog, _, _| {
         dialog
-            .title("Known hosts")
+            .title(crate::a11y::text(t!("kh-title")))
             .w(px(860.0))
             .margin_top(px(40.0))
             .child(view.clone())
             .footer(
                 div().flex().child(
                     Button::new("close")
-                        .label("Close")
+                        .label(t!("button-close"))
                         .on_click(|_, w, cx| w.close_dialog(cx)),
                 ),
             )

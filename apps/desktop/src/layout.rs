@@ -17,9 +17,23 @@ pub enum Node<P> {
         id: u64,
         /// Children stacked top/bottom (else side by side).
         vertical: bool,
+        /// Share of the space that `a` gets (0..1).
+        ratio: f32,
         a: Box<Node<P>>,
         b: Box<Node<P>>,
     },
+}
+
+/// Ratios are kept inside this range (the UI also keeps a minimum size).
+pub const MIN_RATIO: f32 = 0.05;
+
+/// A ratio from outside (saved file, drag) made safe to use.
+pub fn clamp_ratio(r: f32) -> f32 {
+    if r.is_finite() {
+        r.clamp(MIN_RATIO, 1.0 - MIN_RATIO)
+    } else {
+        0.5
+    }
 }
 
 pub trait PaneId {
@@ -98,6 +112,7 @@ impl<P: PaneId> Node<P> {
                 *self = Node::Split {
                     id: split_id,
                     vertical,
+                    ratio: 0.5,
                     a: Box::new(old),
                     b: Box::new(Node::Leaf(new)),
                 };
@@ -131,7 +146,54 @@ impl<P: PaneId> Node<P> {
         a.remove(id).or_else(|| b.remove(id))
     }
 
-    /// Each pane's rectangle with even splits.
+    /// Set the share of split `split_id`'s first child. False if there is
+    /// no such split.
+    pub fn set_ratio(&mut self, split_id: u64, ratio: f32) -> bool {
+        match self {
+            Node::Split { id, ratio: r, .. } if *id == split_id => {
+                *r = clamp_ratio(ratio);
+                true
+            }
+            Node::Split { a, b, .. } => {
+                a.set_ratio(split_id, ratio) || b.set_ratio(split_id, ratio)
+            }
+            _ => false,
+        }
+    }
+
+    /// Move the divider of the innermost `vertical` split around pane `pane`
+    /// by `delta` (keyboard resizing). False if there is none.
+    pub fn nudge(&mut self, pane: u64, vertical: bool, delta: f32) -> bool {
+        let Node::Split {
+            vertical: v,
+            ratio,
+            a,
+            b,
+            ..
+        } = self
+        else {
+            return false;
+        };
+        let in_a = a.find(pane).is_some();
+        if !in_a && b.find(pane).is_none() {
+            return false;
+        }
+        let inner = if in_a {
+            a.nudge(pane, vertical, delta)
+        } else {
+            b.nudge(pane, vertical, delta)
+        };
+        if inner {
+            return true;
+        }
+        if *v == vertical {
+            *ratio = clamp_ratio(*ratio + delta);
+            return true;
+        }
+        false
+    }
+
+    /// Each pane's rectangle (in the unit square).
     pub fn rects(&self) -> Vec<(u64, Rect)> {
         let mut out = Vec::new();
         self.rects_in((0.0, 0.0, 1.0, 1.0), &mut out);
@@ -143,13 +205,20 @@ impl<P: PaneId> Node<P> {
         match self {
             Node::Empty => {}
             Node::Leaf(p) => out.push((p.pane_id(), r)),
-            Node::Split { vertical, a, b, .. } => {
+            Node::Split {
+                vertical,
+                ratio,
+                a,
+                b,
+                ..
+            } => {
+                let r = clamp_ratio(*ratio);
                 if *vertical {
-                    a.rects_in((x, y, w, h / 2.0), out);
-                    b.rects_in((x, y + h / 2.0, w, h / 2.0), out);
+                    a.rects_in((x, y, w, h * r), out);
+                    b.rects_in((x, y + h * r, w, h * (1.0 - r)), out);
                 } else {
-                    a.rects_in((x, y, w / 2.0, h), out);
-                    b.rects_in((x + w / 2.0, y, w / 2.0, h), out);
+                    a.rects_in((x, y, w * r, h), out);
+                    b.rects_in((x + w * r, y, w * (1.0 - r), h), out);
                 }
             }
         }
@@ -192,7 +261,7 @@ pub fn neighbor(rects: &[(u64, Rect)], from: u64, dir: Dir) -> Option<u64> {
 // ---- saved layout ---------------------------------------------------------
 
 /// A pane as saved for "restore tabs".
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedPane {
     /// A saved host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -200,14 +269,30 @@ pub struct SavedPane {
     /// Quick-connect text (`user@host:port`) for unsaved hosts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quick: Option<String>,
+    /// The pane's id when it was saved, so links between panes survive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<u64>,
+    /// File browser: the saved id of the terminal pane it follows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follows: Option<u64>,
+    /// File browser: the remote folder it showed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+fn half() -> f32 {
+    0.5
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum SavedNode {
     Pane(SavedPane),
     Split {
         vertical: bool,
+        /// Share of `a` (older saves have none: even split).
+        #[serde(default = "half")]
+        ratio: f32,
         a: Box<SavedNode>,
         b: Box<SavedNode>,
     },
@@ -220,13 +305,13 @@ pub enum SavedKind {
     Files,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SavedTab {
     pub kind: SavedKind,
     pub root: SavedNode,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SavedSession {
     pub tabs: Vec<SavedTab>,
     #[serde(default)]
@@ -263,9 +348,15 @@ impl SavedNode {
     pub fn prune(self, exists: &dyn Fn(&SavedPane) -> bool) -> Option<SavedNode> {
         match self {
             SavedNode::Pane(p) => exists(&p).then_some(SavedNode::Pane(p)),
-            SavedNode::Split { vertical, a, b } => match (a.prune(exists), b.prune(exists)) {
+            SavedNode::Split {
+                vertical,
+                ratio,
+                a,
+                b,
+            } => match (a.prune(exists), b.prune(exists)) {
                 (Some(a), Some(b)) => Some(SavedNode::Split {
                     vertical,
+                    ratio,
                     a: Box::new(a),
                     b: Box::new(b),
                 }),
@@ -279,13 +370,17 @@ impl SavedNode {
 /// Save a live tree.
 pub fn save_tree<P: PaneId>(node: &Node<P>, pane: &dyn Fn(&P) -> SavedPane) -> SavedNode {
     match node {
-        Node::Empty => SavedNode::Pane(SavedPane {
-            profile: None,
-            quick: None,
-        }),
+        Node::Empty => SavedNode::Pane(SavedPane::default()),
         Node::Leaf(p) => SavedNode::Pane(pane(p)),
-        Node::Split { vertical, a, b, .. } => SavedNode::Split {
+        Node::Split {
+            vertical,
+            ratio,
+            a,
+            b,
+            ..
+        } => SavedNode::Split {
             vertical: *vertical,
+            ratio: *ratio,
             a: Box::new(save_tree(a, pane)),
             b: Box::new(save_tree(b, pane)),
         },
@@ -334,9 +429,11 @@ mod tests {
         let mut n = Node::Leaf(T(1));
         let _ = n.split(1, T(2), true, 7);
         let p1 = ProfileId::new();
+        assert!(n.set_ratio(7, 0.3));
         let tree = save_tree(&n, &|p| SavedPane {
             profile: (p.0 == 1).then_some(p1),
             quick: (p.0 == 2).then(|| "me@box:2222".to_owned()),
+            ..Default::default()
         });
         let s = SavedSession {
             tabs: vec![
@@ -346,10 +443,7 @@ mod tests {
                 },
                 SavedTab {
                     kind: SavedKind::Files,
-                    root: SavedNode::Pane(SavedPane {
-                        profile: None,
-                        quick: None,
-                    }),
+                    root: SavedNode::Pane(SavedPane::default()),
                 },
             ],
             active: Some(1),
@@ -366,5 +460,63 @@ mod tests {
             Some(SavedNode::Pane(SavedPane { quick: Some(_), .. }))
         ));
         assert_eq!(SavedSession::from_json("garbage"), SavedSession::default());
+        // The ratio survives the round trip.
+        assert!(
+            matches!(back.tabs[0].root, SavedNode::Split { ratio, .. } if (ratio - 0.3).abs() < 1e-6)
+        );
+    }
+
+    #[test]
+    fn ratios_resize_and_old_saves_split_evenly() {
+        let mut n = Node::Leaf(T(1));
+        let _ = n.split(1, T(2), false, 10); // 1 | 2
+        let _ = n.split(2, T(3), true, 11); // 1 | (2 / 3)
+        assert!(n.set_ratio(10, 0.25));
+        assert!(!n.set_ratio(99, 0.5));
+        let r = n.rects();
+        let w1 = r.iter().find(|(id, _)| *id == 1).map(|(_, r)| r.2);
+        assert_eq!(w1, Some(0.25));
+        // Clamped, and NaN is not accepted.
+        assert!(n.set_ratio(10, 2.0));
+        assert!(n.rects().iter().all(|(_, r)| r.2 > 0.0));
+        assert!(n.set_ratio(10, f32::NAN));
+        assert_eq!(
+            n.rects().iter().find(|(id, _)| *id == 1).map(|(_, r)| r.2),
+            Some(0.5)
+        );
+        // Keyboard: pane 3 is in the vertical split 11.
+        assert!(n.nudge(3, true, 0.1));
+        assert_eq!(
+            n.rects().iter().find(|(id, _)| *id == 2).map(|(_, r)| r.3),
+            Some(0.6)
+        );
+        // Horizontal from pane 3 reaches the outer split.
+        assert!(n.nudge(3, false, -0.1));
+        assert!(!Node::Leaf(T(5)).nudge(5, true, 0.1));
+        // Saves from before ratios existed load as even splits.
+        let old = r#"{"tabs":[{"kind":"terminal","root":{"t":"split","vertical":false,
+            "a":{"t":"pane","quick":"a@b"},"b":{"t":"pane","quick":"c@d"}}}],"active":0}"#;
+        let s = SavedSession::from_json(old);
+        assert!(matches!(s.tabs[0].root, SavedNode::Split { ratio, .. } if ratio == 0.5));
+    }
+
+    #[test]
+    fn links_between_panes_are_saved() {
+        let p = SavedPane {
+            quick: Some("me@box".into()),
+            id: Some(4),
+            follows: Some(3),
+            dir: Some("/srv".into()),
+            ..Default::default()
+        };
+        let s = SavedSession {
+            tabs: vec![SavedTab {
+                kind: SavedKind::Files,
+                root: SavedNode::Pane(p.clone()),
+            }],
+            active: Some(0),
+        };
+        let back = SavedSession::from_json(&s.to_json());
+        assert_eq!(back.tabs[0].root, SavedNode::Pane(p));
     }
 }

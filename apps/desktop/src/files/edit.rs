@@ -48,12 +48,12 @@ pub enum EditStatus {
 impl EditStatus {
     pub fn describe(&self) -> String {
         match self {
-            Self::Downloading => "downloading…".into(),
-            Self::Watching => "watching".into(),
-            Self::Uploading => "uploading…".into(),
-            Self::Uploaded(t) => format!("uploaded {t}"),
-            Self::Conflict => "changed on the server — waiting for you".into(),
-            Self::Error(e) => format!("error: {e}"),
+            Self::Downloading => t!("edit-status-downloading").into(),
+            Self::Watching => t!("edit-status-watching").into(),
+            Self::Uploading => t!("edit-status-uploading").into(),
+            Self::Uploaded(time) => t!("edit-status-uploaded", time = time).into(),
+            Self::Conflict => t!("edit-status-conflict").into(),
+            Self::Error(e) => t!("edit-status-error", error = e).into(),
         }
     }
 }
@@ -297,9 +297,9 @@ async fn download(fs: &dyn RemoteFs, remote: &str, local: &Path) -> Result<Stamp
         .stat(remote)
         .await
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("{remote}: no longer exists"))?;
+        .ok_or_else(|| t!("edit-gone", path = remote).to_string())?;
     if meta.is_dir() {
-        return Err(format!("{remote} is a folder"));
+        return Err(t!("edit-is-folder", path = remote).into());
     }
     if let Some(dir) = local.parent() {
         tokio::fs::create_dir_all(dir)
@@ -336,13 +336,15 @@ async fn upload(fs: &dyn RemoteFs, local: &Path, remote: &str) -> Result<Stamp, 
         .stat(remote)
         .await
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("{remote}: missing after upload"))?;
+        .ok_or_else(|| t!("edit-missing-after-upload", path = remote).to_string())?;
     if after.size != data.len() as u64 {
-        return Err(format!(
-            "{remote}: server has {} bytes after uploading {}",
-            after.size,
-            data.len()
-        ));
+        return Err(t!(
+            "edit-size-mismatch",
+            path = remote,
+            server = after.size,
+            uploaded = data.len()
+        )
+        .into());
     }
     Ok(Stamp::from(&after))
 }
@@ -361,7 +363,7 @@ async fn free_copy_path(fs: &dyn RemoteFs, remote: &str) -> Result<String, Strin
             return Ok(candidate);
         }
     }
-    Err("no free name for the copy".into())
+    Err(t!("edit-no-copy-name").into())
 }
 
 #[cfg(test)]

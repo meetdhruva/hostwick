@@ -43,6 +43,7 @@ use alacritty_terminal::vte::ansi::Processor;
 use bytes::Bytes;
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+use gpui_kit::accesskit::Role;
 use gpui_kit::base::Selectable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -232,6 +233,14 @@ pub struct TerminalView {
     pub(crate) highlighter: Arc<highlight::Highlighter>,
     pub(crate) row_cache: highlight::RowCache,
     mouse: MouseReport,
+    /// Screen readers: the newest output, read out by a live region.
+    live: SharedString,
+    /// Output up to this offset has been considered for `live`.
+    live_seen: u64,
+    live_task: Option<Task<()>>,
+    /// What was typed since the last announcement (the shell echoes it;
+    /// the screen reader already spoke it).
+    typed: String,
     _pump: Task<()>,
 }
 
@@ -360,6 +369,10 @@ impl TerminalView {
             script: None,
             notice: None,
             notice_gen: 0,
+            live: SharedString::default(),
+            live_seen: 0,
+            live_task: None,
+            typed: String::new(),
             search: None,
             highlighter: highlight::shared(&settings.highlight_rules),
             row_cache: highlight::RowCache::default(),
@@ -437,11 +450,11 @@ impl TerminalView {
                             }
                             ShellEvent::Exit(code) => {
                                 end.exit_status = true;
-                                exit = Some(format!("exited with status {code}"))
+                                exit = Some(t!("term-exit-status", code = code).to_string())
                             }
                             ShellEvent::ExitSignal(sig) => {
                                 end.exit_status = true;
-                                exit = Some(format!("killed by signal {sig}"))
+                                exit = Some(t!("term-exit-signal", signal = sig.to_string()).to_string())
                             }
                             ShellEvent::Closed => break 'outer,
                         }
@@ -458,9 +471,9 @@ impl TerminalView {
             let dropped = reconnect::is_drop(kind, end);
             let reason = exit.unwrap_or_else(|| {
                 if dropped {
-                    "connection lost".into()
+                    t!("term-connection-lost").into()
                 } else {
-                    "connection closed".into()
+                    t!("term-connection-closed").into()
                 }
             });
             let _ = notes_tx.unbounded_send(Note::Exited(generation, Some(reason), dropped));
@@ -479,7 +492,10 @@ impl TerminalView {
             let mut term = self.shared.term.lock();
             let mut p: Processor = Processor::new();
             let stamp = chrono::Local::now().format("%H:%M:%S");
-            let marker = format!("\r\n\x1b[0;2m── reconnected {stamp} ──\x1b[0m\r\n");
+            let marker = format!(
+                "\r\n\x1b[0;2m── {} ──\x1b[0m\r\n",
+                t!("term-reconnected-marker", time = stamp.to_string())
+            );
             p.advance(&mut *term, marker.as_bytes());
             if term.grid().display_offset() != 0 {
                 term.scroll_display(Scroll::Bottom);
@@ -608,7 +624,7 @@ impl TerminalView {
             _ => {
                 self.reconnect = None;
                 self.reconnect_token += 1;
-                self.exited = Some(format!("reconnect failed: {error}"));
+                self.exited = Some(t!("term-reconnect-failed", error = error).into());
                 cx.notify();
             }
         }
@@ -618,6 +634,7 @@ impl TerminalView {
         match note {
             Note::Wakeup => {
                 self.shared.dirty.store(false, Ordering::Release);
+                self.schedule_live(cx);
                 cx.notify();
             }
             Note::Title(t) => {
@@ -690,11 +707,11 @@ impl TerminalView {
         match &self.control {
             Some(tx) if self.exited.is_none() => {
                 if tx.try_send(Control::Break).is_err() {
-                    self.show_notice("Could not send break".into(), cx);
+                    self.show_notice(t!("term-break-failed").into(), cx);
                 }
             }
             _ => self.show_notice(
-                format!("{} sessions have no break signal", self.transport.label()),
+                t!("term-no-break", protocol = self.transport.label()).into(),
                 cx,
             ),
         }
@@ -730,7 +747,7 @@ impl TerminalView {
             match hostwick_core::parse_login_script(&profile.login_script) {
                 Ok(steps) => steps,
                 Err(e) => {
-                    self.show_notice(format!("Login script not run: {e}"), cx);
+                    self.show_notice(t!("term-script-not-run", error = e).into(), cx);
                     Vec::new()
                 }
             }
@@ -788,7 +805,9 @@ impl TerminalView {
                     Ok(()) => {}
                     Err(script::ScriptError::Ended) => return,
                     Err(e) => {
-                        let _ = notes.unbounded_send(Note::Notice(format!("Script stopped: {e}")));
+                        let _ = notes.unbounded_send(Note::Notice(
+                            t!("term-script-stopped", error = e.to_string()).into(),
+                        ));
                         let _ = notes.unbounded_send(Note::ScriptDone);
                         return;
                     }
@@ -947,6 +966,13 @@ impl TerminalView {
 
     /// Send bytes typed by the user here; also emitted for broadcast.
     fn send_user(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        if self.typed.len() < 512 {
+            self.typed.extend(
+                String::from_utf8_lossy(&bytes)
+                    .chars()
+                    .filter(|c| !c.is_control()),
+            );
+        }
         self.scroll_to_bottom();
         self.write_raw(&bytes);
         cx.emit(TerminalEvent::UserInput(bytes));
@@ -998,6 +1024,148 @@ impl TerminalView {
         }
     }
 
+    // ---- screen readers -----------------------------------------------------------
+
+    /// After output stops for a moment, put the new text in the live
+    /// region (like VS Code's terminal: bursts are read once they settle).
+    fn schedule_live(&mut self, cx: &mut Context<Self>) {
+        if self.live_task.is_some() {
+            return;
+        }
+        let settle = Duration::from_millis(250);
+        self.live_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(settle).await;
+                let done = this
+                    .update(cx, |v, cx| {
+                        if v.shared.watch.idle().is_some_and(|i| i < settle) {
+                            return false;
+                        }
+                        v.live_task = None;
+                        v.update_live(cx);
+                        true
+                    })
+                    .unwrap_or(true);
+                if done {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn update_live(&mut self, cx: &mut Context<Self>) {
+        let (text, end) = self.shared.watch.since(self.live_seen, 4096);
+        self.live_seen = end;
+        let typed = std::mem::take(&mut self.typed);
+        // Full-screen programs redraw constantly; read the screen instead
+        // (Ctrl+Shift+A shows it as text).
+        if self.mode().contains(TermMode::ALT_SCREEN) {
+            return;
+        }
+        let mut text = live_text(&text, 20);
+        // The shell's echo of what was just typed.
+        let typed = typed.trim();
+        if !typed.is_empty() {
+            if let Some(rest) = text.strip_prefix(typed) {
+                text = rest.trim_start().to_owned();
+            } else if typed.starts_with(text.as_str()) {
+                text.clear();
+            }
+        }
+        if text.is_empty() {
+            return;
+        }
+        self.set_live(text, cx);
+    }
+
+    /// A new live text; the same text again still counts as a change, so it
+    /// is read again.
+    fn set_live(&mut self, text: String, cx: &mut Context<Self>) {
+        self.live = if *self.live == *text {
+            format!("{text}\u{200b}").into()
+        } else {
+            text.into()
+        };
+        cx.notify();
+    }
+
+    /// Ctrl+Shift+O / ⌘⇧O: read the latest output again.
+    pub fn read_recent_output(&mut self, cx: &mut Context<Self>) {
+        let end = self.shared.watch.end();
+        let (text, _) = self.shared.watch.since(end.saturating_sub(4096), 4096);
+        let text = live_text(&text, 15);
+        let text = if text.is_empty() {
+            t!("term-no-output").to_string()
+        } else {
+            text
+        };
+        self.set_live(text, cx);
+    }
+
+    /// The scrollback as plain text (newest `max_lines` lines).
+    fn scrollback_text(&self, max_lines: usize) -> String {
+        let term = self.shared.term.lock();
+        let hist = term.grid().history_size() as i32;
+        let rows = term.screen_lines() as i32;
+        let first = (rows - max_lines as i32).max(-hist);
+        let start = GridPoint::new(Line(first), Column(0));
+        let end = GridPoint::new(Line(rows - 1), Column(term.columns().saturating_sub(1)));
+        let text = term.bounds_to_string(start, end);
+        drop(term);
+        text.lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim_end()
+            .to_owned()
+    }
+
+    /// Ctrl+Shift+A / ⌘⇧A: the output as a read-only text, where screen
+    /// readers can move by line, word and character (VS Code calls this the
+    /// accessible view).
+    pub fn open_text_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_kit::component::WindowExt as _;
+        use gpui_kit::component::input::{Textarea, TextareaState};
+        let text = self.scrollback_text(2000);
+        let lines = text.lines().count();
+        let state = cx.new(|cx| TextareaState::new(window, cx).rows(24).default_value(text));
+        let title = t!("term-text-view-title", title = self.title.clone());
+        let back = self.focus.clone();
+        let first = std::rc::Rc::new(std::cell::Cell::new(true));
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if first.replace(false) {
+                // Start at the newest line, where the output ends.
+                let last = u32::try_from(lines.saturating_sub(1)).unwrap_or(0);
+                state.update(cx, |s, cx| {
+                    s.set_cursor_position(
+                        gpui_kit::component::input::Position::new(last, 0),
+                        window,
+                        cx,
+                    );
+                });
+            }
+            let back = back.clone();
+            dialog
+                .title(crate::a11y::text(title.clone()))
+                .w(px(900.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.0))
+                        .child(crate::a11y::text(t!("term-text-view-hint", lines = lines)))
+                        .child(
+                            Textarea::new(&state)
+                                .readonly(true)
+                                .aria_label(title.clone())
+                                .font_family(monospace_family())
+                                .text_size(px(13.0)),
+                        ),
+                )
+                .on_close(move |_, window, cx| back.focus(window, cx))
+        });
+    }
+
     // ---- search ----------------------------------------------------------------
 
     /// Open (or focus) the scrollback search bar.
@@ -1007,7 +1175,7 @@ impl TerminalView {
             input.update(cx, |i, cx| i.focus(window, cx));
             return;
         }
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Find in scrollback"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(t!("search-placeholder")));
         // Start with the selection, if it is one short line.
         if let Some(sel) = self.shared.term.lock().selection_to_string()
             && !sel.is_empty()
@@ -1154,7 +1322,7 @@ impl TerminalView {
             return String::new();
         }
         match (&s.count, &s.focused) {
-            (Some(c), _) if c.starts.is_empty() => "No results".into(),
+            (Some(c), _) if c.starts.is_empty() => t!("search-no-results").into(),
             (Some(c), Some(m)) => {
                 let hist = self.shared.term.lock().history_size();
                 let total = if c.capped {
@@ -1163,14 +1331,14 @@ impl TerminalView {
                     c.starts.len().to_string()
                 };
                 match c.index_of(m, hist) {
-                    Some(i) => format!("{i} of {total}"),
-                    None => format!("? of {total}"),
+                    Some(i) => t!("search-position", index = i.to_string(), total = total).into(),
+                    None => t!("search-position", index = "?", total = total).into(),
                 }
             }
-            (Some(c), None) => format!("{} matches", c.starts.len()),
+            (Some(c), None) => t!("search-matches", count = c.starts.len()).into(),
             (None, Some(_)) => "…".into(),
             (None, None) if s.counting => "…".into(),
-            (None, None) => "No results".into(),
+            (None, None) => t!("search-no-results").into(),
         }
     }
 
@@ -1187,6 +1355,34 @@ impl TerminalView {
         };
         if find {
             self.open_search(window, cx);
+            cx.stop_propagation();
+            return;
+        }
+        let app_key = if cfg!(target_os = "macos") {
+            m.platform && m.shift && !m.control
+        } else {
+            m.control && m.shift && !m.alt
+        };
+        if app_key && key == "o" {
+            self.read_recent_output(cx);
+            cx.stop_propagation();
+            return;
+        }
+        if app_key && key == "a" {
+            self.open_text_view(window, cx);
+            cx.stop_propagation();
+            return;
+        }
+        if crate::a11y::is_menu_key(ks) && Settings::get(cx).right_click == RightClick::Menu {
+            // Where a right-click would be: at the cursor.
+            if let Some(l) = self.layout {
+                let cursor = self.shared.term.lock().grid().cursor.point;
+                let at = point(
+                    l.origin.x + l.cell_width * (cursor.column.0 as f32 + 0.5),
+                    l.origin.y + l.line_height * (cursor.line.0.max(0) as f32 + 0.5),
+                );
+                crate::a11y::open_context_menu_at(at, window, cx);
+            }
             cx.stop_propagation();
             return;
         }
@@ -1570,7 +1766,7 @@ impl TerminalView {
                         .label("Aa")
                         .selected(s.case_sensitive)
                         .when(s.case_sensitive, |b| b.primary())
-                        .tooltip("Match case")
+                        .tooltip(t!("search-match-case"))
                         .on_click(cx.listener(|v, _, _, cx| v.toggle_search_option(false, cx))),
                 )
                 .child(
@@ -1580,7 +1776,7 @@ impl TerminalView {
                         .label(".*")
                         .selected(s.regex)
                         .when(s.regex, |b| b.primary())
-                        .tooltip("Regular expression")
+                        .tooltip(t!("search-regex"))
                         .on_click(cx.listener(|v, _, _, cx| v.toggle_search_option(true, cx))),
                 )
                 .child(
@@ -1597,7 +1793,8 @@ impl TerminalView {
                         .xsmall()
                         .ghost()
                         .icon(IconName::ChevronUp)
-                        .tooltip("Previous (older) match — Enter, F3")
+                        .tooltip(t!("search-older"))
+                        .accessibility_label(t!("search-older"))
                         .on_click(cx.listener(|v, _, _, cx| v.step_search(true, cx))),
                 )
                 .child(
@@ -1605,7 +1802,8 @@ impl TerminalView {
                         .xsmall()
                         .ghost()
                         .icon(IconName::ChevronDown)
-                        .tooltip("Next (newer) match — Shift+Enter, Shift+F3")
+                        .tooltip(t!("search-newer"))
+                        .accessibility_label(t!("search-newer"))
                         .on_click(cx.listener(|v, _, _, cx| v.step_search(false, cx))),
                 )
                 .child(
@@ -1613,7 +1811,8 @@ impl TerminalView {
                         .xsmall()
                         .ghost()
                         .icon(IconName::Close)
-                        .tooltip("Close (Esc)")
+                        .tooltip(t!("search-close"))
+                        .accessibility_label(t!("search-close"))
                         .on_click(cx.listener(|v, _, window, cx| v.close_search(window, cx))),
                 )
                 .into_any_element(),
@@ -1685,16 +1884,30 @@ impl Render for TerminalView {
                 Some(due) => {
                     let secs = due.saturating_duration_since(Instant::now()).as_secs() + 1;
                     (
-                        format!("Connection lost{err}. Reconnecting in {secs} s…"),
+                        t!("term-reconnect-in", reason = err, seconds = secs).to_string(),
                         true,
                     )
                 }
-                None => (format!("Reconnecting (attempt {})…", r.attempt + 1), false),
+                None => (
+                    t!("term-reconnect-attempt", attempt = r.attempt + 1).to_string(),
+                    false,
+                ),
             }
         });
         let view = cx.entity().downgrade();
+        let live = self.live.clone();
         let body = div()
             .id("terminal")
+            .role(Role::Terminal)
+            .aria_label(t!("term-a11y-label", title = self.title.clone()))
+            .aria_description(match &exited {
+                Some(reason) => t!("term-session-ended", reason = reason.clone()),
+                None => t!(
+                    "term-a11y-keys",
+                    read = crate::util::keys("Ctrl+Shift+O", "⌘⇧O"),
+                    view = crate::util::keys("Ctrl+Shift+A", "⌘⇧A")
+                ),
+            })
             .size_full()
             .relative()
             .bg(colors::to_hsla(colors::BACKGROUND))
@@ -1712,6 +1925,20 @@ impl Render for TerminalView {
             .on_scroll(cx.listener(Self::on_scroll))
             .p(px(6.0))
             .child(TerminalElement::new(cx.entity()))
+            // Invisible: the newest output, read out by screen readers.
+            .child(
+                div()
+                    .id("terminal-output")
+                    .role(Role::Status)
+                    .aria_label(live.clone())
+                    .aria_value(live)
+                    .a11y_synthetic_children(|b| {
+                        b.parent_node().set_live(gpui_kit::accesskit::Live::Polite);
+                    })
+                    .absolute()
+                    .size_0()
+                    .overflow_hidden(),
+            )
             .when(logging, |d| {
                 d.child(
                     div()
@@ -1723,13 +1950,16 @@ impl Render for TerminalView {
                         .bg(hsla(0.0, 0.7, 0.35, 0.85))
                         .text_color(hsla(0.0, 0.0, 1.0, 1.0))
                         .text_size(px(11.0))
-                        .child("● LOG"),
+                        .child(format!("● {}", t!("term-log-badge"))),
                 )
             })
             .when_some(notice, |d, text| {
                 d.child(
                     div()
                         .id("notice")
+                        .role(Role::Status)
+                        .aria_label(text.clone())
+                        .aria_value(text.clone())
                         .absolute()
                         .bottom(px(36.0))
                         .left(px(12.0))
@@ -1747,6 +1977,8 @@ impl Render for TerminalView {
                         .child(
                             div()
                                 .id("dismiss-notice")
+                                .role(Role::Button)
+                                .aria_label(t!("dismiss"))
                                 .cursor_pointer()
                                 .px(px(4.0))
                                 .child("✕")
@@ -1761,6 +1993,9 @@ impl Render for TerminalView {
                 d.child(
                     div()
                         .id("reconnecting")
+                        .role(Role::Status)
+                        .aria_label(text.clone())
+                        .aria_value(text.clone())
                         .absolute()
                         .bottom(px(8.0))
                         .right(px(12.0))
@@ -1779,24 +2014,28 @@ impl Render for TerminalView {
                             d.child(
                                 div()
                                     .id("reconnect-now")
+                                    .role(Role::Button)
+                                    .aria_label(t!("term-reconnect-now"))
                                     .flex_none()
                                     .px(px(8.0))
                                     .rounded(px(3.0))
                                     .bg(hsla(0.58, 0.6, 0.45, 1.0))
                                     .cursor_pointer()
-                                    .child("Now")
+                                    .child(t!("term-reconnect-now"))
                                     .on_click(cx.listener(|v, _, _, cx| v.reconnect_now(cx))),
                             )
                         })
                         .child(
                             div()
                                 .id("reconnect-cancel")
+                                .role(Role::Button)
+                                .aria_label(t!("button-cancel"))
                                 .flex_none()
                                 .px(px(8.0))
                                 .rounded(px(3.0))
                                 .bg(hsla(0.0, 0.0, 0.35, 1.0))
                                 .cursor_pointer()
-                                .child("Cancel")
+                                .child(t!("button-cancel"))
                                 .on_click(cx.listener(|v, _, _, cx| v.cancel_reconnect(cx))),
                         ),
                 )
@@ -1805,6 +2044,9 @@ impl Render for TerminalView {
                 d.child(
                     div()
                         .id("ended")
+                        .role(Role::Status)
+                        .aria_label(t!("term-session-ended", reason = reason.clone()))
+                        .aria_value(t!("term-session-ended", reason = reason.clone()))
                         .absolute()
                         .bottom(px(8.0))
                         .right(px(12.0))
@@ -1823,17 +2065,19 @@ impl Render for TerminalView {
                                 .flex_1()
                                 .min_w_0()
                                 .whitespace_normal()
-                                .child(format!("Session ended — {reason}. Press Enter to")),
+                                .child(t!("term-session-ended", reason = reason)),
                         )
                         .child(
                             div()
                                 .id("reconnect")
+                                .role(Role::Button)
+                                .aria_label(t!("menu-reconnect"))
                                 .flex_none()
                                 .px(px(8.0))
                                 .rounded(px(3.0))
                                 .bg(hsla(0.58, 0.6, 0.45, 1.0))
                                 .cursor_pointer()
-                                .child("Reconnect")
+                                .child(t!("menu-reconnect"))
                                 .on_click(
                                     cx.listener(|_, _, _, cx| cx.emit(TerminalEvent::Reconnect)),
                                 ),
@@ -1851,42 +2095,62 @@ impl Render for TerminalView {
                     }
                 };
                 let find_view = view.clone();
+                let text_view = view.clone();
                 let mut menu = menu
-                    .item(PopupMenuItem::new("Copy").on_click(act(|t, cx| {
-                        t.copy_selection(cx);
-                    })))
-                    .item(PopupMenuItem::new("Paste").on_click(act(|t, cx| t.paste(cx))))
                     .item(
-                        PopupMenuItem::new("Select all")
+                        PopupMenuItem::new(t!("term-menu-copy")).on_click(act(|t, cx| {
+                            t.copy_selection(cx);
+                        })),
+                    )
+                    .item(
+                        PopupMenuItem::new(t!("term-menu-paste"))
+                            .on_click(act(|t, cx| t.paste(cx))),
+                    )
+                    .item(
+                        PopupMenuItem::new(t!("term-menu-select-all"))
                             .on_click(act(|t, cx| t.select_all_visible(cx))),
                     )
-                    .item(PopupMenuItem::new("Find…").on_click(
+                    .item(PopupMenuItem::new(t!("term-menu-find")).on_click(
                         move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                             let _ = find_view.update(cx, |t, cx| t.open_search(window, cx));
+                        },
+                    ))
+                    .item(
+                        PopupMenuItem::new(t!("term-menu-read-output"))
+                            .on_click(act(|t, cx| t.read_recent_output(cx))),
+                    )
+                    .item(PopupMenuItem::new(t!("term-menu-text-view")).on_click(
+                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                            let _ = text_view.update(cx, |t, cx| t.open_text_view(window, cx));
                         },
                     ));
                 if !menu_snippets.is_empty() {
                     let snips = menu_snippets.clone();
                     let sv = view.clone();
-                    menu = menu.submenu("Snippets", window, cx, move |mut sub, _, _| {
-                        for s in &snips {
-                            let (s, sv) = (s.clone(), sv.clone());
-                            let label = if s.name.trim().is_empty() {
-                                s.text.chars().take(30).collect::<String>()
-                            } else {
-                                s.name.clone()
-                            };
-                            sub = sub.item(PopupMenuItem::new(label).on_click(
-                                move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                                    let _ = sv.update(cx, |t, cx| t.send_snippet(&s, cx));
-                                },
-                            ));
-                        }
-                        sub
-                    });
+                    menu = menu.submenu(
+                        t!("term-menu-snippets"),
+                        window,
+                        cx,
+                        move |mut sub, _, _| {
+                            for s in &snips {
+                                let (s, sv) = (s.clone(), sv.clone());
+                                let label = if s.name.trim().is_empty() {
+                                    s.text.chars().take(30).collect::<String>()
+                                } else {
+                                    s.name.clone()
+                                };
+                                sub = sub.item(PopupMenuItem::new(label).on_click(
+                                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                                        let _ = sv.update(cx, |t, cx| t.send_snippet(&s, cx));
+                                    },
+                                ));
+                            }
+                            sub
+                        },
+                    );
                 }
                 if let Some(dir) = cwd.clone() {
-                    menu = menu.item(PopupMenuItem::new("Copy current folder").on_click(
+                    menu = menu.item(PopupMenuItem::new(t!("term-menu-copy-folder")).on_click(
                         move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
                             cx.write_to_clipboard(ClipboardItem::new_string(dir.clone()));
                         },
@@ -1894,58 +2158,60 @@ impl Render for TerminalView {
                 }
                 if can_break {
                     menu = menu.item(
-                        PopupMenuItem::new("Send break").on_click(act(|t, cx| t.send_break(cx))),
+                        PopupMenuItem::new(t!("menu-send-break"))
+                            .on_click(act(|t, cx| t.send_break(cx))),
                     );
                 }
                 if script_running {
                     menu = menu.item(
-                        PopupMenuItem::new("Stop script")
+                        PopupMenuItem::new(t!("term-menu-stop-script"))
                             .on_click(act(|t, cx| t.cancel_script(cx))),
                     );
                 }
                 menu = menu
                     .separator()
                     .item(
-                        PopupMenuItem::new("Clear scrollback")
+                        PopupMenuItem::new(t!("term-menu-clear"))
                             .on_click(act(|t, cx| t.clear_scrollback(cx))),
                     )
                     .item(if logging {
-                        PopupMenuItem::new("Stop session log").on_click(act(|t, cx| t.stop_log(cx)))
+                        PopupMenuItem::new(t!("term-menu-stop-log"))
+                            .on_click(act(|t, cx| t.stop_log(cx)))
                     } else {
-                        PopupMenuItem::new("Log session to file…")
+                        PopupMenuItem::new(t!("term-menu-start-log"))
                             .on_click(act(|t, cx| t.prompt_start_log(cx)))
                     })
                     .separator();
                 if is_ssh {
                     menu = menu
                         .item(
-                            PopupMenuItem::new("Open files here")
+                            PopupMenuItem::new(t!("term-menu-files-here"))
                                 .on_click(act(|_, cx| cx.emit(TerminalEvent::OpenFilesHere))),
                         )
                         .item(
-                            PopupMenuItem::new("Open files (SFTP)")
+                            PopupMenuItem::new(t!("menu-open-files"))
                                 .on_click(act(|_, cx| cx.emit(TerminalEvent::OpenFiles))),
                         );
                 }
                 menu = menu
                     .item(
-                        PopupMenuItem::new("Split right")
+                        PopupMenuItem::new(t!("menu-split-right"))
                             .on_click(act(|_, cx| cx.emit(TerminalEvent::Split(false)))),
                     )
                     .item(
-                        PopupMenuItem::new("Split down")
+                        PopupMenuItem::new(t!("menu-split-down"))
                             .on_click(act(|_, cx| cx.emit(TerminalEvent::Split(true)))),
                     )
                     .separator();
                 menu.item(
-                    PopupMenuItem::new("Duplicate session")
+                    PopupMenuItem::new(t!("term-menu-duplicate"))
                         .on_click(act(|_, cx| cx.emit(TerminalEvent::Duplicate))),
                 )
                 .item(
                     PopupMenuItem::new(if alive {
-                        "Reconnect"
+                        t!("menu-reconnect")
                     } else {
-                        "Reconnect (session ended)"
+                        t!("term-menu-reconnect-ended")
                     })
                     .on_click(act(|_, cx| cx.emit(TerminalEvent::Reconnect))),
                 )
@@ -2056,6 +2322,21 @@ impl EntityInputHandler for TerminalView {
     }
 }
 
+/// Output text for a screen reader: carriage returns resolved, blank lines
+/// and trailing spaces dropped, the last `max_lines` lines.
+fn live_text(raw: &str, max_lines: usize) -> String {
+    let lines: Vec<&str> = raw
+        .split('\n')
+        // `progress\rdone` shows "done".
+        .map(|l| l.rsplit('\r').next().unwrap_or(l).trim_end())
+        .filter(|l| !l.trim().is_empty())
+        // Shell integration's setup line: erased on screen right away.
+        .filter(|l| !l.contains(integration::HOOK))
+        .collect();
+    let from = lines.len().saturating_sub(max_lines);
+    lines[from..].join("\n")
+}
+
 pub fn sanitize(s: &str) -> String {
     let t: String = s
         .chars()
@@ -2073,8 +2354,20 @@ pub fn sanitize(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: that would bring in GPUI's `test` attribute.
-    use super::tab_title;
+    use super::{live_text, tab_title};
     use hostwick_core::{HostProfile, Protocol};
+
+    #[test]
+    fn live_text_keeps_what_the_screen_shows() {
+        let setup = super::integration::setup_command(14, 80);
+        // As the output watch keeps it: escapes and carriage returns gone.
+        let raw = format!("Last login: today\nme@box:~$ {setup}\nme@box:~$ ls\na  b\n\nme@box:~$ ");
+        assert_eq!(
+            live_text(&raw, 20),
+            "Last login: today\nme@box:~$ ls\na  b\nme@box:~$"
+        );
+        assert_eq!(live_text("1\n2\n3\n4", 2), "3\n4");
+    }
 
     #[test]
     fn tab_titles_name_the_transport() {

@@ -50,21 +50,20 @@ impl VaultForm {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mk = |ph: &str, window: &mut Window, cx: &mut Context<Self>| {
-            let ph = ph.to_owned();
+        let mk = |ph: SharedString, window: &mut Window, cx: &mut Context<Self>| {
             cx.new(|cx| InputState::new(window, cx).placeholder(ph).masked(true))
         };
-        let old = mk("Current master password", window, cx);
+        let old = mk(t!("vault-current-master"), window, cx);
         let pw = mk(
             if mode == Mode::Unlock {
-                "Master password"
+                t!("vault-master")
             } else {
-                "New master password"
+                t!("vault-new-master")
             },
             window,
             cx,
         );
-        let confirm = mk("Repeat it", window, cx);
+        let confirm = mk(t!("vault-repeat"), window, cx);
         let mut subs = Vec::new();
         for i in [&old, &pw, &confirm] {
             subs.push(cx.subscribe_in(
@@ -128,19 +127,18 @@ impl VaultForm {
         let confirm = self.confirm.read(cx).value().to_string();
         let old = self.old.read(cx).value().to_string();
         if pw.is_empty() {
-            self.error = Some("Enter a password.".into());
+            self.error = Some(t!("vault-enter-password").into());
             cx.notify();
             return;
         }
         if self.mode != Mode::Unlock {
             if strength_hint(&pw).0 < 2 {
-                self.error =
-                    Some("Use at least 8 characters — a few unrelated words work well.".into());
+                self.error = Some(t!("vault-too-weak").into());
                 cx.notify();
                 return;
             }
             if pw != confirm {
-                self.error = Some("The two passwords do not match.".into());
+                self.error = Some(t!("vault-mismatch").into());
                 cx.notify();
                 return;
             }
@@ -154,7 +152,7 @@ impl VaultForm {
             let pw = SecretString::from(pw);
             match mode {
                 Mode::Unlock => vault.unlock(pw).map_err(|e| match e {
-                    VaultError::WrongPassword => "Wrong master password.".to_owned(),
+                    VaultError::WrongPassword => t!("vault-wrong-master").to_string(),
                     e => e.to_string(),
                 }),
                 Mode::Create => vault.create(pw).map_err(|e| e.to_string()),
@@ -174,7 +172,7 @@ impl VaultForm {
                             s.focus(window, cx);
                         });
                     }
-                    Err(e) => f.error = Some(format!("internal error: {e}")),
+                    Err(e) => f.error = Some(t!("error-internal", error = e.to_string()).into()),
                 }
                 cx.notify();
             });
@@ -200,9 +198,15 @@ impl Render for VaultForm {
             .gap(px(8.0))
             .text_size(px(13.0))
             .when(!self.reason.is_empty(), |d| {
-                d.child(div().whitespace_normal().child(self.reason.clone()))
+                d.child(
+                    div()
+                        .whitespace_normal()
+                        .child(crate::a11y::text(self.reason.clone())),
+                )
             })
-            .when(self.mode == Mode::Change, |d| d.child(Input::new(&self.old).mask_toggle()))
+            .when(self.mode == Mode::Change, |d| {
+                d.child(Input::new(&self.old).mask_toggle())
+            })
             .child(Input::new(&self.pw).mask_toggle())
             .when(self.mode != Mode::Unlock, |d| {
                 d.child(Input::new(&self.confirm).mask_toggle())
@@ -211,26 +215,23 @@ impl Render for VaultForm {
                             .flex()
                             .items_center()
                             .gap(px(6.0))
-                            .child(
+                            .child(div().flex().gap(px(3.0)).children((1..=3).map(|i| {
                                 div()
-                                    .flex()
-                                    .gap(px(3.0))
-                                    .children((1..=3).map(|i| {
-                                        div().w(px(28.0)).h(px(4.0)).rounded(px(2.0)).bg(
-                                            if i <= level {
-                                                strength_color
-                                            } else {
-                                                theme.muted
-                                            },
-                                        )
-                                    })),
-                            )
+                                    .w(px(28.0))
+                                    .h(px(4.0))
+                                    .rounded(px(2.0))
+                                    .bg(if i <= level {
+                                        strength_color
+                                    } else {
+                                        theme.muted
+                                    })
+                            })))
                             .child(
                                 div()
                                     .text_size(px(11.0))
                                     .text_color(theme.muted_foreground)
                                     .child(if hint.is_empty() {
-                                        "At least 8 characters; a few unrelated words work well."
+                                        t!("vault-strength-empty")
                                     } else {
                                         hint
                                     }),
@@ -241,22 +242,20 @@ impl Render for VaultForm {
                             .text_size(px(11.0))
                             .text_color(theme.muted_foreground)
                             .whitespace_normal()
-                            .child("The master password is never stored. If you forget it, saved passwords cannot be recovered."),
+                            .child(t!("vault-never-stored")),
                     )
             })
             .when_some(self.error.clone(), |d, e| {
                 d.child(div().text_color(theme.danger).child(e))
             })
             .when(self.busy, |d| {
-                d.child(
-                    div()
-                        .text_color(theme.muted_foreground)
-                        .child(if self.mode == Mode::Unlock {
-                            "Unlocking…"
-                        } else {
-                            "Encrypting…"
-                        }),
-                )
+                d.child(div().text_color(theme.muted_foreground).child(
+                    if self.mode == Mode::Unlock {
+                        t!("vault-unlocking")
+                    } else {
+                        t!("vault-encrypting")
+                    },
+                ))
             })
             .child(
                 div()
@@ -264,7 +263,7 @@ impl Render for VaultForm {
                     .text_color(theme.muted_foreground)
                     .overflow_hidden()
                     .text_ellipsis()
-                    .child(format!("Vault: {path} (shared with the hostwick command)")),
+                    .child(t!("vault-path", path = path)),
             )
     }
 }
@@ -280,9 +279,9 @@ fn open(
     let form = cx.new(|cx| VaultForm::new(backend, mode, reason, Box::new(done), window, cx));
     let first = std::rc::Rc::new(std::cell::Cell::new(true));
     let title = match mode {
-        Mode::Unlock => "Unlock saved passwords",
-        Mode::Create => "Create a password vault",
-        Mode::Change => "Change master password",
+        Mode::Unlock => t!("vault-title-unlock"),
+        Mode::Create => t!("vault-title-create"),
+        Mode::Change => t!("vault-title-change"),
     };
     let closed = form.read(cx).closed.clone();
     window.open_dialog(cx, move |dialog, window, cx| {
@@ -294,7 +293,7 @@ fn open(
         let (f1, f2, f3) = (form.clone(), form.clone(), form.clone());
         let c = closed.clone();
         dialog
-            .title(title)
+            .title(crate::a11y::text(title.clone()))
             .w(px(460.0))
             .child(form.clone())
             .on_ok(move |_, window, cx| {
@@ -318,9 +317,9 @@ fn open(
                     .child(
                         Button::new("vault-cancel")
                             .label(if mode == Mode::Unlock {
-                                "Not now"
+                                t!("vault-not-now")
                             } else {
-                                "Cancel"
+                                t!("button-cancel")
                             })
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                     )
@@ -329,9 +328,9 @@ fn open(
                             .primary()
                             .disabled(busy)
                             .label(match mode {
-                                Mode::Unlock => "Unlock",
-                                Mode::Create => "Create vault",
-                                Mode::Change => "Change",
+                                Mode::Unlock => t!("vault-unlock"),
+                                Mode::Create => t!("vault-create"),
+                                Mode::Change => t!("vault-change"),
                             })
                             .on_click(move |_, window, cx| {
                                 f2.update(cx, |f, cx| f.submit(window, cx))

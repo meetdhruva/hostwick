@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use gpui_kit::accesskit::Role;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
@@ -54,7 +55,8 @@ impl Pane {
         window: &mut Window,
         cx: &mut Context<FilesView>,
     ) -> (Self, Subscription) {
-        let path_input = cx.new(|cx| InputState::new(window, cx).placeholder("/path"));
+        let path_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(t!("files-path-placeholder")));
         let sub = cx.subscribe_in(
             &path_input,
             window,
@@ -194,21 +196,24 @@ impl FilesView {
             pane.path_input
                 .update(cx, |s, cx| s.set_value(cwd, window, cx));
         }
+        if active {
+            self.menu_anchor.clear();
+        }
         let pane = self.pane(side);
         let count = pane.entries.len();
         let (nsel, sel_bytes) = pane.selected_bytes();
         let title = match side {
-            Side::Local => "This computer".to_owned(),
+            Side::Local => t!("files-this-computer").to_string(),
             Side::Remote => format!("{} — {}", self.profile.name, pane.fs.protocol()),
         };
-        let header_cell = |key: SortKey, label: &'static str, w: Option<f32>, right: bool| {
+        let header_cell = |key: SortKey, label: SharedString, w: Option<f32>, right: bool| {
             let arrow = if pane.sort == key {
                 if pane.ascending { " ▲" } else { " ▼" }
             } else {
                 ""
             };
             div()
-                .id(SharedString::from(format!("{side:?}-h-{label}")))
+                .id(SharedString::from(format!("{side:?}-h-{key:?}")))
                 .when_some(w, |d, w| d.w(px(w)).flex_none())
                 .when(w.is_none(), |d| d.flex_1())
                 .when(right, |d| d.text_right())
@@ -227,12 +232,17 @@ impl FilesView {
                     cx.notify();
                 }))
         };
-        let status = if pane.loading {
-            "Loading…".to_owned()
+        let status: SharedString = if pane.loading {
+            t!("loading")
         } else if nsel > 0 {
-            format!("{nsel} of {count} selected ({})", human_size(sel_bytes))
+            t!(
+                "files-selected-of",
+                selected = nsel,
+                count = count,
+                size = human_size(sel_bytes)
+            )
         } else {
-            format!("{count} item(s)")
+            t!("files-item-count", count = count)
         };
 
         let list = uniform_list(
@@ -280,7 +290,7 @@ impl FilesView {
                             .flex_1()
                             .overflow_hidden()
                             .whitespace_nowrap()
-                            .child(title),
+                            .child(title.clone()),
                     )
                     .when(elevated, |d| {
                         d.child(
@@ -290,7 +300,8 @@ impl FilesView {
                                 .bg(theme.danger)
                                 .text_color(theme.danger_foreground)
                                 .child(format!(
-                                    "ROOT{}",
+                                    "{}{}",
+                                    t!("files-root-badge"),
                                     if self.profile.sudo.user.trim().is_empty() {
                                         String::new()
                                     } else {
@@ -315,7 +326,8 @@ impl FilesView {
                             .xsmall()
                             .ghost()
                             .icon(IconName::ArrowUp)
-                            .tooltip("Up (Backspace)")
+                            .tooltip(t!("files-up-tooltip"))
+                            .accessibility_label(t!("files-up-tooltip"))
                             .on_click(cx.listener(move |v, _, _, cx| v.up(side, cx))),
                     )
                     .child(
@@ -323,16 +335,24 @@ impl FilesView {
                             .xsmall()
                             .ghost()
                             .icon(IconName::RefreshCw)
-                            .tooltip("Refresh (Ctrl+R)")
+                            .tooltip(t!("files-refresh-tooltip"))
+                            .accessibility_label(t!("files-refresh-tooltip"))
                             .on_click(cx.listener(move |v, _, _, cx| v.refresh(side, cx))),
                     )
-                    .child(div().flex_1().child(Input::new(&pane.path_input).xsmall()))
+                    .child(
+                        div().flex_1().child(
+                            Input::new(&pane.path_input)
+                                .xsmall()
+                                .aria_label(t!("files-path-label", side = title.clone())),
+                        ),
+                    )
                     .child(
                         Button::new(SharedString::from(format!("{side:?}-mkdir")))
                             .xsmall()
                             .ghost()
                             .icon(IconName::Plus)
-                            .tooltip("New folder (F7)")
+                            .tooltip(t!("files-mkdir-tooltip"))
+                            .accessibility_label(t!("files-mkdir-tooltip"))
                             .on_click(cx.listener(move |v, _, w, cx| v.new_folder(side, w, cx))),
                     ),
             )
@@ -359,20 +379,44 @@ impl FilesView {
                     .border_b_1()
                     .border_color(theme.border)
                     .child(div().w(px(18.0)).flex_none())
-                    .child(header_cell(SortKey::Name, "Name", None, false))
-                    .child(header_cell(SortKey::Size, "Size", Some(76.0), true))
+                    .child(header_cell(
+                        SortKey::Name,
+                        t!("files-col-name"),
+                        None,
+                        false,
+                    ))
+                    .child(header_cell(
+                        SortKey::Size,
+                        t!("files-col-size"),
+                        Some(76.0),
+                        true,
+                    ))
                     .child(header_cell(
                         SortKey::Modified,
-                        "Modified",
+                        t!("files-col-modified"),
                         Some(124.0),
                         false,
                     ))
-                    .child(header_cell(SortKey::Permissions, "Mode", Some(80.0), false)),
+                    .child(header_cell(
+                        SortKey::Permissions,
+                        t!("files-col-mode"),
+                        Some(80.0),
+                        false,
+                    )),
             )
             // The list: focus target for keys, drop target for rows and OS files.
             .child(
                 div()
                     .id(SharedString::from(format!("{side:?}-list")))
+                    .role(Role::Grid)
+                    .aria_label(t!(
+                        "files-list-label",
+                        side = title.clone(),
+                        dir = pane.cwd.clone()
+                    ))
+                    .aria_description(t!("files-list-keys"))
+                    .aria_row_count(count)
+                    .aria_column_count(4)
                     .flex_1()
                     .flex()
                     .flex_col()
@@ -415,7 +459,7 @@ impl FilesView {
                     .text_color(theme.muted_foreground)
                     .border_t_1()
                     .border_color(theme.border)
-                    .child(status),
+                    .child(crate::a11y::text(status)),
             )
             .into_any_element()
     }
@@ -440,13 +484,30 @@ impl FilesView {
             side,
             name: e.name.clone(),
             label: if selected && pane.sel.names.len() > 1 {
-                format!("{} items", pane.sel.names.len())
+                t!("files-selected", count = pane.sel.names.len()).to_string()
             } else {
                 e.name.clone()
             },
         };
+        let kind_text = match e.kind {
+            EntryKind::Dir => t!("props-kind-folder"),
+            EntryKind::Symlink => t!("files-kind-link"),
+            EntryKind::Other => t!("props-kind-special"),
+            EntryKind::File => size.clone().into(),
+        };
+        let modified = e.modified.map(local_time).unwrap_or_default();
+        let spoken = format!("{}, {kind_text}, {modified}", e.name);
+        let cell = |id: &'static str, label: SharedString| {
+            div().id(id).role(Role::GridCell).aria_label(label)
+        };
         let row = div()
             .id(SharedString::from(format!("{side:?}-row-{ix}")))
+            .role(Role::Row)
+            .aria_label(spoken)
+            .aria_selected(selected)
+            .aria_row_index(ix + 1)
+            .when(pane.sel.cursor == Some(ix), |d| d.aria_active_descendant())
+            .when(is_cursor, |d| d.relative().child(self.menu_anchor.track()))
             .w_full()
             .flex()
             .items_center()
@@ -498,7 +559,7 @@ impl FilesView {
             })
             .child(div().w(px(18.0)).flex_none().child(icon))
             .child(
-                div()
+                cell("name", e.name.clone().into())
                     .flex_1()
                     .overflow_hidden()
                     .whitespace_nowrap()
@@ -506,7 +567,7 @@ impl FilesView {
                     .child(e.name.clone()),
             )
             .child(
-                div()
+                cell("size", kind_text)
                     .w(px(76.0))
                     .flex_none()
                     .text_right()
@@ -514,20 +575,21 @@ impl FilesView {
                     .child(size),
             )
             .child(
-                div()
+                cell("modified", modified.clone().into())
                     .w(px(124.0))
                     .flex_none()
                     .text_color(theme.muted_foreground)
-                    .child(e.modified.map(local_time).unwrap_or_default()),
+                    .child(modified),
             )
-            .child(
-                div()
+            .child({
+                let mode = e.permissions.map(mode_string).unwrap_or_default();
+                cell("mode", mode.clone().into())
                     .w(px(80.0))
                     .flex_none()
                     .text_color(theme.muted_foreground)
                     .font_family(crate::terminal::monospace_family())
-                    .child(e.permissions.map(mode_string).unwrap_or_default()),
-            );
+                    .child(mode)
+            });
         // Local rows can be dragged out to the OS file manager where the
         // platform supports it (macOS, Wayland).
         let row = if side == Side::Local {
@@ -588,74 +650,81 @@ impl FilesView {
             };
             let two_panes = view.upgrade().is_some_and(|v| v.read(cx).show_local);
             let other = match side {
-                Side::Local => "Upload",
-                Side::Remote if two_panes => "Download",
-                Side::Remote => "Download…",
+                Side::Local => t!("files-upload"),
+                Side::Remote if two_panes => t!("files-download"),
+                Side::Remote => t!("files-download-pick"),
             };
+            let key = |label: SharedString, keys: &str| format!("{label}  ({keys})");
             let mut menu = menu;
             if is_dir {
-                menu = menu.item(PopupMenuItem::new("Open").on_click(act(|v, s, _, cx| {
-                    if let Some(ix) = v.pane(s).sel.cursor {
-                        v.open_entry(s, ix, cx);
-                    }
-                })));
-            } else {
-                menu = menu
-                    .item(
-                        PopupMenuItem::new("Edit  (F4)")
-                            .on_click(act(|v, s, _, cx| v.edit_selection(s, cx))),
-                    )
-                    .item(PopupMenuItem::new("Open").on_click(act(|v, s, _, cx| {
+                menu = menu.item(PopupMenuItem::new(t!("files-menu-open")).on_click(act(
+                    |v, s, _, cx| {
                         if let Some(ix) = v.pane(s).sel.cursor {
                             v.open_entry(s, ix, cx);
                         }
-                    })));
+                    },
+                )));
+            } else {
+                menu = menu
+                    .item(
+                        PopupMenuItem::new(key(t!("files-menu-edit"), "F4"))
+                            .on_click(act(|v, s, _, cx| v.edit_selection(s, cx))),
+                    )
+                    .item(PopupMenuItem::new(t!("files-menu-open")).on_click(act(
+                        |v, s, _, cx| {
+                            if let Some(ix) = v.pane(s).sel.cursor {
+                                v.open_entry(s, ix, cx);
+                            }
+                        },
+                    )));
             }
             if side == Side::Remote || two_panes {
                 menu = menu
                     .item(
-                        PopupMenuItem::new(format!("{other}  (F5)"))
+                        PopupMenuItem::new(key(other, "F5"))
                             .on_click(act(|v, s, w, cx| v.copy_selection(s, false, w, cx))),
                     )
                     .when(two_panes, |m| {
                         m.item(
-                            PopupMenuItem::new("Move to other side  (F6)")
+                            PopupMenuItem::new(key(t!("files-menu-move"), "F6"))
                                 .on_click(act(|v, s, w, cx| v.copy_selection(s, true, w, cx))),
                         )
                     });
             }
             menu.separator()
                 .item(
-                    PopupMenuItem::new("Rename…  (F2)")
+                    PopupMenuItem::new(key(t!("files-menu-rename"), "F2"))
                         .on_click(act(|v, s, w, cx| v.rename_dialog(s, w, cx))),
                 )
                 .item(
-                    PopupMenuItem::new("Delete…  (Del)")
+                    PopupMenuItem::new(key(t!("menu-delete"), "Del"))
                         .on_click(act(|v, s, w, cx| v.confirm_delete(s, w, cx))),
                 )
                 .separator()
                 .item(
-                    PopupMenuItem::new("New folder…  (F7)")
+                    PopupMenuItem::new(key(t!("files-menu-new-folder"), "F7"))
                         .on_click(act(|v, s, w, cx| v.new_folder(s, w, cx))),
                 )
                 .item(
-                    PopupMenuItem::new("New symlink…")
+                    PopupMenuItem::new(t!("files-menu-new-symlink"))
                         .on_click(act(|v, s, w, cx| v.new_symlink(s, w, cx))),
                 )
-                .item(PopupMenuItem::new("Copy path").on_click(act(|v, s, _, cx| {
-                    let paths: Vec<String> =
-                        v.pane(s).targets().into_iter().map(|e| e.path).collect();
-                    if !paths.is_empty() {
-                        cx.write_to_clipboard(ClipboardItem::new_string(paths.join("\n")));
-                    }
-                })))
+                .item(PopupMenuItem::new(t!("files-menu-copy-path")).on_click(act(
+                    |v, s, _, cx| {
+                        let paths: Vec<String> =
+                            v.pane(s).targets().into_iter().map(|e| e.path).collect();
+                        if !paths.is_empty() {
+                            cx.write_to_clipboard(ClipboardItem::new_string(paths.join("\n")));
+                        }
+                    },
+                )))
                 .item(
-                    PopupMenuItem::new("Refresh  (Ctrl+R)")
+                    PopupMenuItem::new(key(t!("files-menu-refresh"), "Ctrl+R"))
                         .on_click(act(|v, s, _, cx| v.refresh(s, cx))),
                 )
                 .separator()
                 .item(
-                    PopupMenuItem::new("Properties  (Alt+Enter)")
+                    PopupMenuItem::new(key(t!("files-menu-properties"), "Alt+Enter"))
                         .on_click(act(|v, s, w, cx| v.properties(s, w, cx))),
                 )
         }

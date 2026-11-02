@@ -1,16 +1,52 @@
+use gpui_kit::SharedString;
+use hostwick_core::Protocol;
+
+/// `1.5 MiB` (`1,5 MiB` where the language writes a decimal comma; French
+/// says `Mio`).
 pub fn human_size(n: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let units = [
+        t!("size-b"),
+        t!("size-kib"),
+        t!("size-mib"),
+        t!("size-gib"),
+        t!("size-tib"),
+    ];
     let mut v = n as f64;
     let mut u = 0;
-    while v >= 1024.0 && u < UNITS.len() - 1 {
+    while v >= 1024.0 && u < units.len() - 1 {
         v /= 1024.0;
         u += 1;
     }
     if u == 0 {
-        format!("{n} B")
+        format!("{n} {}", units[0])
     } else {
-        format!("{v:.1} {}", UNITS[u])
+        let num = format!("{v:.1}");
+        format!("{} {}", localize_decimal(&num), units[u])
     }
+}
+
+/// `1.5` → `1,5` for languages that use a decimal comma.
+pub fn localize_decimal(num: &str) -> String {
+    if matches!(crate::i18n::current(), "de" | "es" | "fr" | "pt-BR") {
+        num.replace('.', ",")
+    } else {
+        num.to_owned()
+    }
+}
+
+/// The protocol's name in the UI language ("SSH", "Telnet", "Serial").
+pub fn protocol_name(p: &Protocol) -> SharedString {
+    match p {
+        Protocol::Ssh => t!("protocol-ssh"),
+        Protocol::Telnet => t!("protocol-telnet"),
+        Protocol::Serial(_) => t!("protocol-serial"),
+    }
+}
+
+/// A shortcut as written on this platform: `ctrl` on Windows/Linux, `mac`
+/// on macOS.
+pub fn keys(ctrl: &'static str, mac: &'static str) -> &'static str {
+    if cfg!(target_os = "macos") { mac } else { ctrl }
 }
 
 /// `rwxr-xr-x` from Unix permission bits (lower 9 bits).

@@ -4,8 +4,7 @@
 
 use std::time::{Duration, Instant};
 
-use gpui_kit::component::WindowExt as _;
-use gpui_kit::component::notification::Notification;
+use crate::notify::{Toast, ToastExt as _};
 use gpui_kit::*;
 use hostwick_core::SecretString;
 use hostwick_store::{SettingsSync, SyncError, SyncReport};
@@ -51,33 +50,39 @@ pub(crate) fn sync_due(s: &SyncState, now: Instant) -> bool {
 /// One line describing a finished sync.
 pub fn summarize(r: &SyncReport) -> String {
     let here = if r.local_unchanged() {
-        "no changes here".to_owned()
+        t!("sync-no-changes").to_string()
     } else {
         let mut parts = Vec::new();
         if !r.added.is_empty() {
-            parts.push(format!("{} added", r.added.len()));
+            parts.push(t!("sync-added", count = r.added.len()).to_string());
         }
         if !r.updated.is_empty() {
-            parts.push(format!("{} updated", r.updated.len()));
+            parts.push(t!("sync-updated", count = r.updated.len()).to_string());
         }
         if !r.deleted.is_empty() {
-            parts.push(format!("{} removed", r.deleted.len()));
+            parts.push(t!("sync-removed", count = r.deleted.len()).to_string());
         }
         if r.app_settings.is_some() {
-            parts.push("settings updated".into());
+            parts.push(t!("sync-settings-updated").to_string());
         }
         parts.join(", ")
     };
-    format!(
-        "{}: {} host(s) in sync; {here}{}",
-        r.mode,
-        r.profiles,
-        if r.uploaded {
-            "; sync file updated"
-        } else {
-            ""
-        }
-    )
+    let mode = match r.mode {
+        "push" => t!("sync-mode-push"),
+        "pull" => t!("sync-mode-pull"),
+        _ => t!("sync-mode-sync"),
+    };
+    let line = t!(
+        "sync-summary",
+        mode = mode,
+        count = r.profiles,
+        changes = here
+    );
+    if r.uploaded {
+        format!("{line}; {}", t!("sync-file-updated"))
+    } else {
+        line.into()
+    }
 }
 
 enum Outcome {
@@ -123,7 +128,7 @@ impl HostwickApp {
         let backend = self.backend.clone();
         let job = self.backend.rt.spawn(async move {
             backend
-                .ensure_vault("Unlock your saved passwords to sync settings (the sync passphrase is kept there).".into())
+                .ensure_vault(t!("vault-reason-sync-startup").into())
                 .await
         });
         cx.spawn_in(window, async move |this, cx| {
@@ -147,12 +152,7 @@ impl HostwickApp {
     ) {
         let Some(folder) = self.sync_folder() else {
             if interactive {
-                window.push_notification(
-                    Notification::warning(
-                        "Choose a sync folder in Settings → Settings sync first.",
-                    ),
-                    cx,
-                );
+                window.toast(Toast::warning(t!("sync-no-folder")), cx);
             }
             return;
         };
@@ -165,10 +165,7 @@ impl HostwickApp {
         let backend = self.backend.clone();
         let job = self.backend.rt.spawn(async move {
             if !backend.vault.is_unlocked()
-                && (!interactive
-                    || !backend
-                        .ensure_vault("Unlock your saved passwords to sync settings.".into())
-                        .await)
+                && (!interactive || !backend.ensure_vault(t!("vault-reason-sync").into()).await)
             {
                 return Outcome::Skipped;
             }
@@ -177,14 +174,15 @@ impl HostwickApp {
                 let Some(p) = pass.clone() else {
                     if !interactive {
                         return Outcome::Failed {
-                            message:
-                                "no sync passphrase saved — set it in Settings → Settings sync"
-                                    .into(),
+                            message: t!("sync-no-passphrase").into(),
                             busy: false,
                         };
                     }
                     pass = backend
-                        .ask_secret("Settings sync passphrase".into(), "Sync passphrase".into())
+                        .ask_secret(
+                            t!("sync-passphrase-title").into(),
+                            t!("sync-passphrase-label").into(),
+                        )
                         .await;
                     if pass.is_none() {
                         return Outcome::Skipped;
@@ -220,9 +218,8 @@ impl HostwickApp {
                     Ok(Err(SyncError::WrongPassphrase(_))) if interactive && attempt == 0 => {
                         pass = backend
                             .ask_secret(
-                                "Wrong sync passphrase — enter the one your other computers use"
-                                    .into(),
-                                "Sync passphrase".into(),
+                                t!("sync-passphrase-wrong-title").into(),
+                                t!("sync-passphrase-label").into(),
                             )
                             .await;
                         if pass.is_none() {
@@ -237,14 +234,14 @@ impl HostwickApp {
                     }
                     Err(e) => {
                         return Outcome::Failed {
-                            message: format!("internal error: {e}"),
+                            message: t!("error-internal", error = e.to_string()).into(),
                             busy: false,
                         };
                     }
                 }
             }
             Outcome::Failed {
-                message: "wrong sync passphrase".into(),
+                message: t!("sync-wrong-passphrase").into(),
                 busy: false,
             }
         });
@@ -263,28 +260,26 @@ impl HostwickApp {
                             .store
                             .set_setting(LAST_KEY, &format!("{stamp} — {text}"));
                         app.apply_sync_report(&report, cx);
+                        app.apply_language(window, cx);
                         if interactive || !report.local_unchanged() {
-                            window.push_notification(
-                                Notification::success(format!("Settings sync — {text}")),
-                                cx,
-                            );
+                            window.toast(Toast::success(t!("sync-done", summary = text)), cx);
                         }
                     }
                     Ok(Outcome::Skipped) => {}
                     Ok(Outcome::Failed { message, busy }) => {
                         tracing::warn!("settings sync failed: {message}");
-                        let _ = app
-                            .backend
-                            .store
-                            .set_setting(LAST_KEY, &format!("{stamp} — failed: {message}"));
+                        let _ = app.backend.store.set_setting(
+                            LAST_KEY,
+                            &format!(
+                                "{stamp} — {}",
+                                t!("sync-last-failed", error = message.clone())
+                            ),
+                        );
                         if busy {
                             app.sync.retry_at = Some(Instant::now() + BUSY_RETRY);
                         }
                         if interactive || !busy {
-                            window.push_notification(
-                                Notification::error(format!("Settings sync failed: {message}")),
-                                cx,
-                            );
+                            window.toast(Toast::error(t!("sync-failed", error = message)), cx);
                         }
                     }
                     Err(e) => tracing::warn!("settings sync task: {e}"),
@@ -308,6 +303,9 @@ impl HostwickApp {
                 }
                 if new.log_level != current.log_level {
                     crate::logging::set_level(&new.log_level);
+                }
+                if new.language != current.language {
+                    crate::i18n::set_language(&new.language);
                 }
                 cx.set_global(new);
                 self.apply_settings_to_views(cx);
