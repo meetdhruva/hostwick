@@ -237,15 +237,16 @@ scrollback (a `── reconnected 12:01:02 ──` line marks the spot) and runn
 the login script again. It stops at a login or host-key failure.
 Settings → Connections turns it off.
 
-**Restore tabs.** Open tabs (with their split layout) come back at the next
-start; each connects when you first switch to it, so starting Hostwick is not
+**Restore tabs.** Open tabs (with their split layout and pane sizes, and a
+file browser still following its terminal) come back at the next start; each connects when you first switch to it, so starting Hostwick is not
 a storm of password prompts. Quick-connect tabs are restored from their
 `user@host:port`.
 
 **Split panes** (MobaXterm/Tabby style): Ctrl+Shift+D splits the current
 terminal to the right, Ctrl+Shift+E downwards (⌘D / ⌘⇧D on macOS), also from
-the terminal and tab menus. Splits nest; drag the dividers; click a pane (or
-Alt+arrow) to focus it; Ctrl+Shift+W closes the focused pane, then the tab.
+the terminal and tab menus. Splits nest; drag the dividers (or
+Alt+Shift+arrow; sizes are remembered, no pane gets smaller than 120 px);
+click a pane (or Alt+arrow) to focus it; Ctrl+Shift+W closes the focused pane, then the tab.
 A new pane opens the same host over the same SSH connection. Broadcast input
 reaches every pane.
 
@@ -375,7 +376,9 @@ port picker, speed, data bits, parity, stop bits, flow control; notes),
 *Authentication* (key files with Browse…, `-cert.pub` certificates picked up
 automatically, agent, password with its saved state and *Forget*,
 keyboard-interactive, Kerberos single sign-on with ticket forwarding),
-*Connection* (SOCKS5/SOCKS4/HTTP proxy, jump hosts, port forwards
+*Connection* (SOCKS5/SOCKS4/HTTP proxy with *Test connection*, which
+connects through it to the host — or the first jump host — and shows the
+server's greeting or the exact error; jump hosts, port forwards
 `L8080:localhost:80 R9000:localhost:3000 D1080`, keepalive, agent forwarding,
 X11 forwarding and display), *Terminal* (terminal type, login script checked
 as you type, shell integration, the host's snippets, session log), *Files*
@@ -383,8 +386,8 @@ as you type, shell integration, the host's snippets, session log), *Files*
 *Advanced* (legacy algorithms). Problems are shown next to the field, and
 Save jumps to the section that needs attention.
 
-**Settings** (gear icon, `Ctrl+,` / `⌘,`), in sections: *Appearance* (theme,
-terminal font and size), *Terminal* (scrollback, right-click, copy-on-select,
+**Settings** (gear icon, `Ctrl+,` / `⌘,`), in sections: *Appearance* (language,
+theme, terminal font and size), *Terminal* (scrollback, right-click, copy-on-select,
 mouse reporting, button bar, keyword-highlighting rules with regex toggle,
 colour swatch and a live preview), *Snippets* (global), *Connections*
 (auto-reconnect, restore tabs), *Files* (external editor with Browse…),
@@ -427,9 +430,82 @@ always go to the shell):
 | Shift+click / drag | Select text even when a program has the mouse |
 | Ctrl+Break | Send break (telnet, serial) |
 | Enter on an ended session | Reconnect (or reconnect now while waiting) |
+| Alt+Shift+←→↑↓ | Resize the focused split pane |
+| Ctrl+F6 / Ctrl+Shift+F6 | Move focus: host list → tabs → session (and back) |
+| Shift+F10 or the Menu key | Context menu of the focused host, tab, file or terminal |
+| Ctrl+Shift+O (⌘⇧O) | Read the terminal's latest output again (screen readers) |
+| Ctrl+Shift+A (⌘⇧A) | Terminal output as plain text, to read line by line |
 
 When a connection fails, the error lists every authentication method tried and
 why it failed (for example `key work.ppk: wrong passphrase; password: rejected`).
+
+### Accessibility and languages
+
+**Keyboard.** Everything works without a mouse. Tab and Shift+Tab move
+through the sidebar, the tab bar and the open tab; inside a terminal Tab
+belongs to the shell, so Ctrl+F6 / Ctrl+Shift+F6 moves between the host
+list, the tab bar and the session. In the host list the arrows, Home/End and
+PageUp/PageDown choose a host, Enter opens a terminal, Shift+Enter files, F2
+edits, Delete deletes (after a confirmation). In the tab bar Left/Right
+switch tabs, Enter or Down goes into the tab, Delete closes it. Shift+F10 or
+the Menu key opens the context menu of whatever has focus (host, tab, file
+row, terminal). File lists add Space to toggle a row. Dialogs: Escape
+closes, also while a text field has focus; Enter confirms (Save in the host
+editor and settings). The focused element has a visible ring.
+
+**Screen readers.** Hostwick's toolkit (GPUI) talks to the platform
+accessibility API through AccessKit: UI Automation on Windows (Narrator,
+NVDA, JAWS), NSAccessibility on macOS (VoiceOver), AT-SPI on Linux (Orca).
+Every control has a name and a role: icon buttons say what they do; saved
+hosts are a list whose items read like "prod/web01, SSH, deploy@10.0.0.5"
+and report selection; tabs are a tab list ("web01, connected, tab 2 of 3");
+file panes are a grid of rows; section switchers in the editors are toggle
+buttons; checkboxes, toggles, hints, errors and dialog titles are exposed;
+notifications are alerts. A terminal is announced as "Terminal: <title>";
+new output is read once it settles (a live region; full-screen programs
+are not read), Ctrl+Shift+O reads the latest output again and Ctrl+Shift+A
+opens the scrollback as plain text for reading by line, word and character.
+
+What has actually been checked, per platform:
+
+- *Linux*: the accessibility tree was inspected through AT-SPI (the
+  interface Orca uses) under X11: names, roles, selection and toggle
+  states, dialog contents, context menus opened with Shift+F10, and the
+  terminal's output announcements. Orca itself has not been run against
+  Hostwick yet.
+- *Windows and macOS*: the same AccessKit tree is handed to UI Automation
+  and NSAccessibility, but no screen reader has been tried there yet.
+- Known gaps: dialogs have no accessible name of their own (the toolkit
+  does not offer one) — the title is the dialog's first text; the terminal
+  is not exposed as an editable text with a caret (use Ctrl+Shift+A for
+  that); a few strings of the widget toolkit (text-field context menu,
+  "Show password") stay in English except in Portuguese and Chinese.
+
+**Text size and contrast.** Display scaling is followed on every platform;
+GNOME's "Large text" applies on X11 (it changes the X DPI), not on
+Wayland, and Windows' separate "Make text bigger" setting is not read.
+Muted text meets WCAG AA (4.5:1) in both themes.
+
+**Languages.** English, Deutsch, Español, Français, Português (Brasil),
+हिन्दी, 简体中文 and 日本語. Hostwick follows the system language at first;
+Settings → Appearance → Language picks another, applied as soon as you
+save (dialogs that are already open switch when reopened). Product and
+protocol names (SSH, SFTP, sudo, Kerberos, PuTTY…) are kept as they are,
+and messages from servers and the SSH layer (for example authentication
+errors) are shown as received, in English. Hindi and the CJK languages need
+fonts with those scripts: Windows and macOS have them; on Linux install
+Noto (`fonts-noto-core` and `fonts-noto-cjk` on Debian/Ubuntu,
+`google-noto-sans-devanagari-fonts google-noto-sans-cjk-fonts` on
+Fedora). Which Chinese or Japanese glyph shapes the fallback font uses
+follows the system locale on Linux.
+
+The texts live in `apps/desktop/locales/<language>.ftl` ([Fluent](https://projectfluent.org/)
+files, with plurals and named placeholders); the code asks for them with
+`t!("key")` or `t!("key", name = value)`. Tests check that every language has
+every message with the same placeholders and none empty, that every key
+used in the code exists, and that every message in `en.ftl` is used. To add
+a language, copy `en.ftl`, translate it, and add one line to `LANGUAGES` in
+`apps/desktop/src/i18n.rs`.
 
 ### Install
 
@@ -511,7 +587,14 @@ connection sharing, and a pipelined 24 MiB SFTP round trip.
   broadcast, the file browser following `cd`, every host-editor and settings
   section in both themes, key generation (the key logs in with OpenSSH) and
   *Use in host*, known-hosts removal, and settings sync between two
-  `HOSTWICK_HOME`s (hosts and theme).
+  `HOSTWICK_HOME`s (hosts and theme). Accessibility and languages: every
+  language on the main window, host editor, settings and a context menu,
+  German and Hindi on every dialog, both themes; keyboard-only use (host
+  list, tab bar, Ctrl+F6, Shift+F10 menus, Escape with a focused field);
+  dragging split dividers and their sizes plus a following file browser
+  coming back after a restart; the proxy test through a local SOCKS5
+  proxy and against a closed port; the AT-SPI tree and terminal
+  announcements (see *Accessibility and languages*).
 - Windows and macOS: not run yet. The code paths are cross-platform and CI
   builds and tests all three OSes; the Windows-only pieces (Pageant/OpenSSH
   agent pipe, registry importers, console VT mode in the CLI) need a first run
@@ -525,8 +608,8 @@ connection sharing, and a pipelined 24 MiB SFTP round trip.
   only hand over files that already exist on disk; local rows work on macOS
   and Wayland).
 
-- Split-pane sizes are not restored (layouts come back evenly split); a
-  restored file browser no longer follows its terminal.
+- Screen readers: no run yet with NVDA/Narrator, VoiceOver or Orca; the
+  terminal has no caret-navigable text (use the plain-text view).
 - OSC 52 clipboard.
 - FTP/S3 adapters behind `RemoteFs`.
 - Native file pickers (upload/download in the desktop app) were not exercised

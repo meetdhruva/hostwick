@@ -2,7 +2,21 @@
 
 ## Unreleased
 
+**Accessibility**
+- Screen-reader names and roles throughout the desktop app (AccessKit → UI Automation, NSAccessibility, AT-SPI): icon buttons, the saved-host list ("prod/web01, SSH, deploy@10.0.0.5", selection), tabs as a tab list ("web01, connected, tab 2 of 3"), file panes as grids of rows, editor sections as toggle buttons, labelled fields, checkboxes and choice buttons with their state, hints, inline errors, dialog titles and bodies, split dividers (with increment/decrement), notifications as alerts.
+- Terminal: "Terminal: <title>"; new output is announced when it settles (not for full-screen programs, and without the echo of what you typed or the shell-integration setup line); Ctrl+Shift+O (⌘⇧O) reads the latest output again; Ctrl+Shift+A (⌘⇧A) shows the scrollback as plain text for reading by line. Both are also in the terminal menu.
+- Keyboard: arrow keys, Home/End, PageUp/PageDown in the host list (Enter terminal, Shift+Enter files, F2 edit, Delete with confirmation); Left/Right/Enter/Delete in the tab bar; Ctrl+F6 / Ctrl+Shift+F6 between host list, tab bar and session; Shift+F10 or the Menu key opens the context menu of the focused host, tab, file or terminal; Space toggles a file row; focus rings on the host list, tabs and editor sections.
+- Escape closes every dialog even after the focused field disappeared (switching sections in the host editor used to lose focus); Enter saves the host editor and settings.
+- Muted text in the light theme darkened to #595959 (at least 5.5:1 on every panel; it was 3.8:1 on buttons). Checkbox labels no longer clip the tails of g, p, y.
+
+**Languages**
+- The desktop app in English, German, Spanish, French, Brazilian Portuguese, Hindi, Simplified Chinese and Japanese: follows the system language (`sys-locale`), or Settings → Appearance → Language (native names); applied on save without a restart. Fluent files in `apps/desktop/locales/` with plurals and named placeholders; sizes and decimal commas follow the language. Tests check every language is complete and consistent and that every key used in the code exists.
+
 **Desktop app**
+- Split panes: drag a divider (or Alt+Shift+arrow) to resize, with a 120 px minimum; sizes are saved with the tabs and restored.
+- A restored file browser follows its terminal again (and opens in the folder it was showing).
+- Notifications are Hostwick's own toasts, drawn above dialogs, auto-dismissed (longer for warnings and errors), with a close button.
+- Host editor → Connection → *Test connection* for SOCKS/HTTP proxies: connects through the proxy to the host (or first jump host) off the UI thread and shows the server greeting or the exact error.
 - Saved passwords: password, key-passphrase, sudo and proxy prompts offer *Remember*; the first save creates a vault (master password with a strength hint), later sessions unlock it once and log in automatically. Uses the CLI's vault file; secrets are stored only after the server accepted them; key passphrases are saved per key file. A saved password that stopped working is asked for again with *Update the saved password* — no loops. Settings → Saved passwords: lock now, auto-lock after idle minutes, change the master password, remove entries.
 - Auto-reconnect when an SSH or telnet connection drops (never after `exit`, a login failure or a host-key problem): 1, 2, 5, 10, then every 30 s, with a *Reconnecting in 5 s… [Now] [Cancel]* banner; the scrollback stays (a marker line shows the reconnect) and the login script runs again. Manual reconnect keeps the scrollback too.
 - Restore tabs at startup, split layout included; restored tabs connect when first shown.
