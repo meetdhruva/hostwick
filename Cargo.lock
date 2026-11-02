@@ -3475,7 +3475,7 @@ dependencies = [
 
 [[package]]
 name = "hostwick-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3504,7 +3504,7 @@ dependencies = [
 
 [[package]]
 name = "hostwick-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "secrecy",
  "serde",
@@ -3515,7 +3515,7 @@ dependencies = [
 
 [[package]]
 name = "hostwick-desktop"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -3552,7 +3552,7 @@ dependencies = [
 
 [[package]]
 name = "hostwick-import"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "hostwick-core",
  "pretty_assertions",
@@ -3565,7 +3565,7 @@ dependencies = [
 
 [[package]]
 name = "hostwick-keys"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "argon2 0.5.3",
  "base64",
@@ -3583,7 +3583,7 @@ dependencies = [
 
 [[package]]
 name = "hostwick-sftp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3609,7 +3609,7 @@ dependencies = [
 
 [[package]]
 name = "hostwick-ssh"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3639,7 +3639,7 @@ dependencies = [
 
 [[package]]
 name = "hostwick-store"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "dirs 6.0.0",
  "hostwick-core",
@@ -3656,7 +3656,7 @@ dependencies = [
 
 [[package]]
 name = "hostwick-term"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3671,7 +3671,7 @@ dependencies = [
 
 [[package]]
 name = "hostwick-transfer"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3691,7 +3691,7 @@ dependencies = [
 
 [[package]]
 name = "hostwick-vault"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "argon2 0.5.3",
  "base64",

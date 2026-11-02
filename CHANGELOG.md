@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
 **Security and reliability**
 - Jump hosts never receive the destination's saved password or a delegated Kerberos ticket: each hop uses the agent, key files and keyboard-interactive, and asks for its own password (named after the jump host).
