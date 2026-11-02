@@ -16,6 +16,7 @@ pub async fn run(app: &App, a: SshArgs) -> Result<i32> {
         .forwards
         .extend(parse_forwards(&a.local, &a.remote, &a.dynamic)?);
     profile.agent_forwarding |= a.agent;
+    profile.x11_forwarding |= a.x11;
     let conn = app.connect(&profile).await?;
 
     let mut forwards = Vec::new();

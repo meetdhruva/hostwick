@@ -75,6 +75,14 @@ pub struct ConnOpts {
     /// Allow legacy algorithms (ssh-rsa/SHA-1, old DH) for old devices.
     #[arg(long)]
     legacy: bool,
+    /// Reach the (first) host through a proxy: `socks5://[user@]host:port`,
+    /// `socks4://host:port` or `http://[user@]host:port`; `none` disables a
+    /// saved one. The proxy password comes from the vault or a prompt.
+    #[arg(long, value_name = "URL")]
+    proxy: Option<String>,
+    /// Kerberos (GSSAPI) login, forwarding the ticket to the server (like `ssh -K`).
+    #[arg(short = 'K', long = "gssapi")]
+    gssapi: bool,
 }
 
 #[derive(Args)]
@@ -99,6 +107,10 @@ struct SshArgs {
     /// Forward the local SSH agent.
     #[arg(short = 'A')]
     agent: bool,
+    /// Forward X11 so remote GUI programs show here (uses $DISPLAY, or the
+    /// host's saved display; on Windows `localhost:0` for VcXsrv/Xming).
+    #[arg(short = 'X')]
+    x11: bool,
     /// Host or saved profile name: `[user@]host[:port]`.
     target: String,
     /// Command to run instead of a shell.

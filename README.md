@@ -199,7 +199,11 @@ why it failed (for example `key work.ppk: wrong passphrase; password: rejected`)
   profile opts in for old network gear.
 - Secrets are `SecretString`s, zeroized on drop, never logged. The vault file
   authenticates its KDF parameters, writes atomically, and is `0600` on Unix.
-- Agent forwarding is off by default.
+- Agent and X11 forwarding are off by default and only ever go to the
+  destination host, never to jump hosts. Agent or X11 channels a server opens
+  without being asked are refused. X11 forwarding works like OpenSSH's
+  untrusted `ssh -X`: the server only sees a random fake cookie, which is
+  checked and swapped for the real one locally.
 - `russh` ≥ 0.62.5 is required (CVE-2026-73429 and a second fix); this tree
   uses 0.65. Run `cargo deny check` in CI.
 
@@ -215,6 +219,8 @@ next to the executable and everything lives in `./data` beside it.
 ```sh
 cargo test --workspace     # unit + integration tests
 scripts/e2e.sh             # starts sshd on 127.0.0.1:2222, runs the e2e suite
+scripts/e2e-net.sh         # sshd on :2223 (+ KDC, Xvfb, agent, tinyproxy, dante):
+                           # proxies, X11/agent forwarding, certificates, FIDO, Kerberos
 ```
 
 The e2e suite covers password/key/encrypted-key auth, host-key TOFU and
@@ -239,8 +245,6 @@ connection sharing, and a pipelined 24 MiB SFTP round trip.
 - Two-way sync (WinSCP "Both") and remote-side change detection finer than
   one second (SFTP reports whole seconds).
 
-- Agent forwarding (forwarded-agent channels are not served yet, so the host
-  editor does not offer it).
 - The desktop app does not yet unlock the vault (the CLI does); it prompts.
 - Terminal mouse reporting (for `htop`/`mc` mouse clicks) and OSC 52 clipboard.
 - Legacy SCP (servers without SFTP), FTP/S3 adapters behind `RemoteFs`.

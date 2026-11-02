@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use hostwick_core::{
-    AuthMethod, Endpoint, ForwardSpec, HostProfile, ProfileStore, SecretString, Target,
+    AuthMethod, Endpoint, ForwardSpec, HostProfile, ProfileStore, ProxySpec, SecretString, Target,
 };
 use hostwick_ssh::{ConnectContext, Connection, Credentials, KnownHosts};
 use hostwick_store::{AppPaths, SqliteStore};
@@ -78,6 +78,12 @@ impl App {
             p.jump = parse_jump(j)?;
         }
         p.allow_legacy_algorithms |= o.legacy;
+        if let Some(url) = &o.proxy {
+            p.proxy = apply_proxy(p.proxy.take(), url)?;
+        }
+        if o.gssapi {
+            enable_gssapi(&mut p.auth);
+        }
         Ok(p)
     }
 
@@ -112,6 +118,11 @@ impl App {
                 } => passphrase_credential.as_deref(),
                 _ => None,
             })
+            .chain(
+                p.proxy
+                    .as_ref()
+                    .and_then(|x| x.password_credential.as_deref()),
+            )
             .collect();
         if ids.is_empty() || !self.paths.vault.exists() {
             return Ok(VaultCredentials(HashMap::new()));
@@ -159,6 +170,35 @@ fn dirs_home() -> Option<std::path::PathBuf> {
         .map(Into::into)
 }
 
+/// `--proxy URL` over a profile's proxy. Keeps the saved vault entry for
+/// the password when the URL names the same proxy and user.
+fn apply_proxy(saved: Option<ProxySpec>, url: &str) -> Result<Option<ProxySpec>> {
+    if url.eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
+    let mut spec = ProxySpec::parse_url(url).map_err(anyhow::Error::msg)?;
+    if let Some(old) = saved
+        && old.host == spec.host
+        && old.port == spec.port
+        && old.user == spec.user
+    {
+        spec.password_credential = old.password_credential;
+    }
+    Ok(Some(spec))
+}
+
+/// `-K`: Kerberos first, with ticket forwarding (OpenSSH tries
+/// gssapi-with-mic first too).
+fn enable_gssapi(auth: &mut Vec<AuthMethod>) {
+    match auth
+        .iter_mut()
+        .find(|a| matches!(a, AuthMethod::Gssapi { .. }))
+    {
+        Some(AuthMethod::Gssapi { delegate }) => *delegate = true,
+        _ => auth.insert(0, AuthMethod::Gssapi { delegate: true }),
+    }
+}
+
 pub fn parse_jump(s: &str) -> Result<Vec<Endpoint>> {
     s.split(',')
         .filter(|h| !h.trim().is_empty())
@@ -200,6 +240,32 @@ mod tests {
             ("bastion", 2222, Some("ops"))
         );
         assert_eq!((j[1].host.as_str(), j[1].port), ("inner", 22));
+        Ok(())
+    }
+
+    #[test]
+    fn proxy_flag_and_gssapi() -> Result<()> {
+        let saved = ProxySpec {
+            password_credential: Some("vault-id".into()),
+            ..ProxySpec::parse_url("socks5://me@p:1080").map_err(anyhow::Error::msg)?
+        };
+        let same = apply_proxy(Some(saved.clone()), "socks5://me@p:1080")?;
+        assert_eq!(
+            same.and_then(|s| s.password_credential).as_deref(),
+            Some("vault-id")
+        );
+        let other = apply_proxy(Some(saved.clone()), "http://p:3128")?;
+        assert!(other.is_some_and(|s| s.password_credential.is_none()));
+        assert!(apply_proxy(Some(saved), "none")?.is_none());
+        assert!(apply_proxy(None, "gopher://x").is_err());
+
+        let mut auth = vec![AuthMethod::Agent];
+        enable_gssapi(&mut auth);
+        assert_eq!(auth[0], AuthMethod::Gssapi { delegate: true });
+        let mut auth = vec![AuthMethod::Agent, AuthMethod::Gssapi { delegate: false }];
+        enable_gssapi(&mut auth);
+        assert_eq!(auth.len(), 2);
+        assert_eq!(auth[1], AuthMethod::Gssapi { delegate: true });
         Ok(())
     }
 }

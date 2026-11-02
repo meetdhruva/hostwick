@@ -29,6 +29,15 @@ pub enum HostsCmd {
         /// Use the vault credential with this id as the password.
         #[arg(long)]
         password_credential: Option<String>,
+        /// Vault credential id with the `--proxy` password.
+        #[arg(long)]
+        proxy_credential: Option<String>,
+        /// Forward the SSH agent (`-A`).
+        #[arg(short = 'A')]
+        agent: bool,
+        /// Forward X11 (`-X`).
+        #[arg(short = 'X')]
+        x11: bool,
         #[arg(short = 'L')]
         local: Vec<String>,
         #[arg(short = 'R')]
@@ -115,6 +124,20 @@ pub fn run_hosts(app: &App, cmd: HostsCmd) -> Result<i32> {
             for f in &p.forwards {
                 println!("forward:   {f}");
             }
+            if let Some(proxy) = &p.proxy {
+                println!("proxy:     {}", proxy.to_url());
+            }
+            if p.x11_forwarding || p.agent_forwarding {
+                println!(
+                    "forwarding: X11 {}{}  agent {}",
+                    if p.x11_forwarding { "on" } else { "off" },
+                    p.x11_display
+                        .as_deref()
+                        .map(|d| format!(" ({d})"))
+                        .unwrap_or_default(),
+                    if p.agent_forwarding { "on" } else { "off" }
+                );
+            }
             println!(
                 "keepalive: {}s   legacy algorithms: {}",
                 p.keepalive_secs, p.allow_legacy_algorithms
@@ -126,6 +149,9 @@ pub fn run_hosts(app: &App, cmd: HostsCmd) -> Result<i32> {
             conn,
             folder,
             password_credential,
+            proxy_credential,
+            agent,
+            x11,
             local,
             remote,
             dynamic,
@@ -138,6 +164,14 @@ pub fn run_hosts(app: &App, cmd: HostsCmd) -> Result<i32> {
             p.name = name;
             p.folder = folder;
             p.forwards = parse_forwards(&local, &remote, &dynamic)?;
+            p.agent_forwarding |= agent;
+            p.x11_forwarding |= x11;
+            if let Some(cred) = proxy_credential {
+                match p.proxy.as_mut() {
+                    Some(proxy) => proxy.password_credential = Some(cred),
+                    None => bail!("--proxy-credential needs --proxy"),
+                }
+            }
             if let Some(cred) = password_credential {
                 for a in &mut p.auth {
                     if let AuthMethod::Password { credential } = a {
