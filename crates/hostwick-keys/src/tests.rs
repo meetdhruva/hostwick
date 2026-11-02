@@ -379,7 +379,8 @@ fn we_read_puttygen_and_ssh_keygen_files() {
         let out = run(Command::new("ssh-keygen")
             .arg("-lvf")
             .arg(public_path(&path)));
-        let text = String::from_utf8_lossy(&out.stdout);
+        // Windows OpenSSH prints CRLF line endings.
+        let text = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
         assert!(text.contains(&fingerprint(k.public_key())));
         assert!(text.contains(&randomart(k.public_key())), "{text}");
 
