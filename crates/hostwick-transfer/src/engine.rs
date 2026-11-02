@@ -243,7 +243,9 @@ impl TransferEngine {
         let mut made = std::collections::HashSet::new();
         let mut ids = Vec::with_capacity(files.len());
         for f in files {
-            let dst_path = hostwick_sftp::join(dst_dir, &f.rel_path);
+            // Defence in depth: listings already drop unsafe names, but a
+            // path built from them must never leave `dst_dir`.
+            let dst_path = hostwick_sftp::join_checked(dst_dir, &f.rel_path)?;
             let parent = hostwick_sftp::parent(&dst_path);
             if made.insert(parent.clone()) {
                 dst.mkdir_all(&parent).await?;

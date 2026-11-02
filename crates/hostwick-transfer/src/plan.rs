@@ -9,12 +9,23 @@
 //! Two-way ("Both") follows WinSCP: the newer file wins in each direction and
 //! nothing is ever deleted. When the timestamps are equal within the
 //! filesystem granularity but the sizes differ, the plan cannot know which
-//! side is right and reports a conflict instead of guessing.
+//! side is right and reports a conflict instead of guessing. Names that
+//! differ only in letter case (`Readme` / `README`) are also a conflict in
+//! two-way mode: on Windows and macOS they are the same file, and copying
+//! one would overwrite the other.
+//!
+//! Safety rules: a one-way plan refuses to run when its source folder does
+//! not exist (a typo would otherwise plan to delete everything at the
+//! destination); entries whose names are unsafe as local path components are
+//! left out and listed in [`SyncPlan::skipped`]; every path is joined with
+//! [`join_checked`]; and deletions run before copies, so a file that is
+//! deleted under one spelling and copied under another (case-only renames)
+//! ends up present.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use hostwick_sftp::{EntryKind, RemoteFs, join, parent};
+use hostwick_sftp::{EntryKind, RemoteFs, join_checked, parent};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
@@ -90,6 +101,9 @@ pub enum Reason {
     DestinationNewer,
     /// Folder missing on the other side (created, possibly empty).
     NewFolder,
+    /// Two-way: another file's name differs from this one only in letter
+    /// case; on a case-insensitive disk one would overwrite the other.
+    CaseConflict,
 }
 
 impl Reason {
@@ -104,6 +118,7 @@ impl Reason {
             Self::Unknown => "cannot compare (no timestamp)",
             Self::DestinationNewer => "destination is newer",
             Self::NewFolder => "new folder",
+            Self::CaseConflict => "another file differs only in letter case",
         }
     }
 }
@@ -176,6 +191,10 @@ pub struct SyncPlan {
     pub remote_root: String,
     pub options: PlanOptions,
     pub items: Vec<PlanItem>,
+    /// Entries left out because their names are unsafe as path components
+    /// (`side: path (reason)`); nothing is done with them.
+    #[serde(default)]
+    pub skipped: Vec<String>,
 }
 
 /// Counts for a summary line.
@@ -229,6 +248,8 @@ pub struct Tree {
     pub files: Vec<FileInfo>,
     /// Relative paths of every directory below the root.
     pub dirs: Vec<String>,
+    /// Relative paths left out because of unsafe names, with the reason.
+    pub skipped: Vec<(String, &'static str)>,
 }
 
 /// Files (regular, without our `.filepart`s) and directories under `root`.
@@ -250,9 +271,18 @@ pub async fn walk_tree(fs: &dyn RemoteFs, root: &str) -> Result<Tree, TransferEr
         let abs = if rel_dir.is_empty() {
             root.to_owned()
         } else {
-            join(root, &rel_dir)
+            join_checked(root, &rel_dir)?
         };
-        for e in fs.list_dir(&abs).await? {
+        let listing = fs.list_dir_checked(&abs).await?;
+        for (name, reason) in listing.skipped {
+            let rel = if rel_dir.is_empty() {
+                name
+            } else {
+                format!("{rel_dir}/{name}")
+            };
+            tree.skipped.push((rel, reason));
+        }
+        for e in listing.entries {
             let rel = if rel_dir.is_empty() {
                 e.name.clone()
             } else {
@@ -280,7 +310,10 @@ pub async fn walk_tree(fs: &dyn RemoteFs, root: &str) -> Result<Tree, TransferEr
     Ok(tree)
 }
 
-/// List both sides and plan.
+/// List both sides and plan. A one-way plan fails with
+/// [`TransferError::SourceMissing`] when its source folder does not exist;
+/// a missing destination (or either side of a two-way plan) is simply empty
+/// and gets created.
 pub async fn build_plan(
     local: &dyn RemoteFs,
     local_root: &str,
@@ -288,13 +321,34 @@ pub async fn build_plan(
     remote_root: &str,
     options: PlanOptions,
 ) -> Result<SyncPlan, TransferError> {
+    let source = match options.direction {
+        SyncDirection::LocalToRemote => Some((local, local_root)),
+        SyncDirection::RemoteToLocal => Some((remote, remote_root)),
+        SyncDirection::Both => None,
+    };
+    if let Some((fs, root)) = source
+        && fs.stat(root).await?.is_none()
+    {
+        return Err(TransferError::SourceMissing(root.to_owned()));
+    }
     let (l, r) = tokio::try_join!(walk_tree(local, local_root), walk_tree(remote, remote_root))?;
     let items = plan_trees(&l, &r, &options);
+    let skipped = l
+        .skipped
+        .iter()
+        .map(|(p, why)| format!("local: {p} ({why})"))
+        .chain(
+            r.skipped
+                .iter()
+                .map(|(p, why)| format!("remote: {p} ({why})")),
+        )
+        .collect();
     Ok(SyncPlan {
         local_root: local_root.to_owned(),
         remote_root: remote_root.to_owned(),
         options,
         items,
+        skipped,
     })
 }
 
@@ -312,6 +366,7 @@ fn filter(tree: &Tree, excludes: &[String]) -> Tree {
             .filter(|d| !is_excluded(d, excludes))
             .cloned()
             .collect(),
+        skipped: Vec::new(),
     }
 }
 
@@ -330,6 +385,14 @@ pub fn plan_trees(local: &Tree, remote: &Tree, o: &PlanOptions) -> Vec<PlanItem>
         .collect();
     let paths: BTreeSet<&str> = l.keys().chain(r.keys()).copied().collect();
     let mirror = o.delete && o.direction != SyncDirection::Both;
+    // Two-way: paths that collide when letter case is ignored.
+    let mut folded: HashMap<String, usize> = HashMap::new();
+    if o.direction == SyncDirection::Both {
+        for p in &paths {
+            *folded.entry(p.to_lowercase()).or_default() += 1;
+        }
+    }
+    let case_clash = |p: &str| folded.get(&p.to_lowercase()).is_some_and(|n| *n > 1);
     let mut out = Vec::new();
 
     let item = |rel: &str, kind, reason, lf: Option<&&FileInfo>, rf: Option<&&FileInfo>| PlanItem {
@@ -345,6 +408,9 @@ pub fn plan_trees(local: &Tree, remote: &Tree, o: &PlanOptions) -> Vec<PlanItem>
         let (lf, rf) = (l.get(p), r.get(p));
         let planned = match (o.direction, lf, rf) {
             (_, None, None) => None,
+            (SyncDirection::Both, _, _) if case_clash(p) => {
+                Some((ActionKind::Conflict, Reason::CaseConflict))
+            }
             // Only on one side.
             (SyncDirection::LocalToRemote | SyncDirection::Both, Some(_), None) => {
                 Some((ActionKind::Upload, Reason::New))
@@ -487,8 +553,10 @@ impl PlanReport {
 }
 
 /// Run the items for which `selected` is true (conflicts and skips never
-/// run). Copies are queued on `engine`; deletions run here, folders deepest
-/// first and only when empty, so excluded files are never lost.
+/// run). Deletions run first (files, then folders deepest first and only
+/// when empty, so excluded files are never lost), then folders are created
+/// and copies are queued on `engine`. Entries skipped for unsafe names are
+/// reported as failures.
 pub async fn execute_plan(
     engine: &TransferEngine,
     local: Arc<dyn RemoteFs>,
@@ -498,6 +566,11 @@ pub async fn execute_plan(
     cancel: &CancellationToken,
 ) -> PlanReport {
     let mut report = PlanReport::default();
+    for s in &plan.skipped {
+        report
+            .failed
+            .push((s.clone(), "skipped: unsafe file name".to_owned()));
+    }
     let chosen: Vec<&PlanItem> = plan
         .items
         .iter()
@@ -507,7 +580,53 @@ pub async fn execute_plan(
         .collect();
     let (lr, rr) = (plan.local_root.as_str(), plan.remote_root.as_str());
 
-    // 1. Folders to create (parents first).
+    // 1. File deletions, then folder deletions deepest first. Before any
+    // copy: on a case-insensitive disk `File.txt` (deleted) and `file.txt`
+    // (copied) are the same file, and the copy must win.
+    let mut dirs: Vec<&PlanItem> = Vec::new();
+    for it in &chosen {
+        let (fs, root) = match it.kind {
+            ActionKind::DeleteLocal => (&local, lr),
+            ActionKind::DeleteRemote => (&remote, rr),
+            _ => continue,
+        };
+        if cancel.is_cancelled() {
+            report.cancelled = true;
+            return report;
+        }
+        if it.is_dir {
+            dirs.push(it);
+            continue;
+        }
+        let res = match join_checked(root, &it.rel_path) {
+            Ok(path) => fs.remove_file(&path).await,
+            Err(e) => Err(e),
+        };
+        match res {
+            Ok(()) => record_delete(&mut report, it),
+            Err(e) => report.failed.push((it.rel_path.clone(), e.to_string())),
+        }
+    }
+    dirs.sort_by_key(|d| std::cmp::Reverse(d.rel_path.matches('/').count()));
+    for it in dirs {
+        let (fs, root) = if it.kind == ActionKind::DeleteLocal {
+            (&local, lr)
+        } else {
+            (&remote, rr)
+        };
+        let res = match join_checked(root, &it.rel_path) {
+            Ok(path) => fs.remove_dir(&path).await,
+            Err(e) => Err(e),
+        };
+        match res {
+            Ok(()) => record_delete(&mut report, it),
+            Err(e) => report
+                .failed
+                .push((format!("{}/", it.rel_path), e.to_string())),
+        }
+    }
+
+    // 2. Folders to create (parents first).
     let mut made: HashSet<(bool, String)> = HashSet::new();
     for it in chosen.iter().filter(|i| i.is_dir) {
         let (fs, root, remote_side) = match it.kind {
@@ -515,9 +634,12 @@ pub async fn execute_plan(
             ActionKind::Download => (&local, lr, false),
             _ => continue,
         };
-        let path = join(root, &it.rel_path);
-        match fs.mkdir_all(&path).await {
-            Ok(()) => {
+        let res = match join_checked(root, &it.rel_path) {
+            Ok(path) => fs.mkdir_all(&path).await.map(|()| path),
+            Err(e) => Err(e),
+        };
+        match res {
+            Ok(path) => {
                 made.insert((remote_side, path));
                 report.created_dirs.push(it.rel_path.clone());
             }
@@ -525,7 +647,7 @@ pub async fn execute_plan(
         }
     }
 
-    // 2. Copies through the engine.
+    // 3. Copies through the engine.
     let mut jobs: Vec<(TransferId, &PlanItem)> = Vec::new();
     for it in chosen.iter().filter(|i| !i.is_dir) {
         if cancel.is_cancelled() {
@@ -537,7 +659,17 @@ pub async fn execute_plan(
             ActionKind::Download => (&remote, rr, &local, lr, false),
             _ => continue,
         };
-        let dst_path = join(dst_root, &it.rel_path);
+        let paths = (
+            join_checked(src_root, &it.rel_path),
+            join_checked(dst_root, &it.rel_path),
+        );
+        let (src_path, dst_path) = match paths {
+            (Ok(s), Ok(d)) => (s, d),
+            (Err(e), _) | (_, Err(e)) => {
+                report.failed.push((it.rel_path.clone(), e.to_string()));
+                continue;
+            }
+        };
         let dir = parent(&dst_path);
         if !made.contains(&(remote_side, dir.clone())) {
             if let Err(e) = dst.mkdir_all(&dir).await {
@@ -548,46 +680,12 @@ pub async fn execute_plan(
         }
         let id = engine.enqueue(Job {
             src: src.clone(),
-            src_path: join(src_root, &it.rel_path),
+            src_path,
             dst: dst.clone(),
             dst_path,
             policy: ExistingPolicy::Overwrite,
         });
         jobs.push((id, it));
-    }
-
-    // 3. File deletions, then folder deletions deepest first.
-    if !report.cancelled {
-        let mut dirs: Vec<&PlanItem> = Vec::new();
-        for it in &chosen {
-            let (fs, root) = match it.kind {
-                ActionKind::DeleteLocal => (&local, lr),
-                ActionKind::DeleteRemote => (&remote, rr),
-                _ => continue,
-            };
-            if it.is_dir {
-                dirs.push(it);
-                continue;
-            }
-            match fs.remove_file(&join(root, &it.rel_path)).await {
-                Ok(()) => record_delete(&mut report, it),
-                Err(e) => report.failed.push((it.rel_path.clone(), e.to_string())),
-            }
-        }
-        dirs.sort_by_key(|d| std::cmp::Reverse(d.rel_path.matches('/').count()));
-        for it in dirs {
-            let (fs, root) = if it.kind == ActionKind::DeleteLocal {
-                (&local, lr)
-            } else {
-                (&remote, rr)
-            };
-            match fs.remove_dir(&join(root, &it.rel_path)).await {
-                Ok(()) => record_delete(&mut report, it),
-                Err(e) => report
-                    .failed
-                    .push((format!("{}/", it.rel_path), e.to_string())),
-            }
-        }
     }
 
     // 4. Wait for the copies (cancelling the rest if asked to).
@@ -652,6 +750,7 @@ mod tests {
         Tree {
             files,
             dirs: dirs.iter().map(|d| (*d).to_owned()).collect(),
+            skipped: Vec::new(),
         }
     }
 
@@ -728,6 +827,7 @@ mod tests {
             remote_root: "/r".into(),
             options: opts(SyncDirection::Both, false),
             items: plan,
+            skipped: Vec::new(),
         };
         let t = p.totals(|_, i| i.default_selected());
         assert_eq!((t.uploads, t.downloads, t.conflicts), (5, 3, 1));
@@ -782,6 +882,30 @@ mod tests {
                 ("remote-only".into(), Download, Reason::New),
             ]
         );
+    }
+
+    /// Two-way: names that differ only in case never overwrite each other.
+    #[test]
+    fn case_variants_are_conflicts_in_two_way() {
+        let l = tree(
+            vec![f("docs/Readme.md", 1, 100), f("a.txt", 1, 100)],
+            &["docs"],
+        );
+        let r = tree(
+            vec![f("docs/README.md", 2, 200), f("A.TXT", 3, 300)],
+            &["docs"],
+        );
+        let plan = plan_trees(&l, &r, &opts(SyncDirection::Both, false));
+        assert!(
+            plan.iter()
+                .all(|i| i.kind == ActionKind::Conflict && i.reason == Reason::CaseConflict),
+            "{:?}",
+            kinds(&plan)
+        );
+        assert_eq!(plan.len(), 4);
+        // One-way plans are unchanged.
+        let up = plan_trees(&l, &r, &opts(SyncDirection::LocalToRemote, false));
+        assert!(up.iter().any(|i| i.kind == ActionKind::Upload));
     }
 
     #[test]

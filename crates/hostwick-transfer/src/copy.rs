@@ -130,11 +130,10 @@ pub(crate) async fn copy_file(
             actual: written,
         });
     }
-    if s.dst.stat(s.dst_path).await?.is_some() {
-        // SFTP v3 rename does not overwrite.
-        s.dst.remove_file(s.dst_path).await?;
-    }
-    s.dst.rename(&part, s.dst_path).await?;
+    // Replace atomically where the protocol can (SFTP v3 rename alone does
+    // not overwrite); the old file is never deleted before the new one is in
+    // place.
+    s.dst.rename_replace(&part, s.dst_path).await?;
     if let Some(m) = src_meta.modified
         && let Err(e) = s.dst.set_modified(s.dst_path, m).await
     {

@@ -98,7 +98,7 @@ pub async fn walk(fs: &dyn RemoteFs, root: &str) -> Result<Vec<FileInfo>, Transf
         } else {
             hostwick_sftp::join(root, &rel_dir)
         };
-        for e in fs.list_dir(&abs).await? {
+        for e in fs.list_dir_checked(&abs).await?.entries {
             let rel = if rel_dir.is_empty() {
                 e.name.clone()
             } else {

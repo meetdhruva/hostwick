@@ -283,3 +283,201 @@ async fn protocols_without_resume_restart_from_zero() {
         assert_eq!(std::fs::read(b.path().join("f")).unwrap(), content);
     }
 }
+
+/// A server whose listing names an entry `../evil` (a malicious SFTP
+/// server; on Windows a plain Linux file called `..\..\x` does the same),
+/// and that records the order of changes.
+struct Hostile {
+    inner: LocalFs,
+    log: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl Hostile {
+    fn new(root: &Path) -> Self {
+        Self {
+            inner: LocalFs::new(root),
+            log: Arc::default(),
+        }
+    }
+    fn note(&self, what: String) {
+        self.log.lock().unwrap().push(what);
+    }
+}
+
+#[async_trait]
+impl RemoteFs for Hostile {
+    async fn list_dir(&self, p: &str) -> Result<Vec<Entry>, FsError> {
+        let mut v = self.inner.list_dir(p).await?;
+        if p == "/"
+            && let Some(mut e) = v.first().cloned()
+        {
+            e.name = "../evil".into();
+            e.path = "/../evil".into();
+            e.kind = hostwick_sftp::EntryKind::File;
+            v.push(e);
+        }
+        Ok(v)
+    }
+    async fn stat(&self, p: &str) -> Result<Option<Entry>, FsError> {
+        self.inner.stat(p).await
+    }
+    async fn mkdir(&self, p: &str) -> Result<(), FsError> {
+        self.inner.mkdir(p).await
+    }
+    async fn remove_file(&self, p: &str) -> Result<(), FsError> {
+        self.note(format!("rm {p}"));
+        self.inner.remove_file(p).await
+    }
+    async fn remove_dir(&self, p: &str) -> Result<(), FsError> {
+        self.note(format!("rmdir {p}"));
+        self.inner.remove_dir(p).await
+    }
+    async fn rename(&self, a: &str, b: &str) -> Result<(), FsError> {
+        self.inner.rename(a, b).await
+    }
+    async fn open_read(&self, p: &str, off: u64) -> Result<BoxRead, FsError> {
+        self.inner.open_read(p, off).await
+    }
+    async fn open_write(&self, p: &str, off: u64) -> Result<BoxWrite, FsError> {
+        self.note(format!("write {p}"));
+        self.inner.open_write(p, off).await
+    }
+    async fn set_modified(&self, p: &str, t: u64) -> Result<(), FsError> {
+        self.inner.set_modified(p, t).await
+    }
+    async fn canonicalize(&self, p: &str) -> Result<String, FsError> {
+        self.inner.canonicalize(p).await
+    }
+}
+
+#[tokio::test]
+async fn unsafe_remote_names_never_leave_the_local_root() {
+    let t = tempfile::tempdir().unwrap();
+    let (server, local_root) = (t.path().join("server"), t.path().join("home/sync"));
+    std::fs::create_dir_all(&local_root).unwrap();
+    write(&server, "normal.txt", b"ok", 1_000);
+    std::fs::write(t.path().join("evil"), b"PWNED").unwrap();
+    let remote: Arc<dyn RemoteFs> = Arc::new(Hostile::new(&server));
+    let local: Arc<dyn RemoteFs> = Arc::new(LocalFs::system());
+    let lr = hostwick_sftp::path_to_slash(&local_root);
+    let plan = build_plan(
+        local.as_ref(),
+        &lr,
+        remote.as_ref(),
+        "/",
+        PlanOptions {
+            direction: SyncDirection::RemoteToLocal,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(plan.items.iter().all(|i| !i.rel_path.contains("..")));
+    assert_eq!(plan.skipped.len(), 1, "{:?}", plan.skipped);
+    let engine = TransferEngine::new(EngineConfig::default());
+    let report = execute_plan(
+        &engine,
+        local.clone(),
+        remote.clone(),
+        &plan,
+        |_, _| true,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert!(!t.path().join("home/evil").exists());
+    assert_eq!(read(&local_root, "normal.txt"), b"ok");
+    assert!(report.failed.iter().any(|(p, _)| p.contains("../evil")));
+
+    // Recursive download: same.
+    let dest = hostwick_sftp::path_to_slash(&t.path().join("home/dl"));
+    let ids = engine
+        .enqueue_tree(remote, "/", local, &dest, ExistingPolicy::Overwrite)
+        .await
+        .unwrap();
+    for id in ids {
+        engine.wait(id).await;
+    }
+    assert!(!t.path().join("home/evil").exists());
+    assert!(t.path().join("home/dl/normal.txt").exists());
+}
+
+/// A typo in the source folder must not plan to delete the destination.
+#[tokio::test]
+async fn one_way_sync_refuses_a_missing_source() {
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    write(a.path(), "README", b"precious", 1_000);
+    let (local, remote): (Arc<dyn RemoteFs>, Arc<dyn RemoteFs>) = (
+        Arc::new(LocalFs::new(a.path())),
+        Arc::new(LocalFs::new(b.path())),
+    );
+    for (direction, l, r) in [
+        (SyncDirection::RemoteToLocal, "/", "/projetcs"),
+        (SyncDirection::LocalToRemote, "/nope", "/"),
+    ] {
+        let err = build_plan(
+            local.as_ref(),
+            l,
+            remote.as_ref(),
+            r,
+            PlanOptions {
+                direction,
+                delete: true,
+                excludes: vec![],
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, hostwick_transfer::TransferError::SourceMissing(_)),
+            "{err}"
+        );
+    }
+    assert_eq!(read(a.path(), "README"), b"precious");
+}
+
+/// Mirror deletions run before copies, so a case-only rename (`File.txt`
+/// deleted, `file.txt` copied) cannot delete the fresh copy on a
+/// case-insensitive disk.
+#[tokio::test]
+async fn mirror_deletes_before_copying() {
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    write(a.path(), "File.txt", b"old name", 1_000);
+    write(b.path(), "file.txt", b"new name", 2_000);
+    let local = Arc::new(Hostile::new(a.path()));
+    let log = local.log.clone();
+    let (local, remote): (Arc<dyn RemoteFs>, Arc<dyn RemoteFs>) =
+        (local, Arc::new(LocalFs::new(b.path())));
+    let plan = build_plan(
+        local.as_ref(),
+        "/",
+        remote.as_ref(),
+        "/",
+        PlanOptions {
+            direction: SyncDirection::RemoteToLocal,
+            delete: true,
+            excludes: vec![],
+        },
+    )
+    .await
+    .unwrap();
+    let engine = TransferEngine::new(EngineConfig::default());
+    let report = execute_plan(
+        &engine,
+        local,
+        remote,
+        &plan,
+        |_, _| true,
+        &CancellationToken::new(),
+    )
+    .await;
+    // (The hostile listing's `../evil` is reported as skipped.)
+    assert!(
+        report.failed.iter().all(|(p, _)| p.contains("../evil")),
+        "{:?}",
+        report.failed
+    );
+    let log = log.lock().unwrap().clone();
+    let rm = log.iter().position(|l| l == "rm /File.txt").unwrap();
+    let wr = log.iter().position(|l| l.starts_with("write")).unwrap();
+    assert!(rm < wr, "{log:?}");
+}
