@@ -111,6 +111,17 @@ pub(crate) async fn open_remote(
     let conn = hostwick_ssh::Connection::connect(&profile, &ctx)
         .await
         .with_context(|| format!("connecting to {}", profile.path()))?;
+    remote_fs_for(app, &profile, &conn, &ctx).await
+}
+
+/// The host's file system over `conn`: its file protocol (SFTP, SCP or
+/// auto) and sudo setting, asking for a sudo password when needed.
+pub(crate) async fn remote_fs_for(
+    app: &App,
+    profile: &hostwick_core::HostProfile,
+    conn: &hostwick_ssh::Connection,
+    ctx: &hostwick_ssh::ConnectContext,
+) -> Result<Arc<dyn RemoteFs>> {
     // Saved sudo password: its own credential, else the login password's.
     let mut saved = profile
         .sudo
@@ -126,7 +137,7 @@ pub(crate) async fn open_remote(
     let batch = app.policy.batch;
     let who = format!("{}@{}", profile.user_or_local(), profile.host);
     let sudo = profile.sudo.enabled.then_some(&profile.sudo);
-    let fs = hostwick_sftp::open_remote_fs_with(&conn, profile.file_protocol, sudo, |why| {
+    let fs = hostwick_sftp::open_remote_fs_with(conn, profile.file_protocol, sudo, |why| {
         let from_vault = saved.take();
         let who = who.clone();
         async move {

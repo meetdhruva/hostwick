@@ -24,7 +24,6 @@ hostwick-vault.workspace = true
 hostwick-store.workspace = true
 hostwick-import.workspace = true
 hostwick-keys.workspace = true
-russh-sftp.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

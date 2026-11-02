@@ -3492,7 +3492,6 @@ dependencies = [
  "hostwick-transfer",
  "hostwick-vault",
  "rpassword",
- "russh-sftp",
  "secrecy",
  "serde_json",
  "tempfile",

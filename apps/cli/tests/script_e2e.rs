@@ -347,3 +347,60 @@ echo never printed
     let o = ctx.script(&[], &format!("{open}\nrm -r %BASE%\n"));
     ok(&o);
 }
+
+/// `rm`, `chmod` and `ln` go through the host's file protocol: on a server
+/// without SFTP (the SCP fallback) they used to open a plain SFTP channel
+/// and fail. Run by `scripts/e2e-files.sh` (`HOSTWICK_FILES_NOSFTP_PORT`).
+#[test]
+fn script_commands_work_over_the_scp_fallback() {
+    let (Ok(port), Ok(key)) = (
+        std::env::var("HOSTWICK_FILES_NOSFTP_PORT"),
+        std::env::var("HOSTWICK_FILES_KEY"),
+    ) else {
+        eprintln!("skipping: HOSTWICK_FILES_NOSFTP_PORT not set");
+        return;
+    };
+    let ctx = Ctx {
+        env: Env {
+            host: "127.0.0.1".into(),
+            port,
+            user: "hwfiles3".into(),
+            key: key.into(),
+            host_pub: None,
+        },
+        home: tempfile::tempdir().unwrap(),
+        local: tempfile::tempdir().unwrap(),
+        base: format!("hw-scp-script-{}", std::process::id()),
+    };
+    write(&ctx.local.path().join("a.txt"), "alpha\n");
+    let main = format!(
+        r#"option batch abort
+option confirm off
+{OPEN}
+call rm -rf %BASE%
+mkdir %BASE%
+cd %BASE%
+lcd "%LOCAL%"
+put a.txt
+chmod 640 a.txt
+ln -s a.txt link.txt
+ln a.txt hard.txt
+call stat -c 'mode=%%a links=%%h' a.txt
+call test -L link.txt && echo is-link
+rm link.txt
+call test -e a.txt && echo target-kept
+rm hard.txt a.txt
+call ls -A | wc -l
+cd ..
+rmdir %BASE%
+exit
+"#
+    );
+    let o = ctx.script(&["--accept-new"], &main);
+    ok(&o);
+    let out = text(&o.stdout);
+    assert!(out.contains("mode=640 links=2"), "{out}");
+    assert!(out.contains("is-link"), "{out}");
+    assert!(out.contains("target-kept"), "{out}");
+    assert!(out.lines().any(|l| l.trim() == "0"), "{out}");
+}

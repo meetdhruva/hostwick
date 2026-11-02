@@ -28,7 +28,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use clap::Args;
 use hostwick_core::{AuthMethod, SecretString};
-use hostwick_sftp::{Entry, LocalFs, RemoteFs, SftpFs, SftpOptions, join, path_to_slash};
+use hostwick_sftp::{Entry, LocalFs, RemoteFs, join, path_to_slash};
 use hostwick_ssh::{Connection, HostKeyDecision, HostKeyInfo, Interaction};
 use hostwick_transfer::{
     EngineConfig, ExistingPolicy, Job, SyncMode, SyncOptions, TransferEngine, sync_once,
@@ -445,17 +445,12 @@ struct Session {
     label: String,
     conn: Connection,
     fs: Arc<dyn RemoteFs>,
-    /// Second SFTP channel for chmod/symlink, opened on first use.
-    raw: Option<russh_sftp::client::SftpSession>,
     home: String,
     cwd: String,
 }
 
 impl Session {
     async fn close(self) {
-        if let Some(raw) = &self.raw {
-            let _ = raw.close().await;
-        }
         self.conn.disconnect().await;
     }
 }
@@ -749,12 +744,12 @@ impl Runner<'_> {
                     // would follow it.
                     let direct = self.rpath(a)?;
                     if !has_glob(&file_name(&direct))
-                        && self
-                            .raw_sftp()
-                            .await?
-                            .symlink_metadata(direct.clone())
+                        && fs
+                            .lstat(&direct)
                             .await
-                            .is_ok_and(|m| m.is_symlink())
+                            .ok()
+                            .flatten()
+                            .is_some_and(|e| e.kind == hostwick_sftp::EntryKind::Symlink)
                     {
                         fs.remove_file(&direct).await?;
                         continue;
@@ -811,11 +806,9 @@ impl Runner<'_> {
                 for p in paths {
                     targets.extend(self.remote_matches(p).await?);
                 }
-                let raw = self.raw_sftp().await?;
+                let fs = self.fs()?;
                 for (path, _) in targets {
-                    let mut attrs = russh_sftp::protocol::FileAttributes::empty();
-                    attrs.permissions = Some(mode);
-                    raw.set_metadata(path.clone(), attrs)
+                    fs.set_permissions(&path, mode)
                         .await
                         .map_err(|e| anyhow!("{path}: {e}"))?;
                 }
@@ -952,10 +945,8 @@ impl Runner<'_> {
         let conn = Connection::connect(&profile, &ctx)
             .await
             .with_context(|| format!("connecting to {}", profile.path()))?;
-        let fs = SftpFs::open(&conn, &SftpOptions::default())
-            .await
-            .context("starting SFTP")?;
-        let fs: Arc<dyn RemoteFs> = Arc::new(fs);
+        // The host's own file protocol (SFTP, SCP fallback) and sudo.
+        let fs = crate::cp::remote_fs_for(self.app, &profile, &conn, &ctx).await?;
         let home = fs.canonicalize(".").await?;
         let cwd = match initial {
             Some(i) if i.starts_with('/') => fs.canonicalize(&i).await?,
@@ -973,47 +964,19 @@ impl Runner<'_> {
             label,
             conn,
             fs,
-            raw: None,
             home,
             cwd,
         });
         Ok(())
     }
 
-    async fn raw_sftp(&mut self) -> Result<&russh_sftp::client::SftpSession> {
-        let s = self.session()?;
-        if s.raw.is_none() {
-            let stream = s.conn.open_subsystem("sftp").await?;
-            let raw = russh_sftp::client::SftpSession::new(stream)
-                .await
-                .map_err(|e| anyhow!("starting SFTP: {e}"))?;
-            s.raw = Some(raw);
-        }
-        s.raw
-            .as_ref()
-            .ok_or_else(|| anyhow!("SFTP session unavailable"))
-    }
-
+    /// Links through the host's file protocol (SFTP, SCP or sudo).
     async fn link(&mut self, target: &str, link: &str, symbolic: bool) -> Result<()> {
-        let raw = self.raw_sftp().await?;
-        if !symbolic {
-            if !raw
-                .hardlink(target.to_owned(), link.to_owned())
-                .await
-                .map_err(|e| anyhow!("{link}: {e}"))?
-            {
-                bail!("this server does not support hard links (use ln -s)");
-            }
-            return Ok(());
-        }
-        // OpenSSH's sftp-server takes SSH_FXP_SYMLINK arguments in the
-        // opposite order to the specification (target first). It is the
-        // server that implements statvfs@openssh.com.
-        let openssh = raw.fs_info(".".to_owned()).await.ok().flatten().is_some();
-        let res = if openssh {
-            raw.symlink(target.to_owned(), link.to_owned()).await
+        let fs = self.fs()?;
+        let res = if symbolic {
+            fs.symlink(target, link).await
         } else {
-            raw.symlink(link.to_owned(), target.to_owned()).await
+            fs.hard_link(target, link).await
         };
         res.map_err(|e| anyhow!("{link}: {e}"))
     }
