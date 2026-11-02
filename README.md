@@ -92,7 +92,8 @@ keys but never changed ones.
 
 Prebuilt Windows, macOS and Linux builds are attached to each
 [GitHub Release](https://github.com/meetdhruva/hostwick/releases). Pushing a
-`v*` tag builds and publishes them (`.github/workflows/release.yml`).
+`v*` tag — or pushing to the `release` branch, which tags the version from
+`Cargo.toml` — builds and publishes them (`.github/workflows/release.yml`).
 
 ## Directory sync
 
