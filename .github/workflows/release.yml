@@ -81,6 +81,9 @@ jobs:
           mkdir -p "$dir"
           cp target/${{ matrix.target }}/release/hostwick target/${{ matrix.target }}/release/hostwick-desktop \
              packaging/linux/hostwick.desktop README.md "$dir/"
+          # Keep line tables for readable crash backtraces, but compressed.
+          objcopy --compress-debug-sections=zlib "$dir/hostwick"
+          objcopy --compress-debug-sections=zlib "$dir/hostwick-desktop"
           tar czf "$dir.tar.gz" "$dir"
       - uses: actions/upload-artifact@v4
         with:
