@@ -29,7 +29,7 @@ pub use forward::ForwardHandle;
 pub use interaction::{
     Credentials, HostKeyDecision, HostKeyInfo, HostKeyStatus, Interaction, NoCredentials,
 };
-pub use known_hosts::KnownHosts;
+pub use known_hosts::{KnownHostEntry, KnownHostMarker, KnownHosts};
 pub use pool::ConnectionPool;
 pub use shell::{PtyOptions, ShellCommand, ShellEvent, ShellSession};
 pub use x11::{X11Display, X11Target};
