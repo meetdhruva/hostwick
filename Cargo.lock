@@ -3594,6 +3594,7 @@ version = "0.2.0"
 dependencies = [
  "dirs 6.0.0",
  "hostwick-core",
+ "hostwick-vault",
  "rusqlite",
  "serde",
  "serde_json",
@@ -3601,6 +3602,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

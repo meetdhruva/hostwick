@@ -13,6 +13,8 @@ workspace = true
 
 [dependencies]
 hostwick-core.workspace = true
+hostwick-vault.workspace = true
+zeroize.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true

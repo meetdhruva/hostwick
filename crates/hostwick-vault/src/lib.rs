@@ -22,6 +22,8 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+pub mod sealed;
+
 const VERSION: u32 = 1;
 
 #[derive(Debug, thiserror::Error)]
@@ -106,7 +108,7 @@ impl Drop for PlainMap {
     }
 }
 
-fn derive(
+pub(crate) fn derive(
     master: &SecretString,
     salt: &[u8],
     p: KdfParams,
@@ -303,13 +305,13 @@ impl Vault {
 }
 
 #[cfg(unix)]
-fn restrict_permissions(p: &Path) -> std::io::Result<()> {
+pub(crate) fn restrict_permissions(p: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600))
 }
 
 #[cfg(not(unix))]
-fn restrict_permissions(_: &Path) -> std::io::Result<()> {
+pub(crate) fn restrict_permissions(_: &Path) -> std::io::Result<()> {
     // The file lives under the user's profile directory, which is already
     // private to them on Windows.
     Ok(())
