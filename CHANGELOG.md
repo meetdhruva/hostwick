@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+**Terminal**
+- Telnet and serial hosts alongside SSH (new `hostwick-term` crate: one transport interface for all three). Telnet negotiates echo, SGA, binary, terminal type and window size (re-sent on resize), refuses unknown options per RFC 854/1143 without loops, handles `CR NUL`/`CR LF`, echoes locally when the server doesn't, uses TCP keepalive, a connect timeout and the host's proxy. Serial: baud/data/parity/stop bits and flow control, exclusive open, port listing, clear errors for missing, busy and permission-denied ports (the `dialout` hint on Linux) and for an unplugged adapter. Send break (menu, Ctrl+Break) on both. Tab titles name the protocol; Files on a telnet/serial host explains that it needs SSH.
+- Find in scrollback (Ctrl+Shift+F / ⌘F): text or regex, case toggle, `3 of 17`, all visible matches highlighted, Enter/Shift+Enter and F3/Shift+F3, Esc closes. Counting runs off the UI thread in short locked chunks.
+- Mouse reporting for htop, mc, vim, tmux: press/release/drag/motion/wheel with modifiers in SGR, UTF-8 or X10 encoding; Shift selects instead; wheel sends arrows in full-screen programs without mouse mode (alternate scroll); off switch in Settings.
+- Keyword highlighting from the settings' rules, on visible rows only, foreground only, cached per row; selection, cursor and search stay on top. The default "success" rule now also matches `active (running)`.
+- Current folder from OSC 7 (`TerminalView::cwd()`, `TerminalEvent::CwdChanged`); *Shell integration* installs a bash/zsh prompt hook (keeping existing hooks, kept out of history and off the screen).
+- Login scripts run after connecting (`@wait`, `@sleep`; timeouts shown as a notice; cancellable), snippets in a button bar above the terminal and a right-click submenu (bracketed paste, optional Enter, broadcast-aware). Right-click → Copy current folder.
+
 **File manager**
 - Two-pane commander (local | remote, WinSCP style) with sortable columns, multi-selection, keyboard operation (F2/F4/F5/F6/F7, Del, Enter, Backspace, Tab, Ctrl+A, Ctrl+R, Alt+Enter) and a single-pane mode; the local folder is remembered per host.
 - Drag and drop between panes, onto folders, and from the OS file manager onto either pane (local rows can also be dragged out on macOS/Wayland).

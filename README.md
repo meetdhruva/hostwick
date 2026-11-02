@@ -40,6 +40,7 @@ crates/
   hostwick-store     SQLite profile store with migrations; app paths; portable mode
   hostwick-import    ssh_config, PuTTY, WinSCP and Solar-PuTTY importers
   hostwick-keys      key generation and conversion: OpenSSH, PuTTY .ppk v2/v3
+  hostwick-term      terminal transports behind one interface: SSH shells, telnet, serial ports
 apps/
   cli                `hostwick` command-line client
   desktop            `hostwick-desktop` GUI (GPUI + gpui-component + alacritty_terminal)
@@ -222,8 +223,60 @@ open terminal. Host-key, password, passphrase and MFA prompts appear as dialogs.
 |---|---|
 | Saved host | Open terminal, Open files, Edit…, Duplicate, Copy address, Delete… |
 | Tab | Reconnect, Duplicate, Open files/terminal, Close, Close others, Close all |
-| Terminal | Copy, Paste, Select all, Clear scrollback, Log session to file… / Stop, Open files, Duplicate, Reconnect |
+| Terminal | Copy, Paste, Select all, Find…, Snippets ▸, Copy current folder, Send break (telnet/serial), Stop script, Clear scrollback, Log session to file… / Stop, Open files (SSH), Duplicate, Reconnect |
 | File | Open, Edit (F4), Upload/Download (F5), Move (F6), Rename… (F2), Delete…, New folder… (F7), New symlink…, Copy path, Refresh, Properties (Alt+Enter) |
+
+**Terminal**
+
+- **SSH, telnet and serial.** A host's *protocol* picks the transport; tabs
+  say which (`router (telnet)`, `switch (/dev/ttyUSB0 9600 8N1)`), and
+  reconnect works the same for all three.
+  - *Telnet* (RFC 854/855): negotiates echo, suppress-go-ahead, binary,
+    terminal type and window size (sent again on every resize), refuses
+    other options without negotiation loops, handles `CR NUL`/`CR LF`
+    and sends Enter as `CR LF`; echoes locally when the server does not.
+    TCP keepalive, a connect timeout, and the host's SOCKS/HTTP proxy are
+    honoured. A host still on port 22 is taken to mean 23.
+  - *Serial*: baud, data bits, parity, stop bits and XON/XOFF or RTS/CTS
+    flow control; DTR/RTS raised on open; ports are opened exclusively.
+    Clear errors for a missing port (with the ports that do exist), a port
+    in use, and permission denied (on Linux: add yourself to `dialout`).
+    An unplugged adapter ends the session with the reason on screen.
+  - *Send break* (right-click, or Ctrl+Break) on telnet (`IAC BRK`) and
+    serial (a 300 ms line break) — for ROMMON, bootloaders, SysRq.
+  - The file browser needs SSH; on a telnet or serial host it says so.
+- **Find in scrollback** (Ctrl+Shift+F / ⌘F, or right-click → Find…): plain
+  text or regex, case-sensitive toggle, `3 of 17`, every match on screen
+  highlighted and the current one stands out. Enter/F3 goes to the previous
+  (older) match, Shift+Enter/Shift+F3 to the next; Esc closes. Counting runs
+  in the background, so a huge scrollback never freezes the window.
+- **Mouse in htop, mc, vim (`:set mouse=a`), tmux**: clicks, drags, motion and
+  the wheel go to programs that ask for them (SGR, UTF-8 and X10 encodings,
+  with Shift/Alt/Ctrl). Hold **Shift** to select text instead, like xterm.
+  Without mouse mode the wheel sends arrow keys in full-screen programs
+  (`less`, `man`). *Settings → Mouse reporting* turns it off.
+- **Keyword highlighting**: text matching *Settings → highlight rules* is
+  coloured (errors red, warnings amber, success green by default; plain
+  words match whole words, case-insensitively; regexes as written). Only the
+  colour of the text changes, and only on visible rows — a 300k-line flood
+  is not slowed down.
+- **Current folder** (OSC 7): *Shell integration* in the host editor types a
+  one-time hook into bash or zsh after login so the shell reports its
+  folder; existing `PROMPT_COMMAND`/`precmd` hooks are kept, the line starts
+  with a space (out of history with `HISTCONTROL=ignorespace` or zsh's
+  `HIST_IGNORE_SPACE`) and is erased from the screen. Shells that already
+  send OSC 7 (fish, many distro configs) need nothing. Right-click → *Copy
+  current folder*.
+- **Login scripts** (host editor): run after the session opens — one command
+  per line, `@wait text` (or `@wait 5000 text`) waits for output,
+  `@sleep 500` pauses, `#` comments. A wait that times out shows a notice in
+  the terminal; right-click → *Stop script* cancels.
+- **Snippets and button bar**: snippets from Settings (all hosts) and the
+  host editor (that host) appear as a slim button row above the terminal
+  (tooltip shows the text) and under right-click → *Snippets*. Multi-line
+  snippets go in as a bracketed paste when the shell supports it; *run*
+  presses Enter after. With broadcast on they go to every terminal.
+  *Settings → Show button bar* hides the row.
 
 **File browser** (WinSCP Commander style): this computer on the left, the
 server on the right (*Hide local* gives a single remote pane; the local folder
@@ -301,6 +354,11 @@ always go to the shell):
 | Ctrl+, | Settings |
 | Ctrl+Shift+C / V, Shift+Insert | Copy / paste in the terminal |
 | Shift+PageUp / PageDown | Scroll back |
+| Ctrl+Shift+F | Find in scrollback |
+| Enter / Shift+Enter, F3 / Shift+F3 | Previous (older) / next match while finding |
+| Esc (in the find bar) | Close find |
+| Shift+click / drag | Select text even when a program has the mouse |
+| Ctrl+Break | Send break (telnet, serial) |
 | Enter on an ended session | Reconnect |
 
 When a connection fails, the error lists every authentication method tried and
@@ -354,7 +412,18 @@ HOSTWICK_TOOLS_E2E_PORT=2250 HOSTWICK_TOOLS_E2E_USER=me HOSTWICK_TOOLS_E2E_KEY=~
 ```
 
 The key tests also run real `puttygen` and `ssh-keygen` when they are
-installed.
+installed, and the shell-integration test runs real `bash` and `zsh`.
+
+Terminal transports (`hostwick-term`): telnet is always tested against an
+in-process fake server; these also use real ones:
+
+```sh
+# a pty pair as a "serial cable" (needs socat)
+HOSTWICK_SERIAL_E2E=1 cargo test -p hostwick-term --test serial
+# a real telnetd whose login program is a shell, on loopback, e.g.
+#   socat TCP-LISTEN:2241,bind=127.0.0.1,reuseaddr,fork EXEC:"/usr/sbin/telnetd -h -E /bin/sh",nofork
+HOSTWICK_TELNETD=127.0.0.1:2241 cargo test -p hostwick-term --test telnet
+```
 
 The e2e suite covers password/key/encrypted-key auth, host-key TOFU and
 rejection, PTY shells with resize, `-L`/`-D`/`-R` forwards, jump-host chains,
@@ -382,7 +451,7 @@ connection sharing, and a pipelined 24 MiB SFTP round trip.
   and Wayland).
 
 - The desktop app does not yet unlock the vault (the CLI does); it prompts.
-- Terminal mouse reporting (for `htop`/`mc` mouse clicks) and OSC 52 clipboard.
+- OSC 52 clipboard; split panes.
 - FTP/S3 adapters behind `RemoteFs`.
 - Native file pickers (upload/download in the desktop app) were not exercised
   headless; the transfer engine behind them is tested.
