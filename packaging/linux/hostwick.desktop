@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Hostwick
+Comment=SSH terminal, SFTP and tunnels
+Exec=hostwick-desktop
+Terminal=false
+Categories=Network;RemoteAccess;System;TerminalEmulator;

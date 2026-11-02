@@ -8,27 +8,26 @@ pub(crate) type Agent = AgentClient<Box<dyn AgentStream + Send + Unpin + 'static
 ///
 /// Windows: Pageant first (PuTTY users, Git for Windows), then the built-in
 /// OpenSSH agent's named pipe. Unix: `SSH_AUTH_SOCK`.
+#[cfg(windows)]
 pub(crate) async fn connect() -> Result<Agent, SshError> {
-    #[cfg(windows)]
-    {
-        if let Ok(a) = AgentClient::connect_pageant().await {
-            return Ok(a.dynamic());
-        }
-        const OPENSSH_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
-        return AgentClient::connect_named_pipe(OPENSSH_PIPE)
-            .await
-            .map(AgentClient::dynamic)
-            .map_err(|e| {
-                SshError::Agent(format!(
-                    "neither Pageant nor the OpenSSH agent answered ({e}); start one with `Start-Service ssh-agent` or Pageant"
-                ))
-            });
+    if let Ok(a) = AgentClient::connect_pageant().await {
+        return Ok(a.dynamic());
     }
-    #[cfg(not(windows))]
-    {
-        AgentClient::connect_env()
-            .await
-            .map(AgentClient::dynamic)
-            .map_err(|e| SshError::Agent(format!("SSH_AUTH_SOCK: {e}")))
-    }
+    const OPENSSH_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
+    AgentClient::connect_named_pipe(OPENSSH_PIPE)
+        .await
+        .map(AgentClient::dynamic)
+        .map_err(|e| {
+            SshError::Agent(format!(
+                "neither Pageant nor the OpenSSH agent answered ({e}); start one with `Start-Service ssh-agent` or Pageant"
+            ))
+        })
+}
+
+#[cfg(not(windows))]
+pub(crate) async fn connect() -> Result<Agent, SshError> {
+    AgentClient::connect_env()
+        .await
+        .map(AgentClient::dynamic)
+        .map_err(|e| SshError::Agent(format!("SSH_AUTH_SOCK: {e}")))
 }

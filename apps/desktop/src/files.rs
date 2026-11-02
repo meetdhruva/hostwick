@@ -11,7 +11,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hostwick_sftp::{Entry, EntryKind, LocalFs, RemoteFs, path_to_slash};
-use hostwick_transfer::{ExistingPolicy, Job};
+use hostwick_transfer::{ExistingPolicy, Job, SyncMode, SyncOptions};
 
 use crate::backend::Backend;
 use crate::util::{human_size, human_time};
@@ -29,6 +29,22 @@ pub struct FilesView {
     focus: FocusHandle,
     _load: Option<Task<()>>,
     _subs: Vec<Subscription>,
+    /// Active "keep remote directory up to date" watch.
+    sync: Option<ActiveSync>,
+}
+
+struct ActiveSync {
+    local: String,
+    remote: String,
+    cancel: tokio_util::sync::CancellationToken,
+    status: String,
+    _ui: Task<()>,
+}
+
+impl Drop for ActiveSync {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
 }
 
 impl Focusable for FilesView {
@@ -68,6 +84,7 @@ impl FilesView {
             focus: cx.focus_handle(),
             _load: None,
             _subs: vec![sub],
+            sync: None,
         };
         v.navigate(".".into(), cx);
         v
@@ -229,6 +246,103 @@ impl FilesView {
             }
         })
         .detach();
+    }
+
+    /// WinSCP's "Keep remote directory up to date": pick a local folder;
+    /// its changes upload into the current remote folder until stopped.
+    /// Update mode (never deletes remote files), `.git` excluded.
+    fn toggle_sync(&mut self, cx: &mut Context<Self>) {
+        if self.sync.take().is_some() {
+            cx.notify();
+            return;
+        }
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Keep this folder synced to the server".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(dirs))) = picked.await else {
+                return;
+            };
+            let Some(dir) = dirs.into_iter().next() else {
+                return;
+            };
+            let _ = this.update(cx, |v, cx| v.start_sync(path_to_slash(&dir), cx));
+        })
+        .detach();
+    }
+
+    fn start_sync(&mut self, local: String, cx: &mut Context<Self>) {
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<String>();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (engine, fs, remote) = (
+            self.backend.engine.clone(),
+            self.fs.clone(),
+            self.cwd.clone(),
+        );
+        let (src_root, dst_root, token) = (local.clone(), remote.clone(), cancel.clone());
+        self.backend.rt.spawn(async move {
+            let src: Arc<dyn RemoteFs> = Arc::new(LocalFs::system());
+            let opts = SyncOptions {
+                mode: SyncMode::Update,
+                excludes: vec![".git".into()],
+                dry_run: false,
+            };
+            hostwick_transfer::watch(
+                &engine,
+                src,
+                &src_root,
+                fs,
+                &dst_root,
+                &opts,
+                std::time::Duration::from_secs(2),
+                token,
+                |r| {
+                    let msg = match r {
+                        Ok(r) if r.is_noop() => "up to date".to_owned(),
+                        Ok(r) => format!(
+                            "synced {} file(s), {}{}",
+                            r.copied.len(),
+                            human_size(r.bytes),
+                            if r.failed.is_empty() {
+                                String::new()
+                            } else {
+                                format!(", {} failed", r.failed.len())
+                            }
+                        ),
+                        Err(e) => format!("error (retrying): {e}"),
+                    };
+                    let _ = tx.unbounded_send(msg);
+                },
+            )
+            .await;
+        });
+        let ui = cx.spawn(async move |this, cx| {
+            use futures::StreamExt as _;
+            while let Some(msg) = rx.next().await {
+                let alive = this
+                    .update(cx, |v, cx| {
+                        if let Some(s) = v.sync.as_mut() {
+                            s.status = msg;
+                        }
+                        v.refresh(cx);
+                    })
+                    .is_ok();
+                if !alive {
+                    break;
+                }
+            }
+        });
+        self.sync = Some(ActiveSync {
+            local,
+            remote,
+            cancel,
+            status: "starting…".into(),
+            _ui: ui,
+        });
+        cx.notify();
     }
 
     fn new_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -463,6 +577,20 @@ impl Render for FilesView {
                             .on_click(cx.listener(|v, _, _, cx| v.download(cx))),
                     )
                     .child(
+                        Button::new("sync")
+                            .small()
+                            .label(if self.sync.is_some() {
+                                "Stop sync"
+                            } else {
+                                "Keep up to date…"
+                            })
+                            .when(self.sync.is_some(), |b| b.warning())
+                            .tooltip(
+                                "Upload changes from a local folder into this folder automatically",
+                            )
+                            .on_click(cx.listener(|v, _, _, cx| v.toggle_sync(cx))),
+                    )
+                    .child(
                         Button::new("mkdir")
                             .small()
                             .label("New folder")
@@ -522,10 +650,13 @@ impl Render for FilesView {
                     .text_color(theme.muted_foreground)
                     .border_t_1()
                     .border_color(theme.border)
-                    .child(if self.loading {
-                        "Loading…".to_owned()
-                    } else {
-                        format!("{count} item(s) — {}", self.cwd)
+                    .child(match (&self.sync, self.loading) {
+                        (_, true) => "Loading…".to_owned(),
+                        (Some(s), _) => format!(
+                            "{count} item(s) — {}   ·   Syncing {} → {}: {}",
+                            self.cwd, s.local, s.remote, s.status
+                        ),
+                        (None, _) => format!("{count} item(s) — {}", self.cwd),
                     }),
             )
     }

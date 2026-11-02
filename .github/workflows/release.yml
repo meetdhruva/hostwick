@@ -1,0 +1,105 @@
+name: Release
+
+# Push a tag like `v0.1.0` to build every platform and publish a GitHub Release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    # Windows on ARM is newer territory for the GPU stack; don't let it block the release.
+    continue-on-error: ${{ matrix.experimental == true }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-x86_64, os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { name: windows-arm64, os: windows-11-arm, target: aarch64-pc-windows-msvc, experimental: true }
+          - { name: macos-arm64, os: macos-latest, target: aarch64-apple-darwin }
+          - { name: macos-x86_64, os: macos-latest, target: x86_64-apple-darwin }
+          - { name: linux-x86_64, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { name: linux-arm64, os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Linux GUI build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libvulkan-dev libfontconfig-dev libfreetype-dev libx11-xcb-dev libxcb1-dev
+      - name: Build
+        run: cargo build --release --locked --workspace --target ${{ matrix.target }}
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}"
+          $dir = "hostwick-$v-${{ matrix.name }}"
+          New-Item -ItemType Directory $dir | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/hostwick.exe, target/${{ matrix.target }}/release/hostwick-desktop.exe, README.md $dir
+          Compress-Archive -Path $dir -DestinationPath "$dir.zip"
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          v="${{ github.ref_name }}"; dir="hostwick-$v-${{ matrix.name }}"
+          mkdir -p "$dir/Hostwick.app/Contents/MacOS"
+          cp target/${{ matrix.target }}/release/hostwick-desktop "$dir/Hostwick.app/Contents/MacOS/"
+          sed "s/__VERSION__/${v#v}/" packaging/macos/Info.plist > "$dir/Hostwick.app/Contents/Info.plist"
+          # Ad-hoc signature so Apple Silicon will run it (not notarized).
+          codesign --force --deep --sign - "$dir/Hostwick.app"
+          cp target/${{ matrix.target }}/release/hostwick README.md "$dir/"
+          ditto -c -k --keepParent "$dir" "$dir.zip"
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          v="${{ github.ref_name }}"; dir="hostwick-$v-${{ matrix.name }}"
+          mkdir -p "$dir"
+          cp target/${{ matrix.target }}/release/hostwick target/${{ matrix.target }}/release/hostwick-desktop \
+             packaging/linux/hostwick.desktop README.md "$dir/"
+          tar czf "$dir.tar.gz" "$dir"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            hostwick-*.zip
+            hostwick-*.tar.gz
+
+  publish:
+    needs: build
+    if: always() && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum hostwick-* > SHA256SUMS && cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            Builds for Windows, macOS and Linux. Each archive contains the desktop app and the `hostwick` CLI.
+
+            - **Windows**: unzip and run `hostwick-desktop.exe` (unsigned: SmartScreen may ask you to confirm).
+            - **macOS**: unzip and open `Hostwick.app` (ad-hoc signed, not notarized: right-click → Open the first time, or `xattr -dr com.apple.quarantine Hostwick.app`).
+            - **Linux**: needs `libxkbcommon`, `libxkbcommon-x11`, a Vulkan driver (`mesa-vulkan-drivers`) and fontconfig.
+
+            Verify downloads with `SHA256SUMS`.

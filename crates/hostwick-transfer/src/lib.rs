@@ -18,11 +18,13 @@ mod copy;
 mod engine;
 mod rate;
 mod sync;
+mod syncrun;
 
 pub use copy::{ExistingPolicy, PART_SUFFIX};
 pub use engine::{EngineConfig, Job, TransferEngine, TransferEvent, TransferId, TransferState};
 pub use rate::RateLimiter;
 pub use sync::{FileInfo, SyncAction, SyncMode, plan_sync, walk};
+pub use syncrun::{SyncOptions, SyncReport, is_excluded, sync_once, watch};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TransferError {

@@ -93,6 +93,7 @@ fn to_entry(name: String, path: String, attrs: &FileAttributes) -> Entry {
         kind,
         size: attrs.size.unwrap_or(0),
         modified: attrs.mtime.map(u64::from),
+        modified_nanos: None,
         permissions: attrs.permissions.map(|p| p & 0o7777),
         owner: attrs.user.clone(),
         group: attrs.group.clone(),

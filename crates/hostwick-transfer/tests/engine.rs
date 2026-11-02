@@ -311,3 +311,145 @@ async fn missing_source_fails_without_retry() {
         "{state:?}"
     );
 }
+
+#[tokio::test]
+async fn sync_mirror_with_excludes_and_dry_run() {
+    use hostwick_transfer::{SyncOptions, sync_once};
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    std::fs::create_dir_all(a.path().join("src/deep")).unwrap();
+    std::fs::create_dir_all(a.path().join("node_modules/x")).unwrap();
+    std::fs::write(a.path().join("src/main.rs"), b"fn main() {}").unwrap();
+    std::fs::write(a.path().join("src/deep/lib.rs"), b"pub fn f() {}").unwrap();
+    std::fs::write(a.path().join("scratch.tmp"), b"junk").unwrap();
+    std::fs::write(a.path().join("node_modules/x/i.js"), b"x").unwrap();
+    std::fs::create_dir_all(b.path().join("site")).unwrap();
+    std::fs::write(b.path().join("site/stale.html"), b"old").unwrap();
+    std::fs::write(b.path().join("site/keep.tmp"), b"excluded on dst too").unwrap();
+    let (src, dst) = (fs(a.path()), fs(b.path()));
+    let engine = TransferEngine::new(EngineConfig::default());
+    let mut opts = SyncOptions {
+        mode: SyncMode::Mirror,
+        excludes: vec!["*.tmp".into(), "node_modules".into()],
+        dry_run: true,
+    };
+
+    let plan = sync_once(&engine, src.clone(), "/", dst.clone(), "/site", &opts)
+        .await
+        .unwrap();
+    assert_eq!(plan.copied, vec!["src/deep/lib.rs", "src/main.rs"]);
+    assert_eq!(plan.deleted, vec!["stale.html"]);
+    assert!(
+        b.path().join("site/stale.html").exists(),
+        "dry run changed nothing"
+    );
+
+    opts.dry_run = false;
+    let r = sync_once(&engine, src.clone(), "/", dst.clone(), "/site", &opts)
+        .await
+        .unwrap();
+    assert_eq!(r.copied.len(), 2);
+    assert_eq!(r.deleted, vec!["stale.html"]);
+    assert!(r.failed.is_empty());
+    assert_eq!(
+        std::fs::read(b.path().join("site/src/deep/lib.rs")).unwrap(),
+        b"pub fn f() {}"
+    );
+    assert!(
+        b.path().join("site/keep.tmp").exists(),
+        "excluded files are never deleted"
+    );
+    assert!(!b.path().join("site/node_modules").exists());
+
+    // Idempotent: a second run has nothing to do (mtimes were preserved).
+    let again = sync_once(&engine, src, "/", dst, "/site", &opts)
+        .await
+        .unwrap();
+    assert!(again.is_noop(), "{again:?}");
+}
+
+#[tokio::test]
+async fn watch_keeps_destination_up_to_date() {
+    use hostwick_transfer::{SyncOptions, watch};
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    std::fs::write(a.path().join("one.txt"), b"1").unwrap();
+    let (src, dst) = (fs(a.path()), fs(b.path()));
+    let engine = TransferEngine::new(EngineConfig::default());
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let task = {
+        let (engine, cancel) = (engine.clone(), cancel.clone());
+        tokio::spawn(async move {
+            let opts = SyncOptions {
+                mode: SyncMode::Mirror,
+                ..Default::default()
+            };
+            watch(
+                &engine,
+                src,
+                "/",
+                dst,
+                "/out",
+                &opts,
+                Duration::from_millis(100),
+                cancel,
+                |r| {
+                    let _ = tx.send(r.cloned().map_err(|e| e.to_string()));
+                },
+            )
+            .await;
+        })
+    };
+    let first = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.copied, vec!["one.txt"]);
+
+    // New file and a deletion are mirrored by the next sync.
+    std::fs::write(a.path().join("two.txt"), b"22").unwrap();
+    std::fs::remove_file(a.path().join("one.txt")).unwrap();
+    let next = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.copied, vec!["two.txt"]);
+    assert_eq!(next.deleted, vec!["one.txt"]);
+
+    // A removed folder disappears from the mirror too.
+    std::fs::create_dir_all(a.path().join("dir/sub")).unwrap();
+    std::fs::write(a.path().join("dir/sub/f"), b"f").unwrap();
+    let added = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(added.copied, vec!["dir/sub/f"]);
+    std::fs::remove_dir_all(a.path().join("dir")).unwrap();
+    let removed = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(removed.deleted, vec!["dir/sub/f", "dir/sub/", "dir/"]);
+    assert!(!b.path().join("out/dir").exists());
+    assert_eq!(std::fs::read(b.path().join("out/two.txt")).unwrap(), b"22");
+
+    // Same-size edit right after a sync (inside mtime granularity) is still copied.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    std::fs::write(a.path().join("two.txt"), b"33").unwrap();
+    let edit = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(edit.copied, vec!["two.txt"]);
+    assert_eq!(std::fs::read(b.path().join("out/two.txt")).unwrap(), b"33");
+
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
+}

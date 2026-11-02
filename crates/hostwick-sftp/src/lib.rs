@@ -37,6 +37,11 @@ pub struct Entry {
     pub size: u64,
     /// Seconds since the Unix epoch.
     pub modified: Option<u64>,
+    /// Sub-second part of `modified`, when the filesystem provides it (local
+    /// disks do; SFTP v3 only has whole seconds). Used to notice edits made
+    /// within the same second.
+    #[serde(default)]
+    pub modified_nanos: Option<u32>,
     /// Unix mode bits (`0o755` etc.), when the server reports them.
     pub permissions: Option<u32>,
     pub owner: Option<String>,

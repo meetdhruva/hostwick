@@ -8,6 +8,7 @@ mod cp;
 mod hosts;
 mod prompt;
 mod shell;
+mod sync;
 mod tty;
 
 use clap::{Args, Parser, Subcommand};
@@ -39,6 +40,8 @@ enum Cmd {
     Ssh(SshArgs),
     /// Copy files to/from a host (like `scp`): `cp [-r] SRC DST`, remote side as `HOST:PATH`.
     Cp(cp::CpArgs),
+    /// Synchronize directories (like WinSCP): `sync [--delete] [--watch] SRC DST`.
+    Sync(sync::SyncArgs),
     /// List a remote directory: `ls HOST:PATH`.
     Ls { target: String },
     /// Manage saved hosts.
@@ -132,6 +135,7 @@ async fn run(cli: Cli) -> i32 {
         match cli.cmd {
             Cmd::Ssh(a) => shell::run(&app, a).await,
             Cmd::Cp(a) => cp::run(&app, a).await,
+            Cmd::Sync(a) => sync::run(&app, a).await,
             Cmd::Ls { target } => cp::ls(&app, &target).await,
             Cmd::Hosts(c) => hosts::run_hosts(&app, c),
             Cmd::Import(c) => hosts::run_import(&app, c),

@@ -11,6 +11,9 @@ pub struct FileInfo {
     pub rel_path: String,
     pub size: u64,
     pub modified: Option<u64>,
+    /// For change detection only; sync planning compares whole seconds.
+    #[serde(default)]
+    pub modified_nanos: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,8 +39,10 @@ const MTIME_SLACK: u64 = 2;
 /// Plan a one-way sync by merge-joining two path-sorted listings: O(n + m)
 /// after sorting, with no hash maps of the whole tree.
 ///
-/// A file is "changed" if sizes differ, or the source is newer than the
-/// destination by more than the filesystem timestamp granularity.
+/// A file is "changed" if sizes differ, or its modification time differs by
+/// more than the filesystem timestamp granularity: in `Update` mode only a
+/// *newer* source counts; in `Mirror` mode any difference does (the
+/// destination is made identical).
 pub fn plan_sync(src: &[FileInfo], dst: &[FileInfo], mode: SyncMode) -> Vec<SyncAction> {
     let mut s: Vec<&FileInfo> = src.iter().collect();
     let mut d: Vec<&FileInfo> = dst.iter().collect();
@@ -66,11 +71,12 @@ pub fn plan_sync(src: &[FileInfo], dst: &[FileInfo], mode: SyncMode) -> Vec<Sync
             }
             Ordering::Equal => {
                 let (a, b) = (s[i], d[j]);
-                let newer = match (a.modified, b.modified) {
+                let differs = match (a.modified, b.modified) {
+                    (Some(x), Some(y)) if mode == SyncMode::Mirror => x.abs_diff(y) > MTIME_SLACK,
                     (Some(x), Some(y)) => x > y + MTIME_SLACK,
                     _ => false,
                 };
-                if a.size != b.size || newer {
+                if a.size != b.size || differs {
                     out.push(SyncAction::Copy(a.rel_path.clone()));
                 }
                 i += 1;
@@ -105,6 +111,7 @@ pub async fn walk(fs: &dyn RemoteFs, root: &str) -> Result<Vec<FileInfo>, Transf
                         rel_path: rel,
                         size: e.size,
                         modified: e.modified,
+                        modified_nanos: e.modified_nanos,
                     });
                 }
                 _ => {}
@@ -118,12 +125,14 @@ pub async fn walk(fs: &dyn RemoteFs, root: &str) -> Result<Vec<FileInfo>, Transf
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::is_excluded;
 
     fn f(p: &str, size: u64, m: u64) -> FileInfo {
         FileInfo {
             rel_path: p.into(),
             size,
             modified: Some(m),
+            modified_nanos: None,
         }
     }
 
@@ -154,6 +163,31 @@ mod tests {
                 SyncAction::Delete("zzz".into())
             ]
         );
+    }
+
+    #[test]
+    fn mirror_replaces_an_older_source_but_update_does_not() {
+        let src = vec![f("a", 1, 100)];
+        let dst = vec![f("a", 1, 500)];
+        assert!(plan_sync(&src, &dst, SyncMode::Update).is_empty());
+        assert_eq!(
+            plan_sync(&src, &dst, SyncMode::Mirror),
+            vec![SyncAction::Copy("a".into())]
+        );
+    }
+
+    #[test]
+    fn excludes() {
+        let ex = vec![
+            "*.tmp".to_owned(),
+            "node_modules".to_owned(),
+            "build/out/*".to_owned(),
+        ];
+        assert!(is_excluded("x/y.tmp", &ex));
+        assert!(is_excluded("app/node_modules/pkg/index.js", &ex));
+        assert!(is_excluded("build/out/a.o", &ex));
+        assert!(!is_excluded("build/src/a.c", &ex));
+        assert!(!is_excluded("tmp/x.txt", &ex));
     }
 
     #[test]

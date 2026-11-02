@@ -68,16 +68,17 @@ fn entry_from(name: String, path: String, md: &std::fs::Metadata) -> Entry {
     };
     #[cfg(not(unix))]
     let permissions = None;
+    let since_epoch = md
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok());
     Entry {
         name,
         path,
         kind,
         size: md.len(),
-        modified: md
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs()),
+        modified: since_epoch.map(|d| d.as_secs()),
+        modified_nanos: since_epoch.map(|d| d.subsec_nanos()),
         permissions,
         owner: None,
         group: None,

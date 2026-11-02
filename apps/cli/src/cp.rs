@@ -55,13 +55,13 @@ impl From<Existing> for ExistingPolicy {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum Loc {
+pub(crate) enum Loc {
     Local(String),
     Remote { host: String, path: String },
 }
 
 /// `HOST:PATH` is remote; `C:\x`, `./a:b` and plain paths are local.
-fn parse_loc(s: &str) -> Loc {
+pub(crate) fn parse_loc(s: &str) -> Loc {
     let looks_like_drive = s.len() >= 2
         && s.as_bytes()[1] == b':'
         && s.as_bytes()[0].is_ascii_alphabetic()
@@ -87,7 +87,7 @@ fn parse_loc(s: &str) -> Loc {
     }
 }
 
-fn absolute_local(p: &str) -> Result<String> {
+pub(crate) fn absolute_local(p: &str) -> Result<String> {
     Ok(path_to_slash(
         &std::path::absolute(Path::new(p)).with_context(|| format!("resolving {p}"))?,
     ))
@@ -101,7 +101,11 @@ fn base_name(p: &str) -> String {
         .to_owned()
 }
 
-async fn open_remote(app: &App, host: &str, opts: &ConnOpts) -> Result<Arc<dyn RemoteFs>> {
+pub(crate) async fn open_remote(
+    app: &App,
+    host: &str,
+    opts: &ConnOpts,
+) -> Result<Arc<dyn RemoteFs>> {
     let profile = app.resolve(host, opts)?;
     let conn = app.connect(&profile).await?;
     let fs = SftpFs::open(&conn, &SftpOptions::default())

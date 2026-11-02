@@ -69,6 +69,12 @@ hostwick cp -r ./site web:/srv/www           # upload (scp semantics)
 hostwick cp web:/var/log/syslog .            # download; interrupted copies resume
 hostwick cp --existing newer -j 8 --limit 4096 -r src web:dst
 
+hostwick sync ./site web:/srv/www            # WinSCP "Synchronize": copy new/changed files
+hostwick sync --delete -x .git -x '*.tmp' ./site web:/srv/www   # mirror: also delete extras
+hostwick sync -n --delete ./site web:/srv/www  # dry run: show what would change
+hostwick sync --watch ./site web:/srv/www    # "Keep remote directory up to date" (Ctrl+C stops)
+hostwick sync web:/var/log/app ./logs        # either direction
+
 hostwick hosts add web 10.0.0.5 -l deploy -i ~/.ssh/id_ed25519 --folder prod
 hostwick import putty                        # Windows: reads the registry
 hostwick import putty sessions.reg           # anywhere: from `reg export`
@@ -81,6 +87,30 @@ hostwick hosts add db 10.0.0.9 --password-credential prod-db
 
 `--batch` never prompts (for scripts); `--accept-new` trusts first-seen host
 keys but never changed ones.
+
+## Download
+
+Prebuilt Windows, macOS and Linux builds are attached to each
+[GitHub Release](https://github.com/meetdhruva/hostwick/releases). Pushing a
+`v*` tag builds and publishes them (`.github/workflows/release.yml`).
+
+## Directory sync
+
+Like WinSCP's *Synchronize* and *Keep remote directory up to date*:
+
+- One-way, either direction, files compared by size and modification time
+  (copies keep timestamps, so a second run is a no-op).
+- `--delete` mirrors: removes destination files and folders missing from the
+  source. Without it nothing on the destination is ever deleted.
+- `--exclude` globs (`*.tmp`, `.git`, `build/out/*`); excluded files are
+  neither copied nor deleted.
+- `--watch` polls the source (default every 2 s) and syncs on change. Polling
+  works identically on every OS and on network drives; when the source is
+  local, sub-second timestamps catch even same-size edits. Errors such as a
+  dropped connection are reported and retried, never fatal.
+- In the desktop app: **Files → Keep up to date…**, pick a local folder; it
+  uploads changes into the current remote folder until you press **Stop sync**
+  (never deletes remote files).
 
 ## Desktop app
 
@@ -140,6 +170,9 @@ connection sharing, and a pipelined 24 MiB SFTP round trip.
   on a real machine.
 
 ## Known gaps / roadmap
+
+- Two-way sync (WinSCP "Both") and remote-side change detection finer than
+  one second (SFTP reports whole seconds).
 
 - PuTTY `.ppk` keys are not read directly yet; use Pageant (supported) or
   convert with `puttygen key.ppk -O private-openssh -o key`.
