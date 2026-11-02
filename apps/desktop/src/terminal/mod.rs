@@ -21,6 +21,7 @@ pub mod integration;
 pub mod keys;
 pub mod mouse;
 pub mod osc7;
+pub mod reconnect;
 pub mod script;
 mod search;
 mod sessionlog;
@@ -28,7 +29,7 @@ mod sessionlog;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event as TermEvent, EventListener};
@@ -46,7 +47,7 @@ use gpui_kit::base::Selectable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
-use gpui_kit::component::{IconName, Sizable as _};
+use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hostwick_core::{HostProfile, LogMode, Protocol, ScriptStep, Snippet};
@@ -80,7 +81,11 @@ enum Note {
     Wakeup,
     Title(String),
     Bell,
-    Exited(Option<String>),
+    /// The session of attach generation `.0` ended: reason, and whether it
+    /// was dropped (worth reconnecting) rather than ended on purpose.
+    Exited(u64, Option<String>, bool),
+    /// Tick for the reconnect countdown.
+    Tick,
     /// OSC 7 from the shell.
     Cwd(String),
     /// Something to show briefly at the bottom of the terminal.
@@ -94,7 +99,8 @@ enum Note {
 /// "where is the cursor?" must go back to the remote program).
 #[derive(Clone)]
 pub struct Listener {
-    input: UnboundedSender<ShellCommand>,
+    /// The current session's input (replaced when reconnecting).
+    input: Arc<Mutex<UnboundedSender<ShellCommand>>>,
     notes: UnboundedSender<Note>,
 }
 
@@ -102,9 +108,9 @@ impl EventListener for Listener {
     fn send_event(&self, event: TermEvent) {
         match event {
             TermEvent::PtyWrite(s) => {
-                let _ = self
-                    .input
-                    .unbounded_send(ShellCommand::Data(Bytes::from(s.into_bytes())));
+                if let Ok(input) = self.input.lock() {
+                    let _ = input.unbounded_send(ShellCommand::Data(Bytes::from(s.into_bytes())));
+                }
             }
             TermEvent::Title(t) => {
                 let _ = self.notes.unbounded_send(Note::Title(t));
@@ -134,12 +140,15 @@ pub enum TerminalEvent {
     Exited,
     /// The shell reported a new current folder (OSC 7). The file browser
     /// can follow it.
-    #[allow(dead_code)]
     CwdChanged(String),
     /// Menu requests the app handles (it owns tabs and profiles).
     Reconnect,
     Duplicate,
     OpenFiles,
+    /// Open the file browser at the terminal's current folder, linked.
+    OpenFilesHere,
+    /// Split this pane (`true` = below, else to the right).
+    Split(bool),
     LoggingChanged,
 }
 
@@ -178,9 +187,29 @@ pub(crate) struct SearchPaint {
     pub focused: Option<Match>,
 }
 
+/// Auto-reconnect in progress.
+#[derive(Debug, Clone)]
+pub struct ReconnectState {
+    /// Attempts made so far.
+    pub attempt: u32,
+    /// When the next attempt starts (None while one is running).
+    pub due: Option<Instant>,
+    /// Why the last attempt failed.
+    pub last_error: Option<String>,
+    /// Started by the person (menu, Enter): one attempt, no retries.
+    pub manual: bool,
+}
+
 pub struct TerminalView {
     shared: Arc<Shared>,
     input: UnboundedSender<ShellCommand>,
+    listener_input: Arc<Mutex<UnboundedSender<ShellCommand>>>,
+    /// Bumped on every (re)attach; notes from older sessions are ignored.
+    generation: u64,
+    /// The last end was a drop (connection lost), not `exit`.
+    dropped: bool,
+    reconnect: Option<ReconnectState>,
+    reconnect_token: u64,
     notes: UnboundedSender<Note>,
     control: Option<tokio::sync::mpsc::Sender<Control>>,
     transport: TransportKind,
@@ -270,13 +299,11 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let parts = session.into_parts();
-        let (shell_in, mut shell_out) = (parts.input, parts.output);
-        let (input_tx, mut input_rx) = unbounded::<ShellCommand>();
+        let (input_tx, _) = unbounded::<ShellCommand>();
         let (notes_tx, notes_rx) = unbounded::<Note>();
-
+        let listener_input = Arc::new(Mutex::new(input_tx.clone()));
         let listener = Listener {
-            input: input_tx.clone(),
+            input: listener_input.clone(),
             notes: notes_tx.clone(),
         };
         let settings = Settings::get(cx).clone();
@@ -291,73 +318,6 @@ impl TerminalView {
             watch: script::Watch::default(),
         });
 
-        // Ordered input pump: UI queue → transport (with backpressure there).
-        rt.spawn(async move {
-            while let Some(cmd) = input_rx.next().await {
-                if shell_in.send(cmd).await.is_err() {
-                    break;
-                }
-            }
-        });
-
-        // Parser: output → grid, off the UI thread.
-        let parser_shared = shared.clone();
-        let parser_notes = notes_tx.clone();
-        rt.spawn(async move {
-            let notes_tx = parser_notes;
-            let mut processor: Processor = Processor::new();
-            let mut osc7 = osc7::Osc7Scanner::default();
-            let mut exit: Option<String> = None;
-            let wake = |s: &Shared| {
-                if !s.dirty.swap(true, Ordering::AcqRel) {
-                    let _ = notes_tx.unbounded_send(Note::Wakeup);
-                }
-            };
-            'outer: while let Some(ev) = shell_out.recv().await {
-                let mut pending = Some(ev);
-                let mut cwd = None;
-                {
-                    let mut term = parser_shared.term.lock();
-                    // Drain everything already queued under one lock.
-                    while let Some(ev) = pending.take() {
-                        match ev {
-                            ShellEvent::Stdout(b) | ShellEvent::Stderr(b) => {
-                                if let Some(dir) = osc7.feed(&b) {
-                                    cwd = Some(dir);
-                                }
-                                processor.advance(&mut *term, &b);
-                                parser_shared.watch.push(&b);
-                                if let Ok(mut log) = parser_shared.log.lock()
-                                    && let Some(l) = log.as_mut()
-                                    && let Err(e) = l.write(&b)
-                                {
-                                    tracing::warn!(error = %e, "session log write failed; logging stopped");
-                                    *log = None;
-                                }
-                            }
-                            ShellEvent::Exit(code) => {
-                                exit = Some(format!("exited with status {code}"))
-                            }
-                            ShellEvent::ExitSignal(sig) => {
-                                exit = Some(format!("killed by signal {sig}"))
-                            }
-                            ShellEvent::Closed => break 'outer,
-                        }
-                        pending = shell_out.try_recv().ok();
-                    }
-                }
-                if let Some(dir) = cwd {
-                    let _ = notes_tx.unbounded_send(Note::Cwd(dir));
-                }
-                wake(&parser_shared);
-            }
-            parser_shared.watch.close();
-            wake(&parser_shared);
-            let _ = notes_tx.unbounded_send(Note::Exited(
-                exit.or_else(|| Some("connection closed".into())),
-            ));
-        });
-
         let pump = cx.spawn_in(window, async move |this, cx| {
             let mut notes: UnboundedReceiver<Note> = notes_rx;
             while let Some(note) = notes.next().await {
@@ -368,12 +328,17 @@ impl TerminalView {
             }
         });
 
-        Self {
+        let mut view = Self {
             shared,
             input: input_tx,
+            listener_input,
+            generation: 0,
+            dropped: false,
+            reconnect: None,
+            reconnect_token: 0,
             notes: notes_tx,
-            control: parts.control,
-            transport: parts.kind,
+            control: None,
+            transport: session.kind(),
             rt: rt.clone(),
             focus: cx.focus_handle(),
             title: title.into(),
@@ -400,6 +365,252 @@ impl TerminalView {
             row_cache: highlight::RowCache::default(),
             mouse: MouseReport::default(),
             _pump: pump,
+        };
+        view.start(session);
+        view
+    }
+
+    /// Wire `session` into this view: input pump and output parser. The
+    /// grid (and its scrollback) is kept.
+    fn start(&mut self, session: TerminalSession) {
+        self.generation += 1;
+        let generation = self.generation;
+        let parts = session.into_parts();
+        let (shell_in, mut shell_out) = (parts.input, parts.output);
+        let (input_tx, mut input_rx) = unbounded::<ShellCommand>();
+        if let Ok(mut l) = self.listener_input.lock() {
+            *l = input_tx.clone();
+        }
+        self.input = input_tx;
+        self.control = parts.control;
+        self.transport = parts.kind;
+        let kind = parts.kind;
+
+        // Ordered input pump: UI queue → transport (with backpressure there).
+        self.rt.spawn(async move {
+            while let Some(cmd) = input_rx.next().await {
+                if shell_in.send(cmd).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Parser: output → grid, off the UI thread.
+        let parser_shared = self.shared.clone();
+        let notes_tx = self.notes.clone();
+        self.rt.spawn(async move {
+            let mut processor: Processor = Processor::new();
+            let mut osc7 = osc7::Osc7Scanner::default();
+            let mut exit: Option<String> = None;
+            let mut end = reconnect::EndSeen::default();
+            let wake = |s: &Shared| {
+                if !s.dirty.swap(true, Ordering::AcqRel) {
+                    let _ = notes_tx.unbounded_send(Note::Wakeup);
+                }
+            };
+            'outer: while let Some(ev) = shell_out.recv().await {
+                let mut pending = Some(ev);
+                let mut cwd = None;
+                {
+                    let mut term = parser_shared.term.lock();
+                    // Drain everything already queued under one lock.
+                    while let Some(ev) = pending.take() {
+                        match ev {
+                            ShellEvent::Stdout(b) | ShellEvent::Stderr(b) => {
+                                // Telnet/serial report transport failures
+                                // as a `[...]` line on stderr.
+                                if kind != TransportKind::Ssh && b.starts_with(b"\r\n[") {
+                                    end.failure = true;
+                                }
+                                if let Some(dir) = osc7.feed(&b) {
+                                    cwd = Some(dir);
+                                }
+                                processor.advance(&mut *term, &b);
+                                parser_shared.watch.push(&b);
+                                if let Ok(mut log) = parser_shared.log.lock()
+                                    && let Some(l) = log.as_mut()
+                                    && let Err(e) = l.write(&b)
+                                {
+                                    tracing::warn!(error = %e, "session log write failed; logging stopped");
+                                    *log = None;
+                                }
+                            }
+                            ShellEvent::Exit(code) => {
+                                end.exit_status = true;
+                                exit = Some(format!("exited with status {code}"))
+                            }
+                            ShellEvent::ExitSignal(sig) => {
+                                end.exit_status = true;
+                                exit = Some(format!("killed by signal {sig}"))
+                            }
+                            ShellEvent::Closed => break 'outer,
+                        }
+                        pending = shell_out.try_recv().ok();
+                    }
+                }
+                if let Some(dir) = cwd {
+                    let _ = notes_tx.unbounded_send(Note::Cwd(dir));
+                }
+                wake(&parser_shared);
+            }
+            parser_shared.watch.close();
+            wake(&parser_shared);
+            let dropped = reconnect::is_drop(kind, end);
+            let reason = exit.unwrap_or_else(|| {
+                if dropped {
+                    "connection lost".into()
+                } else {
+                    "connection closed".into()
+                }
+            });
+            let _ = notes_tx.unbounded_send(Note::Exited(generation, Some(reason), dropped));
+        });
+    }
+
+    /// Continue in this view with a new session (reconnect): scrollback is
+    /// kept, a marker line shows where the new session starts.
+    pub fn reattach(&mut self, session: TerminalSession, cx: &mut Context<Self>) {
+        // Hang up whatever is still running.
+        let _ = self.input.unbounded_send(ShellCommand::Close);
+        if let Some(t) = self.script.take() {
+            t.abort();
+        }
+        {
+            let mut term = self.shared.term.lock();
+            let mut p: Processor = Processor::new();
+            let stamp = chrono::Local::now().format("%H:%M:%S");
+            let marker = format!("\r\n\x1b[0;2m── reconnected {stamp} ──\x1b[0m\r\n");
+            p.advance(&mut *term, marker.as_bytes());
+            if term.grid().display_offset() != 0 {
+                term.scroll_display(Scroll::Bottom);
+            }
+        }
+        self.shared.watch.reset();
+        self.start(session);
+        self.exited = None;
+        self.dropped = false;
+        self.reconnect = None;
+        self.mouse = MouseReport::default();
+        let size = self.size;
+        let _ = self.input.unbounded_send(ShellCommand::Resize {
+            cols: u32::try_from(size.cols).unwrap_or(80),
+            rows: u32::try_from(size.rows).unwrap_or(24),
+        });
+        cx.emit(TerminalEvent::TitleChanged);
+        cx.notify();
+    }
+
+    /// Current grid size (to open a replacement session at the same size).
+    pub fn grid_size(&self) -> GridSize {
+        self.size
+    }
+
+    /// The last session end was a dropped connection.
+    pub fn was_dropped(&self) -> bool {
+        self.exited.is_some() && self.dropped
+    }
+
+    // ---- auto-reconnect ------------------------------------------------------
+
+    pub fn reconnect_state(&self) -> Option<&ReconnectState> {
+        self.reconnect.as_ref()
+    }
+
+    /// Schedule auto-reconnect attempt number `attempt` (backoff), emitting
+    /// [`TerminalEvent::Reconnect`] when it is due.
+    pub fn schedule_reconnect(
+        &mut self,
+        attempt: u32,
+        error: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let wait = reconnect::delay(attempt);
+        self.reconnect = Some(ReconnectState {
+            attempt,
+            due: Some(Instant::now() + wait),
+            last_error: error,
+            manual: false,
+        });
+        self.reconnect_token += 1;
+        let token = self.reconnect_token;
+        let notes = self.notes.clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(500))
+                    .await;
+                let fire = this.update(cx, |v, _| {
+                    if v.reconnect_token != token {
+                        return None;
+                    }
+                    let due = v.reconnect.as_ref().and_then(|r| r.due)?;
+                    Some(Instant::now() >= due)
+                });
+                match fire {
+                    Ok(Some(true)) => {
+                        let _ = this.update(cx, |v, cx| v.reconnect_now(cx));
+                        break;
+                    }
+                    Ok(Some(false)) => {
+                        let _ = notes.unbounded_send(Note::Tick);
+                    }
+                    _ => break,
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Start the pending reconnect attempt now.
+    pub fn reconnect_now(&mut self, cx: &mut Context<Self>) {
+        if let Some(r) = self.reconnect.as_mut() {
+            r.due = None;
+            self.reconnect_token += 1;
+            cx.emit(TerminalEvent::Reconnect);
+            cx.notify();
+        }
+    }
+
+    /// A reconnect the person asked for is running.
+    pub fn begin_manual_reconnect(&mut self, cx: &mut Context<Self>) {
+        if self.reconnect.as_ref().is_some_and(|r| !r.manual) {
+            // Auto-reconnect already pending: this is its attempt.
+            if let Some(r) = self.reconnect.as_mut() {
+                r.due = None;
+            }
+        } else {
+            self.reconnect = Some(ReconnectState {
+                attempt: 0,
+                due: None,
+                last_error: None,
+                manual: true,
+            });
+        }
+        self.reconnect_token += 1;
+        cx.notify();
+    }
+
+    pub fn cancel_reconnect(&mut self, cx: &mut Context<Self>) {
+        self.reconnect = None;
+        self.reconnect_token += 1;
+        cx.notify();
+    }
+
+    /// A reconnect attempt failed: try again later, or give up for good
+    /// (`fatal`: authentication or host-key problems).
+    pub fn reconnect_failed(&mut self, error: String, fatal: bool, cx: &mut Context<Self>) {
+        match self.reconnect.as_ref() {
+            Some(r) if !fatal && !r.manual => {
+                let next = r.attempt + 1;
+                self.schedule_reconnect(next, Some(error), cx);
+            }
+            _ => {
+                self.reconnect = None;
+                self.reconnect_token += 1;
+                self.exited = Some(format!("reconnect failed: {error}"));
+                cx.notify();
+            }
         }
     }
 
@@ -415,12 +626,17 @@ impl TerminalView {
                 cx.notify();
             }
             Note::Bell => {}
-            Note::Exited(reason) => {
+            Note::Exited(generation, reason, dropped) => {
+                if generation != self.generation {
+                    return;
+                }
                 self.exited = reason;
+                self.dropped = dropped;
                 self.mouse = MouseReport::default();
                 cx.emit(TerminalEvent::Exited);
                 cx.notify();
             }
+            Note::Tick => cx.notify(),
             Note::Cwd(dir) => {
                 if self.cwd.as_deref() != Some(dir.as_str()) {
                     self.cwd = Some(dir.clone());
@@ -529,7 +745,7 @@ impl TerminalView {
     /// types a line, `WaitFor` waits for output text, `Sleep` pauses. A
     /// failure (e.g. a wait timing out) shows a notice; the script stops
     /// quietly when the session ends.
-    #[allow(dead_code)] // API for the app ("Run script…", automation)
+    #[allow(dead_code)] // API for automation ("Run script…")
     pub fn run_script(&mut self, steps: Vec<ScriptStep>, cx: &mut Context<Self>) {
         self.start_script(steps, false, false, cx);
     }
@@ -982,7 +1198,11 @@ impl TerminalView {
         if self.exited.is_some() {
             // PuTTY-style: Enter on a dead session reconnects.
             if key == "enter" && !m.control && !m.alt && !m.platform {
-                cx.emit(TerminalEvent::Reconnect);
+                if self.reconnect.is_some() {
+                    self.reconnect_now(cx);
+                } else {
+                    cx.emit(TerminalEvent::Reconnect);
+                }
                 cx.stop_propagation();
             }
             return;
@@ -1410,9 +1630,9 @@ impl TerminalView {
             .h(px(26.0))
             .px(px(6.0))
             .overflow_x_scroll()
-            .bg(hsla(0.0, 0.0, 0.13, 1.0))
+            .bg(cx.theme().tab_bar)
             .border_b_1()
-            .border_color(hsla(0.0, 0.0, 0.25, 1.0))
+            .border_color(cx.theme().border)
             .children(snippets.iter().enumerate().map(|(i, snip)| {
                 let s = snip.clone();
                 let mut tip: String = snip.text.chars().take(300).collect();
@@ -1454,6 +1674,24 @@ impl Render for TerminalView {
         let script_running = self.is_script_running();
         let snippets = self.snippets(cx);
         let notice = self.notice.clone();
+        let reconnecting = self.reconnect.is_some();
+        let reconnect_banner = self.reconnect.as_ref().map(|r| {
+            let err = r
+                .last_error
+                .as_deref()
+                .map(|e| format!(" ({e})"))
+                .unwrap_or_default();
+            match r.due {
+                Some(due) => {
+                    let secs = due.saturating_duration_since(Instant::now()).as_secs() + 1;
+                    (
+                        format!("Connection lost{err}. Reconnecting in {secs} s…"),
+                        true,
+                    )
+                }
+                None => (format!("Reconnecting (attempt {})…", r.attempt + 1), false),
+            }
+        });
         let view = cx.entity().downgrade();
         let body = div()
             .id("terminal")
@@ -1519,13 +1757,58 @@ impl Render for TerminalView {
                         ),
                 )
             })
-            .when_some(exited, |d, reason| {
+            .when_some(reconnect_banner, |d, (text, waiting)| {
+                d.child(
+                    div()
+                        .id("reconnecting")
+                        .absolute()
+                        .bottom(px(8.0))
+                        .right(px(12.0))
+                        .max_w(px(720.0))
+                        .flex()
+                        .gap(px(8.0))
+                        .items_center()
+                        .px(px(10.0))
+                        .py(px(4.0))
+                        .rounded(px(4.0))
+                        .bg(hsla(0.11, 0.55, 0.22, 0.95))
+                        .text_color(hsla(0.0, 0.0, 0.95, 1.0))
+                        .text_size(px(12.0))
+                        .child(div().flex_1().min_w_0().whitespace_normal().child(text))
+                        .when(waiting, |d| {
+                            d.child(
+                                div()
+                                    .id("reconnect-now")
+                                    .flex_none()
+                                    .px(px(8.0))
+                                    .rounded(px(3.0))
+                                    .bg(hsla(0.58, 0.6, 0.45, 1.0))
+                                    .cursor_pointer()
+                                    .child("Now")
+                                    .on_click(cx.listener(|v, _, _, cx| v.reconnect_now(cx))),
+                            )
+                        })
+                        .child(
+                            div()
+                                .id("reconnect-cancel")
+                                .flex_none()
+                                .px(px(8.0))
+                                .rounded(px(3.0))
+                                .bg(hsla(0.0, 0.0, 0.35, 1.0))
+                                .cursor_pointer()
+                                .child("Cancel")
+                                .on_click(cx.listener(|v, _, _, cx| v.cancel_reconnect(cx))),
+                        ),
+                )
+            })
+            .when_some(exited.filter(|_| !reconnecting), |d, reason| {
                 d.child(
                     div()
                         .id("ended")
                         .absolute()
                         .bottom(px(8.0))
                         .right(px(12.0))
+                        .max_w(px(720.0))
                         .flex()
                         .gap(px(10.0))
                         .items_center()
@@ -1535,10 +1818,17 @@ impl Render for TerminalView {
                         .bg(hsla(0.0, 0.0, 0.2, 0.9))
                         .text_color(hsla(0.0, 0.0, 0.9, 1.0))
                         .text_size(px(12.0))
-                        .child(format!("Session ended — {reason}. Press Enter to"))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .whitespace_normal()
+                                .child(format!("Session ended — {reason}. Press Enter to")),
+                        )
                         .child(
                             div()
                                 .id("reconnect")
+                                .flex_none()
                                 .px(px(8.0))
                                 .rounded(px(3.0))
                                 .bg(hsla(0.58, 0.6, 0.45, 1.0))
@@ -1627,11 +1917,26 @@ impl Render for TerminalView {
                     })
                     .separator();
                 if is_ssh {
-                    menu = menu.item(
-                        PopupMenuItem::new("Open files (SFTP)")
-                            .on_click(act(|_, cx| cx.emit(TerminalEvent::OpenFiles))),
-                    );
+                    menu = menu
+                        .item(
+                            PopupMenuItem::new("Open files here")
+                                .on_click(act(|_, cx| cx.emit(TerminalEvent::OpenFilesHere))),
+                        )
+                        .item(
+                            PopupMenuItem::new("Open files (SFTP)")
+                                .on_click(act(|_, cx| cx.emit(TerminalEvent::OpenFiles))),
+                        );
                 }
+                menu = menu
+                    .item(
+                        PopupMenuItem::new("Split right")
+                            .on_click(act(|_, cx| cx.emit(TerminalEvent::Split(false)))),
+                    )
+                    .item(
+                        PopupMenuItem::new("Split down")
+                            .on_click(act(|_, cx| cx.emit(TerminalEvent::Split(true)))),
+                    )
+                    .separator();
                 menu.item(
                     PopupMenuItem::new("Duplicate session")
                         .on_click(act(|_, cx| cx.emit(TerminalEvent::Duplicate))),

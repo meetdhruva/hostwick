@@ -3492,6 +3492,7 @@ dependencies = [
  "gpui-kit",
  "hostwick-core",
  "hostwick-import",
+ "hostwick-keys",
  "hostwick-sftp",
  "hostwick-ssh",
  "hostwick-store",

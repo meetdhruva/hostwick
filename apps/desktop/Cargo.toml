@@ -29,6 +29,7 @@ hostwick-store.workspace = true
 hostwick-vault.workspace = true
 hostwick-import.workspace = true
 hostwick-term.workspace = true
+hostwick-keys.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 futures.workspace = true

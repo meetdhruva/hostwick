@@ -60,6 +60,22 @@ pub struct Settings {
     pub mouse_reporting: bool,
     /// Show the snippet button bar above terminals.
     pub show_button_bar: bool,
+    /// Lock saved passwords after this many idle minutes (0 = when the app
+    /// quits).
+    pub vault_auto_lock_minutes: u32,
+    /// Sync settings at startup, after changes and every few minutes.
+    pub sync_auto: bool,
+}
+
+/// Which way a settings sync goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncMode {
+    /// Merge both ways.
+    Sync,
+    /// Make the sync file match this computer.
+    Push,
+    /// Make this computer match the sync file.
+    Pull,
 }
 
 impl Default for Settings {
@@ -84,6 +100,8 @@ impl Default for Settings {
             language: String::new(),
             mouse_reporting: true,
             show_button_bar: true,
+            vault_auto_lock_minutes: 0,
+            sync_auto: true,
         }
     }
 }
@@ -103,14 +121,56 @@ impl Settings {
             .sanitized()
     }
 
+    /// Save, and record the shareable part for settings sync.
     pub fn save(&self, store: &SqliteStore) -> Result<(), String> {
+        self.save_local(store)?;
+        store
+            .set_app_settings(&self.synced_json())
+            .map_err(|e| e.to_string())
+    }
+
+    /// Save on this computer only (applying settings received by sync).
+    pub fn save_local(&self, store: &SqliteStore) -> Result<(), String> {
         let json = serde_json::to_string(self).map_err(|e| e.to_string())?;
         store.set_setting(KEY, &json).map_err(|e| e.to_string())
+    }
+
+    /// The settings other computers get: everything except what belongs to
+    /// this computer (paths, the sync folder, the app log level).
+    pub fn synced_json(&self) -> String {
+        let shared = Self {
+            session_log_dir: String::new(),
+            external_editor: String::new(),
+            sync_folder: String::new(),
+            log_level: String::new(),
+            ..self.clone()
+        };
+        serde_json::to_string(&shared).unwrap_or_default()
+    }
+
+    /// Settings received from another computer, keeping this computer's
+    /// own paths. Unreadable input leaves `current` as it is.
+    pub fn from_synced(json: &str, current: &Self) -> Self {
+        match serde_json::from_str::<Self>(json) {
+            Ok(s) => Self {
+                session_log_dir: current.session_log_dir.clone(),
+                external_editor: current.external_editor.clone(),
+                sync_folder: current.sync_folder.clone(),
+                log_level: current.log_level.clone(),
+                ..s
+            }
+            .sanitized(),
+            Err(e) => {
+                tracing::warn!(error = %e, "ignoring unreadable synced settings");
+                current.clone()
+            }
+        }
     }
 
     /// Clamp values a hand-edited database might contain.
     pub fn sanitized(mut self) -> Self {
         self.font_size = self.font_size.clamp(6.0, 48.0);
+        self.vault_auto_lock_minutes = self.vault_auto_lock_minutes.min(24 * 60);
         self.scrollback_lines = self.scrollback_lines.clamp(100, 1_000_000);
         if !matches!(
             self.log_level.as_str(),
@@ -167,5 +227,33 @@ mod tests {
             (l.font_size, l.log_level.as_str(), l.copy_on_select),
             (48.0, "info", true)
         );
+    }
+
+    #[test]
+    fn synced_settings_keep_local_paths() {
+        let store = SqliteStore::in_memory().unwrap_or_else(|e| panic!("{e}"));
+        let here = Settings {
+            session_log_dir: "/home/me/logs".into(),
+            external_editor: "code -w".into(),
+            log_level: "debug".into(),
+            font_size: 12.0,
+            ..Default::default()
+        };
+        here.save(&store).unwrap_or_else(|e| panic!("{e}"));
+        let (json, _) = store
+            .app_settings()
+            .unwrap_or_else(|e| panic!("{e}"))
+            .unwrap_or_default();
+        assert!(!json.contains("/home/me/logs") && !json.contains("code -w"));
+        let there = Settings {
+            session_log_dir: r"C:\logs".into(),
+            log_level: "warn".into(),
+            ..Default::default()
+        };
+        let merged = Settings::from_synced(&json, &there);
+        assert_eq!(merged.font_size, 12.0);
+        assert_eq!(merged.session_log_dir, r"C:\logs");
+        assert_eq!(merged.log_level, "warn");
+        assert_eq!(Settings::from_synced("nonsense", &there), there);
     }
 }

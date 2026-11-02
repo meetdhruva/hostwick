@@ -108,6 +108,10 @@ pub struct FilesView {
     open_only: std::collections::HashSet<u64>,
     edit_tx: UnboundedSender<EditEvent>,
     sync: Option<ActiveSync>,
+    /// Opened from a terminal: its tab title, and whether the remote pane
+    /// follows its current folder.
+    link: Option<String>,
+    follow: bool,
     focus: FocusHandle,
     _tasks: Vec<Task<()>>,
     _subs: Vec<Subscription>,
@@ -203,6 +207,8 @@ impl FilesView {
             open_only: Default::default(),
             edit_tx,
             sync: None,
+            link: None,
+            follow: false,
             focus: cx.focus_handle(),
             _tasks: vec![edit_task],
             _subs: vec![s1, s2],
@@ -214,9 +220,28 @@ impl FilesView {
 
     // ---- public API for the app ------------------------------------------
 
+    /// Link this browser to a terminal (by its title) so it follows the
+    /// terminal's folder; `None` unlinks.
+    pub fn set_link(&mut self, terminal: Option<String>, cx: &mut Context<Self>) {
+        self.follow = terminal.is_some();
+        self.link = terminal;
+        cx.notify();
+    }
+
+    /// Following the linked terminal's folder now.
+    pub fn following(&self) -> bool {
+        self.link.is_some() && self.follow
+    }
+
+    pub fn toggle_follow(&mut self, cx: &mut Context<Self>) {
+        if self.link.is_some() {
+            self.follow = !self.follow;
+            cx.notify();
+        }
+    }
+
     /// Show `path` in the remote pane (e.g. to follow the terminal's
     /// current folder).
-    #[allow(dead_code)] // API for the app (terminal ↔ browser folder sync)
     pub fn navigate_remote(&mut self, path: String, cx: &mut Context<Self>) {
         self.navigate(Side::Remote, path, cx);
     }
@@ -1497,6 +1522,24 @@ impl FilesView {
                     })),
             )
             .child(edits_menu)
+            .when_some(self.link.clone(), |d, term| {
+                d.child(
+                    Button::new("follow")
+                        .small()
+                        .icon(IconName::RefreshCw)
+                        .label(if self.follow {
+                            "Following terminal"
+                        } else {
+                            "Follow terminal"
+                        })
+                        .selected(self.follow)
+                        .when(self.follow, |b| b.primary())
+                        .tooltip(format!(
+                            "Show the folder the terminal “{term}” is in, as it changes"
+                        ))
+                        .on_click(cx.listener(|v, _, _, cx| v.toggle_follow(cx))),
+                )
+            })
             .child(div().flex_1())
             .child(
                 Button::new("root")

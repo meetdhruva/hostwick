@@ -113,6 +113,19 @@ impl Watch {
         self.notify.notify_waiters();
     }
 
+    /// A new session starts in the same terminal (reconnect): forget the
+    /// old output and open again.
+    pub fn reset(&self) {
+        if let Ok(mut r) = self.recent.lock() {
+            let end = r.end();
+            r.text.clear();
+            r.start = end;
+            r.last_output = None;
+            r.stripper = Stripper::default();
+        }
+        self.closed.store(false, Ordering::Release);
+    }
+
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
     }

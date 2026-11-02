@@ -6,17 +6,45 @@
 
 mod app;
 mod backend;
+mod editors;
 mod files;
 mod hostform;
+mod layout;
 mod logging;
 mod settings;
 mod settingsform;
 mod terminal;
+mod tools;
 mod util;
+mod vault;
+mod vaultui;
 
 use std::sync::Arc;
 
 use gpui_kit::*;
+
+// Icons beyond the component set (tools menu, vault indicator).
+gpui_kit::assets::icon_assets!(ExtraIcons, [Wrench, LockOpen]);
+
+/// The component icons plus the few extra ones the app uses.
+struct AppAssets;
+
+impl AssetSource for AppAssets {
+    fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        if let Some(bytes) = ExtraIcons.load(path)? {
+            return Ok(Some(bytes));
+        }
+        gpui_kit::assets::Assets.load(path)
+    }
+
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        let mut paths = gpui_kit::assets::Assets.list(path)?;
+        paths.extend(ExtraIcons.list(path)?);
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+}
 
 fn main() {
     let (prompts_tx, prompts_rx) = futures::channel::mpsc::unbounded();
@@ -32,7 +60,7 @@ fn main() {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), data = %backend.paths.data_dir.display(), "starting");
 
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(AppAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
             settings::apply_theme(settings.theme, cx);
