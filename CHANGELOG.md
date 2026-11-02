@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+**Desktop app**
+- Saved passwords: password, key-passphrase, sudo and proxy prompts offer *Remember*; the first save creates a vault (master password with a strength hint), later sessions unlock it once and log in automatically. Uses the CLI's vault file; secrets are stored only after the server accepted them; key passphrases are saved per key file. A saved password that stopped working is asked for again with *Update the saved password* — no loops. Settings → Saved passwords: lock now, auto-lock after idle minutes, change the master password, remove entries.
+- Auto-reconnect when an SSH or telnet connection drops (never after `exit`, a login failure or a host-key problem): 1, 2, 5, 10, then every 30 s, with a *Reconnecting in 5 s… [Now] [Cancel]* banner; the scrollback stays (a marker line shows the reconnect) and the login script runs again. Manual reconnect keeps the scrollback too.
+- Restore tabs at startup, split layout included; restored tabs connect when first shown.
+- Split panes: split right (Ctrl+Shift+D / ⌘D) or down (Ctrl+Shift+E / ⌘⇧D), nested, resizable, focus by click or Alt+arrows, Ctrl+Shift+W closes the focused pane; broadcast reaches every pane.
+- *Open files here*: the file browser opens at the terminal's folder and follows its `cd`s (toggle in the toolbar and tab menu); a hint points to Shell integration when no folder is known.
+- Host editor in sections (General, Authentication, Connection, Terminal, Files, Advanced) exposing every host option: protocol picker (SSH/Telnet/Serial) with serial settings and a port picker, Kerberos, saved-secret state with *Forget*, SOCKS/HTTP proxy, agent and X11 forwarding (display validated), file protocol, sudo, login script validated as you type, shell integration, per-host snippets; problems are shown inline and Save jumps to them.
+- Settings in sections, adding mouse reporting and the button bar, a keyword-highlighting rule editor with live preview, global snippets, auto-reconnect / restore tabs, external editor with Browse…, saved passwords, and settings sync (folder, passphrase kept in the vault, Sync now / push / pull, last result; automatic at startup, after changes and every 5 minutes). Paths and the log level stay per computer.
+- Tools menu: *Generate key…* (OpenSSH or PPK v3/v2, fingerprint, randomart, copy the public key, *Use in host…*), *Inspect or convert key…*, *Known hosts…* (search, remove lines or a host), *Saved passwords…*, *Settings sync…*. Key work runs off the UI thread.
+- Connection notices (X11 unavailable, touch your security key, unusable key files, failed forwards) appear as notifications, de-duplicated and rate-limited.
+- Sidebar: SSH/TEL/COM badge per host, long names and serial device paths truncated with a tooltip; empty-state shortcut hints updated; app shortcuts work before any terminal has focus.
+
+**SSH**
+- `Interaction::secret_outcome` reports whether a password or key passphrase (typed or saved) was accepted; a rejected saved password or passphrase is asked for once instead of skipping the method.
+
 **Terminal**
 - Telnet and serial hosts alongside SSH (new `hostwick-term` crate: one transport interface for all three). Telnet negotiates echo, SGA, binary, terminal type and window size (re-sent on resize), refuses unknown options per RFC 854/1143 without loops, handles `CR NUL`/`CR LF`, echoes locally when the server doesn't, uses TCP keepalive, a connect timeout and the host's proxy. Serial: baud/data/parity/stop bits and flow control, exclusive open, port listing, clear errors for missing, busy and permission-denied ports (the `dialout` hint on Linux) and for an unplugged adapter. Send break (menu, Ctrl+Break) on both. Tab titles name the protocol; Files on a telnet/serial host explains that it needs SSH.
 - Find in scrollback (Ctrl+Shift+F / ⌘F): text or regex, case toggle, `3 of 17`, all visible matches highlighted, Enter/Shift+Enter and F3/Shift+F3, Esc closes. Counting runs off the UI thread in short locked chunks.

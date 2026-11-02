@@ -213,17 +213,66 @@ Like WinSCP's *Synchronize* and *Keep remote directory up to date*:
 cargo run --release -p hostwick-desktop
 ```
 
-Sidebar with saved hosts (folders, search, quick connect), terminal and file
-tabs, a transfer queue with progress and cancel, and broadcast input to every
-open terminal. Host-key, password, passphrase and MFA prompts appear as dialogs.
+Sidebar with saved hosts (folders, search, quick connect, an SSH/TEL/COM badge
+per host), terminal and file tabs with split panes, a transfer queue with
+progress and cancel, and broadcast input to every open terminal. Host-key,
+password, passphrase and MFA prompts appear as dialogs.
+
+**Saved passwords.** Password, key-passphrase, sudo and proxy prompts have a
+*Remember* checkbox. The first time, Hostwick offers to create a vault (a
+master password with a strength hint; the same encrypted `vault.json` the
+`hostwick vault` command uses); later it asks once per session to unlock it,
+then logs in by itself. A secret is saved only after the server accepted it.
+If a saved password stops working, Hostwick asks again (with *Update the saved
+password* ticked) instead of failing or looping. Settings → *Saved passwords*:
+lock now, auto-lock after N idle minutes, change the master password, and
+remove saved entries (listed by host and purpose, never shown). Key
+passphrases are saved per key file, so every host using the key benefits.
+The lock icon in the sidebar header shows (and locks) an unlocked vault.
+
+**Auto-reconnect.** When an SSH or telnet connection drops (not when you type
+`exit`), the terminal shows *Connection lost. Reconnecting in 5 s… [Now]
+[Cancel]* and retries after 1, 2, 5, 10, then every 30 seconds, keeping the
+scrollback (a `── reconnected 12:01:02 ──` line marks the spot) and running
+the login script again. It stops at a login or host-key failure.
+Settings → Connections turns it off.
+
+**Restore tabs.** Open tabs (with their split layout) come back at the next
+start; each connects when you first switch to it, so starting Hostwick is not
+a storm of password prompts. Quick-connect tabs are restored from their
+`user@host:port`.
+
+**Split panes** (MobaXterm/Tabby style): Ctrl+Shift+D splits the current
+terminal to the right, Ctrl+Shift+E downwards (⌘D / ⌘⇧D on macOS), also from
+the terminal and tab menus. Splits nest; drag the dividers; click a pane (or
+Alt+arrow) to focus it; Ctrl+Shift+W closes the focused pane, then the tab.
+A new pane opens the same host over the same SSH connection. Broadcast input
+reaches every pane.
+
+**Files follow the terminal.** Right-click a terminal → *Open files here*
+opens the file browser at the shell's current folder and keeps following it
+as you `cd` (*Following terminal* in the toolbar or the tab menu turns it
+off). The folder comes from OSC 7; turn on *Shell integration* in Edit host →
+Terminal for bash/zsh.
+
+**Tools** (wrench icon): *Generate key…* (Ed25519, ECDSA, RSA 2048–4096;
+OpenSSH or PuTTY `.ppk` v3/v2; fingerprint, randomart, public key with Copy,
+and *Use in host…*), *Inspect or convert key…* (format, type, fingerprint;
+change or remove the passphrase; convert OpenSSH ↔ PPK), *Known hosts…*
+(search, remove selected lines or every key of a host), *Saved passwords…*
+and *Settings sync…*.
+
+**Notifications** for things the connection wants you to know without
+stopping: X11 not available, touch your security key, a key file that could
+not be used, a saved forward that failed (repeats are suppressed).
 
 **Right-click everywhere**
 
 | Where | Menu |
 |---|---|
 | Saved host | Open terminal, Open files, Edit…, Duplicate, Copy address, Delete… |
-| Tab | Reconnect, Duplicate, Open files/terminal, Close, Close others, Close all |
-| Terminal | Copy, Paste, Select all, Find…, Snippets ▸, Copy current folder, Send break (telnet/serial), Stop script, Clear scrollback, Log session to file… / Stop, Open files (SSH), Duplicate, Reconnect |
+| Tab | Reconnect, Split right/down, Send break (telnet/serial), Follow terminal folder (linked file browser), Duplicate, Open files/terminal, Close, Close others, Close all |
+| Terminal | Copy, Paste, Select all, Find…, Snippets ▸, Copy current folder, Send break (telnet/serial), Stop script, Clear scrollback, Log session to file… / Stop, Open files here / Open files (SSH), Split right, Split down, Duplicate, Reconnect |
 | File | Open, Edit (F4), Upload/Download (F5), Move (F6), Rename… (F2), Delete…, New folder… (F7), New symlink…, Copy path, Refresh, Properties (Alt+Enter) |
 
 **Terminal**
@@ -319,15 +368,31 @@ is remembered per host).
 
 Prefer PuTTY's "right-click pastes"? Settings → Right-click → *Paste (PuTTY)*.
 
-**Host editor** (New host… or right-click → Edit…): name, folder, host, port,
-user, key files (OpenSSH or `.ppk`, with Browse…), jump hosts
-(`user@bastion:22, inner`), port forwards (`L8080:localhost:80 R9000:localhost:3000 D1080`,
-`-L 8080:…` also accepted), keepalive, terminal type, session log, notes and
-legacy algorithms for old devices.
+**Host editor** (New host… or right-click → Edit…), in sections:
+*General* (name, folder, protocol SSH/Telnet/Serial — switching adjusts the
+fields and the default port —, host and port, or for serial the device with a
+port picker, speed, data bits, parity, stop bits, flow control; notes),
+*Authentication* (key files with Browse…, `-cert.pub` certificates picked up
+automatically, agent, password with its saved state and *Forget*,
+keyboard-interactive, Kerberos single sign-on with ticket forwarding),
+*Connection* (SOCKS5/SOCKS4/HTTP proxy, jump hosts, port forwards
+`L8080:localhost:80 R9000:localhost:3000 D1080`, keepalive, agent forwarding,
+X11 forwarding and display), *Terminal* (terminal type, login script checked
+as you type, shell integration, the host's snippets, session log), *Files*
+(Auto/SFTP/SCP, open as root through sudo, sudo user, sftp-server path) and
+*Advanced* (legacy algorithms). Problems are shown next to the field, and
+Save jumps to the section that needs attention.
 
-**Settings** (gear icon, `Ctrl+,` / `⌘,`): dark/light theme, terminal font and
-size, scrollback, right-click behaviour, copy-on-select, session logging
-defaults, app log level (applies immediately) and *Open log folder*.
+**Settings** (gear icon, `Ctrl+,` / `⌘,`), in sections: *Appearance* (theme,
+terminal font and size), *Terminal* (scrollback, right-click, copy-on-select,
+mouse reporting, button bar, keyword-highlighting rules with regex toggle,
+colour swatch and a live preview), *Snippets* (global), *Connections*
+(auto-reconnect, restore tabs), *Files* (external editor with Browse…),
+*Session logging*, *Saved passwords*, *Settings sync* (folder with Browse…,
+passphrase kept in the vault, Sync now / replace either side, last result;
+syncs at startup, a few seconds after hosts or settings change and every 5
+minutes) and *Diagnostics* (app log level, log folder). Paths, the editor and
+the log level stay per computer; everything else syncs.
 
 **Logging**
 
@@ -347,7 +412,9 @@ always go to the shell):
 |---|---|
 | Ctrl+Shift+N | New host |
 | Ctrl+Shift+T | Duplicate current tab |
-| Ctrl+Shift+W | Close tab |
+| Ctrl+Shift+D / Ctrl+Shift+E (⌘D / ⌘⇧D) | Split the terminal right / down |
+| Alt+←→↑↓ | Move between split panes |
+| Ctrl+Shift+W | Close the focused pane, then the tab |
 | Ctrl+Shift+R | Reconnect |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
 | Ctrl+Shift+B | Toggle broadcast input |
@@ -359,7 +426,7 @@ always go to the shell):
 | Esc (in the find bar) | Close find |
 | Shift+click / drag | Select text even when a program has the mouse |
 | Ctrl+Break | Send break (telnet, serial) |
-| Enter on an ended session | Reconnect |
+| Enter on an ended session | Reconnect (or reconnect now while waiting) |
 
 When a connection fails, the error lists every authentication method tried and
 why it failed (for example `key work.ppk: wrong passphrase; password: rejected`).
@@ -436,7 +503,15 @@ connection sharing, and a pipelined 24 MiB SFTP round trip.
   password dialogs, colors/CJK/full-screen apps, a 300k-line output flood,
   broadcast input, file browsing, new folder, rename, delete, every
   right-click menu, host editor, settings (theme, font, log level applied
-  live), session logging, import report, shortcuts, reconnect).
+  live), session logging, import report, shortcuts, reconnect). For 0.3:
+  vault create/unlock/remember/auto-login, a changed server password
+  recovered through the *update saved password* prompt, auto-reconnect after
+  killing the server session (and with the server down, then back), no
+  reconnect after `exit`, restored tabs across restarts, splits with
+  broadcast, the file browser following `cd`, every host-editor and settings
+  section in both themes, key generation (the key logs in with OpenSSH) and
+  *Use in host*, known-hosts removal, and settings sync between two
+  `HOSTWICK_HOME`s (hosts and theme).
 - Windows and macOS: not run yet. The code paths are cross-platform and CI
   builds and tests all three OSes; the Windows-only pieces (Pageant/OpenSSH
   agent pipe, registry importers, console VT mode in the CLI) need a first run
@@ -450,8 +525,9 @@ connection sharing, and a pipelined 24 MiB SFTP round trip.
   only hand over files that already exist on disk; local rows work on macOS
   and Wayland).
 
-- The desktop app does not yet unlock the vault (the CLI does); it prompts.
-- OSC 52 clipboard; split panes.
+- Split-pane sizes are not restored (layouts come back evenly split); a
+  restored file browser no longer follows its terminal.
+- OSC 52 clipboard.
 - FTP/S3 adapters behind `RemoteFs`.
 - Native file pickers (upload/download in the desktop app) were not exercised
   headless; the transfer engine behind them is tested.

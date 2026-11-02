@@ -9,14 +9,14 @@ Tabby, SecureCRT, Bitvise, KiTTY and FileZilla. "Have" = in Hostwick v0.2.0.
 |---|---|---|
 | Tabs, many sessions in one window | everyone except PuTTY | Have |
 | Saved sessions in folders, search | all | Have |
-| Saved passwords / auto-login | Solar-PuTTY, MobaXterm, Termius, WinSCP (master password) | **CLI vault only; desktop prompts every time** |
+| Saved passwords / auto-login | Solar-PuTTY, MobaXterm, Termius, WinSCP (master password) | Have (vault + master password, "Remember" on prompts) |
 | Edit remote file in my editor, auto-upload on save | WinSCP, MobaXterm | **Missing** |
 | Two-pane local/remote browser with drag and drop | WinSCP (Commander), FileZilla, MobaXterm | **Missing** (remote pane + OS dialogs only) |
 | Synchronize with preview, keep remote up to date | WinSCP | Partial (CLI dry-run; desktop "Keep up to date" upload-only) |
-| SFTP panel that follows the terminal's folder | MobaXterm | **Missing** |
-| Auto-reconnect when the link drops | Solar-PuTTY, MobaXterm | Manual only (button, Enter, Ctrl+Shift+R) |
+| SFTP panel that follows the terminal's folder | MobaXterm | Have (Open files here + shell integration) |
+| Auto-reconnect when the link drops | Solar-PuTTY, MobaXterm | Have (backoff, keeps scrollback); tabs restored at startup |
 | Post-login scripts / snippets / button bar | Solar-PuTTY, SecureCRT, Termius, KiTTY | **Missing** |
-| Split panes / tiling | MobaXterm, SecureCRT, Tabby | **Missing** |
+| Split panes / tiling | MobaXterm, SecureCRT, Tabby | Have |
 | Send input to all sessions | MobaXterm, SecureCRT | Have (broadcast) |
 | Search scrollback, keyword highlighting | SecureCRT, MobaXterm, Xshell | **Missing** |
 | Mouse in htop/mc/vim | most modern terminals | **Missing** |
