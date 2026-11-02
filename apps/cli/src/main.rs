@@ -9,6 +9,7 @@ mod hosts;
 mod keys;
 mod knownhosts;
 mod prompt;
+mod script;
 mod settingssync;
 mod shell;
 mod sync;
@@ -52,6 +53,9 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Run a WinSCP-style batch script (`-` reads it from stdin).
+    #[command(after_help = script::HELP)]
+    Script(script::ScriptArgs),
     /// Manage saved hosts.
     #[command(subcommand)]
     Hosts(hosts::HostsCmd),
@@ -169,6 +173,7 @@ async fn run(cli: Cli) -> i32 {
             Cmd::Cp(a) => cp::run(&app, a).await,
             Cmd::Sync(a) => sync::run(&app, a).await,
             Cmd::Ls { target, json } => cp::ls(&app, &target, json).await,
+            Cmd::Script(a) => script::run(&app, a).await,
             Cmd::Keygen(a) => keys::keygen(&app, a),
             Cmd::Keyconv(a) => keys::keyconv(&app, a),
             Cmd::Keyinfo(a) => keys::keyinfo(a),

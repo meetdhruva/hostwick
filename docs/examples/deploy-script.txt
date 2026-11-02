@@ -1,0 +1,43 @@
+# Hostwick batch script: upload a site, keep releases, restart the service.
+#
+#   hostwick --batch script docs/examples/deploy-script.txt -D env=prod -- v1.4.2
+#
+# %env% comes from -D, %1% from the parameters after --, and any other %NAME%
+# from the environment. Comments must be on their own line.
+
+# Stop at the first error (exit code 1, with the line number) and overwrite
+# existing files without asking.
+option batch abort
+option confirm off
+
+# Pin the server's host key (as printed by
+# `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`), so the script never
+# talks to an unexpected server.
+open deploy@web-%env%.example.com -privatekey="~/.ssh/deploy_ed25519" -hostkey="SHA256:REPLACE-WITH-YOUR-HOST-KEY-FINGERPRINT"
+
+echo Deploying release %1% to %env%
+cd /srv/www
+lcd "build/site"
+
+# Upload only changed pages; mirror the assets folder (deletes stale files,
+# never touches *.tmp).
+put -n *.html config.php ./
+sync remote assets assets --delete -x *.tmp
+
+# Paths with spaces need quotes.
+put "release notes.txt" docs/
+
+# Keep a copy of this release and point "current" at it (rm removes the
+# symlink itself, never what it points to).
+mkdir -p releases/%1%
+call cp -a assets releases/%1%/
+chmod 640 config.php
+rm current
+ln -s releases/%1% current
+
+call sudo systemctl reload nginx
+
+# Fetch the application logs into ./logs (which must exist).
+lcd ../..
+get /var/log/app/*.log logs/
+exit
