@@ -1,0 +1,28 @@
+[package]
+name = "hostwick-term"
+description = "Terminal transports for Hostwick: SSH shells, telnet and serial ports behind one interface."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+hostwick-core.workspace = true
+hostwick-ssh.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+socket2 = { version = "0.6", features = ["all"] }
+# No libudev: Linux port listing reads /sys instead, so no system library is
+# needed to build or run.
+serialport = { version = "4.10", default-features = false }
+
+[dev-dependencies]
+anyhow.workspace = true
+tokio = { workspace = true, features = ["process"] }
