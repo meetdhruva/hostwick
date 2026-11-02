@@ -51,6 +51,22 @@ use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+
+gpui_kit::actions!(terminal, [SendTab, SendBackTab, SendInterrupt]);
+
+/// The app root binds Tab/Shift+Tab to focus cycling and Ctrl+C to copy.
+/// In a terminal those keys belong to the shell (completion, interrupt), so
+/// bind them in the deeper "Terminal" context, which wins.
+fn bind_keys_once(cx: &mut App) {
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !DONE.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        cx.bind_keys([
+            KeyBinding::new("tab", SendTab, Some("Terminal")),
+            KeyBinding::new("shift-tab", SendBackTab, Some("Terminal")),
+            KeyBinding::new("ctrl-c", SendInterrupt, Some("Terminal")),
+        ]);
+    }
+}
 use hostwick_core::{HostProfile, LogMode, Protocol, ScriptStep, Snippet};
 use hostwick_term::{Control, ShellCommand, ShellEvent, TerminalSession, TransportKind};
 
@@ -150,6 +166,8 @@ pub enum TerminalEvent {
     OpenFilesHere,
     /// Split this pane (`true` = below, else to the right).
     Split(bool),
+    /// Close this pane (the last pane closes the tab).
+    Close,
     LoggingChanged,
 }
 
@@ -308,6 +326,7 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        bind_keys_once(cx);
         let (input_tx, _) = unbounded::<ShellCommand>();
         let (notes_tx, notes_rx) = unbounded::<Note>();
         let listener_input = Arc::new(Mutex::new(input_tx.clone()));
@@ -1344,6 +1363,36 @@ impl TerminalView {
 
     // ---- keyboard ----------------------------------------------------------------
 
+    /// Tab, Shift+Tab and Ctrl+C arrive as actions (see `bind_keys_once`).
+    /// Only the terminal itself takes them; the search box keeps its own.
+    fn on_shell_key(
+        &mut self,
+        key: &str,
+        shift: bool,
+        ctrl: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.focus.is_focused(window) {
+            cx.propagate();
+            return;
+        }
+        if self.exited.is_some() {
+            return;
+        }
+        let mods = keys::Mods {
+            ctrl,
+            alt: false,
+            shift,
+            platform: false,
+        };
+        let app_cursor = self.mode().contains(TermMode::APP_CURSOR);
+        if let Some(bytes) = keys::encode(key, mods, app_cursor) {
+            self.shared.term.lock().selection = None;
+            self.send_user(bytes, cx);
+        }
+    }
+
     fn on_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let ks = &ev.keystroke;
         let m = ks.modifiers;
@@ -1914,6 +1963,15 @@ impl Render for TerminalView {
             .track_focus(&self.focus)
             .key_context("Terminal")
             .cursor(CursorStyle::IBeam)
+            .on_action(
+                cx.listener(|v, _: &SendTab, w, cx| v.on_shell_key("tab", false, false, w, cx)),
+            )
+            .on_action(
+                cx.listener(|v, _: &SendBackTab, w, cx| v.on_shell_key("tab", true, false, w, cx)),
+            )
+            .on_action(
+                cx.listener(|v, _: &SendInterrupt, w, cx| v.on_shell_key("c", false, true, w, cx)),
+            )
             .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_middle_down))
@@ -2081,6 +2139,19 @@ impl Render for TerminalView {
                                 .on_click(
                                     cx.listener(|_, _, _, cx| cx.emit(TerminalEvent::Reconnect)),
                                 ),
+                        )
+                        .child(
+                            div()
+                                .id("close-ended")
+                                .role(Role::Button)
+                                .aria_label(t!("menu-close-pane"))
+                                .flex_none()
+                                .px(px(8.0))
+                                .rounded(px(3.0))
+                                .bg(hsla(0.0, 0.0, 0.35, 1.0))
+                                .cursor_pointer()
+                                .child(t!("menu-close"))
+                                .on_click(cx.listener(|_, _, _, cx| cx.emit(TerminalEvent::Close))),
                         ),
                 )
             });
@@ -2214,6 +2285,11 @@ impl Render for TerminalView {
                         t!("term-menu-reconnect-ended")
                     })
                     .on_click(act(|_, cx| cx.emit(TerminalEvent::Reconnect))),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new(t!("menu-close-pane"))
+                        .on_click(act(|_, cx| cx.emit(TerminalEvent::Close))),
                 )
             })
             .into_any_element()

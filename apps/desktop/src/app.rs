@@ -597,6 +597,20 @@ impl HostwickApp {
         }
     }
 
+    /// Close a pane by id (menus, the ended-session banner, pane headers).
+    fn close_pane(&mut self, pane_id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self
+            .tabs
+            .iter()
+            .position(|t| t.root.find(pane_id).is_some())
+        else {
+            return;
+        };
+        self.active = Some(ix);
+        self.focus_pane(pane_id, window, cx);
+        self.close_focused_pane(window, cx);
+    }
+
     /// Close the focused pane; the last pane closes the tab.
     fn close_focused_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ix) = self.active else {
@@ -868,6 +882,11 @@ impl HostwickApp {
                 if let Some(id) = pane_id {
                     self.focus_pane(id, window, cx);
                     self.split_focused(*vertical, window, cx);
+                }
+            }
+            TerminalEvent::Close => {
+                if let Some(id) = pane_id {
+                    self.close_pane(id, window, cx);
                 }
             }
         }

@@ -867,3 +867,5 @@ toast-success = हो गया
 toast-warning = चेतावनी
 toast-error = त्रुटि
 toast-close = सूचना बंद करें
+menu-close-pane = पैन बंद करें
+pane-files-title = फ़ाइलें: { $host }

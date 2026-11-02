@@ -821,3 +821,5 @@ toast-success = 完成
 toast-warning = 警告
 toast-error = 错误
 toast-close = 关闭通知
+menu-close-pane = 关闭窗格
+pane-files-title = 文件：{ $host }

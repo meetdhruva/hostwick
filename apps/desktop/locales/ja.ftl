@@ -821,3 +821,5 @@ toast-success = 完了
 toast-warning = 警告
 toast-error = エラー
 toast-close = 通知を閉じる
+menu-close-pane = ペインを閉じる
+pane-files-title = ファイル: { $host }

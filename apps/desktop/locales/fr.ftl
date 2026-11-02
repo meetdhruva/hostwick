@@ -867,3 +867,5 @@ toast-success = Terminé
 toast-warning = Avertissement
 toast-error = Erreur
 toast-close = Fermer la notification
+menu-close-pane = Fermer le volet
+pane-files-title = Fichiers : { $host }

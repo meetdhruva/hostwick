@@ -716,16 +716,106 @@ impl HostwickApp {
                         .child(err.clone()),
                 )
                 .child(
-                    Button::new(("retry", pane_id))
-                        .primary()
-                        .label(t!("pane-retry"))
-                        .on_click(cx.listener(move |app, _, w, cx| {
-                            app.connect_pane(pane_id, w, cx);
-                            cx.notify();
-                        })),
+                    div()
+                        .flex()
+                        .gap(px(8.0))
+                        .child(
+                            Button::new(("retry", pane_id))
+                                .primary()
+                                .label(t!("pane-retry"))
+                                .on_click(cx.listener(move |app, _, w, cx| {
+                                    app.connect_pane(pane_id, w, cx);
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new(("close-failed", pane_id))
+                                .label(t!("menu-close"))
+                                .on_click(cx.listener(move |app, _, w, cx| {
+                                    app.close_pane(pane_id, w, cx);
+                                })),
+                        ),
                 )
                 .into_any_element(),
         };
+        // Split panes get a slim header: what is in it, and buttons to split
+        // or close it, so nothing depends on knowing a shortcut or menu.
+        let header = show_focus.then(|| {
+            let title: SharedString = match &pane.body {
+                PaneBody::Terminal(v) => {
+                    let t = v.read(cx).title.clone();
+                    if t.is_empty() {
+                        pane.profile.name.clone().into()
+                    } else {
+                        t
+                    }
+                }
+                PaneBody::Files(_) => t!("pane-files-title", host = &pane.profile.name),
+                _ => pane.profile.name.clone().into(),
+            };
+            let is_terminal = matches!(pane.body, PaneBody::Terminal(_));
+            div()
+                .flex_none()
+                .h(px(24.0))
+                .px(px(8.0))
+                .flex()
+                .items_center()
+                .gap(px(2.0))
+                .bg(if focused {
+                    theme.tab_active
+                } else {
+                    theme.tab_bar
+                })
+                .border_b_1()
+                .border_color(theme.border)
+                .text_size(px(12.0))
+                .text_color(if focused {
+                    theme.tab_active_foreground
+                } else {
+                    theme.muted_foreground
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(title),
+                )
+                .when(is_terminal, |d| {
+                    d.child(
+                        Button::new(("pane-split-right", pane_id))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::PanelRight)
+                            .tooltip(t!("menu-split-right"))
+                            .on_click(cx.listener(move |app, _, w, cx| {
+                                app.focus_pane(pane_id, w, cx);
+                                app.split_focused(false, w, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new(("pane-split-down", pane_id))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::PanelBottom)
+                            .tooltip(t!("menu-split-down"))
+                            .on_click(cx.listener(move |app, _, w, cx| {
+                                app.focus_pane(pane_id, w, cx);
+                                app.split_focused(true, w, cx);
+                            })),
+                    )
+                })
+                .child(
+                    Button::new(("pane-close", pane_id))
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Close)
+                        .tooltip(t!("menu-close-pane"))
+                        .on_click(cx.listener(move |app, _, w, cx| app.close_pane(pane_id, w, cx))),
+                )
+        });
         div()
             .id(("pane", pane_id))
             .size_full()
@@ -734,7 +824,10 @@ impl HostwickApp {
             .capture_any_mouse_down(cx.listener(move |app, _, window, cx| {
                 app.focus_pane(pane_id, window, cx);
             }))
-            .child(inner)
+            .flex()
+            .flex_col()
+            .children(header)
+            .child(div().flex_1().min_h_0().relative().child(inner))
             .when(show_focus, |d| {
                 // Focus ring drawn over the pane (not affecting layout).
                 d.child(
