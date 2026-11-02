@@ -1,13 +1,17 @@
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use hostwick_core::{AuthMethod, ExposeSecret};
 use russh::MethodKind;
 use russh::client::{AuthResult, Handle, KeyboardInteractiveAuthResponse};
-use russh::keys::{PrivateKey, PrivateKeyWithHashAlg};
+use russh::keys::agent::AgentIdentity;
+use russh::keys::{Algorithm, Certificate, HashAlg, PrivateKey, PrivateKeyWithHashAlg, PublicKey};
 
+use crate::gssapi::{self, GssAuthError, KerberosAuth};
 use crate::handler::ClientHandler;
 use crate::interaction::{Credentials, Interaction};
+use crate::known_hosts::fingerprint;
 use crate::{SshError, agent};
 
 pub(crate) struct AuthCtx<'a> {
@@ -69,9 +73,7 @@ pub(crate) async fn authenticate(
                 try_password(handle, ctx, credential.as_deref()).await
             }
             AuthMethod::KeyboardInteractive => try_keyboard_interactive(handle, ctx).await,
-            AuthMethod::Gssapi { .. } => {
-                Err(SshError::Agent("Kerberos is not available yet".into()))
-            }
+            AuthMethod::Gssapi { delegate } => try_gssapi(handle, ctx, *delegate).await,
         };
         match result {
             Ok(Step::Done) => return Ok(()),
@@ -84,15 +86,16 @@ pub(crate) async fn authenticate(
                     allowed = r;
                 }
             }
-            // A broken key file or missing agent shouldn't stop the next method.
-            Err(e @ (SshError::Key { .. } | SshError::Agent(_))) => {
+            // A broken key file, missing agent or missing Kerberos ticket
+            // shouldn't stop the next method.
+            Err(e @ (SshError::Key { .. } | SshError::Agent(_) | SshError::Gssapi(_))) => {
                 tracing::info!(error = %e, "auth method unavailable, trying next");
                 let reason = match &e {
                     SshError::Key { reason, .. } => reason.clone(),
-                    SshError::Agent(r) => r.clone(),
+                    SshError::Agent(r) | SshError::Gssapi(r) => r.clone(),
                     _ => e.to_string(),
                 };
-                if matches!(e, SshError::Key { .. }) {
+                if matches!(e, SshError::Key { .. } | SshError::Gssapi(_)) {
                     ctx.interaction.notice(&format!("{label}: {reason}"));
                 }
                 tried.push(format!("{label}: {reason}"));
@@ -162,18 +165,131 @@ async fn try_agent(
     }
     let hash = rsa_hash(handle).await;
     let mut last = Step::Continue { remaining: None };
+    let mut sign_errors = Vec::new();
     for id in identities {
-        let key = id.public_key().into_owned();
-        let res = handle
-            .authenticate_publickey_with(ctx.user, key, hash, &mut agent)
-            .await
-            .map_err(|e| SshError::Agent(e.to_string()))?;
-        last = step(res);
-        if matches!(last, Step::Done) {
-            return Ok(last);
+        let mut signer = AgentSigner {
+            agent: &mut agent,
+            interaction: ctx.interaction,
+        };
+        // Certificates (e.g. from `ssh-add` of a key with its -cert.pub)
+        // are offered as certificates; the agent signs with the key.
+        let res = match &id {
+            AgentIdentity::Certificate { certificate, .. } => {
+                handle
+                    .authenticate_certificate_with(ctx.user, certificate.clone(), hash, &mut signer)
+                    .await
+            }
+            AgentIdentity::PublicKey { key, .. } => {
+                handle
+                    .authenticate_publickey_with(ctx.user, key.clone(), hash, &mut signer)
+                    .await
+            }
+        };
+        match res {
+            Ok(r) => {
+                last = step(r);
+                if matches!(last, Step::Done) {
+                    return Ok(last);
+                }
+            }
+            // The agent could not sign with this key (declined confirmation,
+            // security key not touched, ...). The handle stays usable: try
+            // the next identity.
+            Err(e) => {
+                let k = id.public_key();
+                tracing::info!(error = %e, key = %fingerprint(&k), "agent could not sign");
+                sign_errors.push(format!("{} {}: {e}", k.algorithm(), fingerprint(&k)));
+            }
         }
     }
+    if matches!(last, Step::Continue { remaining: None }) && !sign_errors.is_empty() {
+        return Err(SshError::Agent(format!(
+            "agent could not sign ({})",
+            sign_errors.join("; ")
+        )));
+    }
     Ok(last)
+}
+
+fn is_security_key(alg: &Algorithm) -> bool {
+    matches!(alg, Algorithm::SkEd25519 | Algorithm::SkEcdsaSha2NistP256)
+}
+
+/// Signs through the agent; for FIDO security keys it first tells the
+/// person to touch the key, since the agent blocks until they do.
+struct AgentSigner<'a> {
+    agent: &'a mut agent::Agent,
+    interaction: &'a dyn Interaction,
+}
+
+impl russh::Signer for AgentSigner<'_> {
+    type Error = russh::AgentAuthError;
+
+    fn auth_sign(
+        &mut self,
+        key: &AgentIdentity,
+        hash_alg: Option<HashAlg>,
+        to_sign: Vec<u8>,
+    ) -> impl Future<Output = Result<Vec<u8>, Self::Error>> + Send {
+        let public = key.public_key();
+        if is_security_key(&public.algorithm()) {
+            self.interaction.notice(&format!(
+                "Confirm user presence for key {} {}: touch your security key",
+                public.algorithm(),
+                fingerprint(&public)
+            ));
+        }
+        russh::Signer::auth_sign(self.agent, key, hash_alg, to_sign)
+    }
+}
+
+/// Signs certificate authentication with a key loaded from disk. Unlike
+/// russh's built-in certificate method this honours the negotiated RSA hash
+/// (`rsa-sha2-512-cert-v01@openssh.com`), which modern servers require.
+struct LocalKeySigner(Arc<PrivateKey>);
+
+#[derive(Debug, thiserror::Error)]
+enum LocalSignError {
+    #[error(transparent)]
+    Send(#[from] russh::SendError),
+    #[error("signing failed: {0}")]
+    Sign(String),
+}
+
+impl russh::Signer for LocalKeySigner {
+    type Error = LocalSignError;
+
+    fn auth_sign(
+        &mut self,
+        _key: &AgentIdentity,
+        hash_alg: Option<HashAlg>,
+        mut to_sign: Vec<u8>,
+    ) -> impl Future<Output = Result<Vec<u8>, Self::Error>> + Send {
+        let res = sign_local(&self.0, hash_alg, &to_sign).and_then(|blob| {
+            let len = u32::try_from(blob.len()).map_err(|e| LocalSignError::Sign(e.to_string()))?;
+            to_sign.extend_from_slice(&len.to_be_bytes());
+            to_sign.extend_from_slice(&blob);
+            Ok(to_sign)
+        });
+        std::future::ready(res)
+    }
+}
+
+/// SSH signature blob (`string alg, string sig`) over `data`.
+fn sign_local(
+    key: &PrivateKey,
+    hash_alg: Option<HashAlg>,
+    data: &[u8],
+) -> Result<Vec<u8>, LocalSignError> {
+    use russh::keys::ssh_key::encoding::Encode;
+    use russh::keys::ssh_key::private::KeypairData;
+    use signature::Signer;
+    let err = |e: &dyn std::fmt::Display| LocalSignError::Sign(e.to_string());
+    let sig: russh::keys::ssh_key::Signature = match key.key_data() {
+        KeypairData::Rsa(kp) => (kp, hash_alg).try_sign(data).map_err(|e| err(&e))?,
+        _ => key.try_sign(data).map_err(|e| err(&e))?,
+    };
+    sig.encode_vec().map_err(|e| err(&e))
 }
 
 fn expand_tilde(path: &Path) -> PathBuf {
@@ -184,6 +300,9 @@ fn expand_tilde(path: &Path) -> PathBuf {
         Err(_) => path.to_owned(),
     }
 }
+
+const SECURITY_KEY_FILE: &str = "security-key (FIDO) files need the key to be touched; \
+     add it to ssh-agent / Pageant instead (`ssh-add <file>`)";
 
 pub(crate) async fn load_key(
     path: &Path,
@@ -200,6 +319,13 @@ pub(crate) async fn load_key(
         .map_err(|e| key_err(e.to_string()))?;
     if text.starts_with("PuTTY-User-Key-File") {
         return load_ppk(&text, passphrase_credential, ctx, &path).await;
+    }
+    // The public half of an OpenSSH key file is readable without the
+    // passphrase: catch FIDO keys before prompting for anything.
+    if let Ok(k) = PrivateKey::from_openssh(&text)
+        && is_security_key(&k.algorithm())
+    {
+        return Err(key_err(SECURITY_KEY_FILE.into()));
     }
     match russh::keys::decode_secret_key(&text, None) {
         Ok(k) => Ok(k),
@@ -258,16 +384,129 @@ async fn try_key_file(
     path: &Path,
     passphrase_credential: Option<&str>,
 ) -> Result<Step, SshError> {
-    let key = load_key(path, passphrase_credential, ctx).await?;
+    let key = Arc::new(load_key(path, passphrase_credential, ctx).await?);
     let hash = if key.algorithm().is_rsa() {
         rsa_hash(handle).await
     } else {
         None
     };
+    // An OpenSSH certificate next to the key (id_ed25519-cert.pub) goes
+    // first; if the server won't take it, the plain key may still work.
+    if let Some(cert) = find_certificate(&expand_tilde(path), key.public_key(), ctx).await {
+        let res = handle
+            .authenticate_certificate_with(ctx.user, cert, hash, &mut LocalKeySigner(key.clone()))
+            .await;
+        match res {
+            Ok(AuthResult::Success) => return Ok(Step::Done),
+            Ok(
+                r @ AuthResult::Failure {
+                    partial_success: true,
+                    ..
+                },
+            ) => return Ok(step(r)),
+            Ok(AuthResult::Failure { .. }) => {
+                tracing::info!("server rejected the certificate; trying the plain key");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "certificate authentication failed; trying the plain key")
+            }
+        }
+    }
     let res = handle
-        .authenticate_publickey(ctx.user, PrivateKeyWithHashAlg::new(Arc::new(key), hash))
+        .authenticate_publickey(ctx.user, PrivateKeyWithHashAlg::new(key, hash))
         .await?;
     Ok(step(res))
+}
+
+/// OpenSSH's naming: `<key>-cert.pub`; for `name.ppk`/`.pem`/`.key` also
+/// `name-cert.pub`.
+pub(crate) fn certificate_paths(key_path: &Path) -> Vec<PathBuf> {
+    let mut appended = key_path.as_os_str().to_owned();
+    appended.push("-cert.pub");
+    let mut v = vec![PathBuf::from(appended)];
+    if let (Some(stem), Some(ext)) = (key_path.file_stem(), key_path.extension())
+        && ["ppk", "pem", "key"]
+            .iter()
+            .any(|e| ext.eq_ignore_ascii_case(e))
+    {
+        let mut name = stem.to_owned();
+        name.push("-cert.pub");
+        v.push(key_path.with_file_name(name));
+    }
+    v
+}
+
+/// Why a certificate can't be used with this key right now, if it can't.
+pub(crate) fn certificate_problem(cert: &Certificate, key: &PublicKey, now: u64) -> Option<String> {
+    if cert.public_key() != key.key_data() {
+        return Some("is for a different key".into());
+    }
+    if now < cert.valid_after() {
+        return Some("is not valid yet".into());
+    }
+    if now >= cert.valid_before() {
+        return Some("has expired".into());
+    }
+    None
+}
+
+async fn find_certificate(
+    key_path: &Path,
+    key: &PublicKey,
+    ctx: &AuthCtx<'_>,
+) -> Option<Certificate> {
+    for p in certificate_paths(key_path) {
+        let Ok(text) = tokio::fs::read_to_string(&p).await else {
+            continue;
+        };
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let cert = match Certificate::from_openssh(text.trim()) {
+            Ok(c) => c,
+            Err(e) => {
+                ctx.interaction.notice(&format!(
+                    "certificate {name}: unreadable ({e}); using the plain key"
+                ));
+                continue;
+            }
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if let Some(problem) = certificate_problem(&cert, key, now) {
+            ctx.interaction.notice(&format!(
+                "certificate {name} {problem}; using the plain key"
+            ));
+            continue;
+        }
+        tracing::debug!(cert = %p.display(), key_id = cert.key_id(), "using OpenSSH certificate");
+        return Some(cert);
+    }
+    None
+}
+
+async fn try_gssapi(
+    handle: &mut Handle<ClientHandler>,
+    ctx: &AuthCtx<'_>,
+    delegate: bool,
+) -> Result<Step, SshError> {
+    let mut auth = KerberosAuth::prepare(ctx.host, delegate).await?;
+    let res = handle
+        .authenticate_gssapi_with_mic(ctx.user, vec![gssapi::KRB5_OID_DER.to_vec()], &mut auth)
+        .await;
+    match res {
+        Ok(r) => {
+            if let (AuthResult::Failure { .. }, Some(msg)) = (&r, &auth.server_error) {
+                tracing::info!(%msg, "server rejected Kerberos");
+            }
+            Ok(step(r))
+        }
+        Err(GssAuthError::Send(_)) => Err(SshError::Closed),
+        Err(GssAuthError::Gss(m)) => Err(SshError::Gssapi(m)),
+    }
 }
 
 async fn try_password(
@@ -332,4 +571,120 @@ async fn try_keyboard_interactive(
         }
     }
     Ok(Step::Continue { remaining: None })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+    use crate::interaction::{HostKeyDecision, HostKeyInfo, NoCredentials};
+    use hostwick_core::SecretString;
+    use russh::keys::ssh_key::{certificate, private};
+
+    fn keypair(seed: u8) -> PrivateKey {
+        PrivateKey::from(private::Ed25519Keypair::from_seed(&[seed; 32]))
+    }
+
+    fn cert_for(key: &PrivateKey, after: u64, before: u64) -> Certificate {
+        let mut b = certificate::Builder::new(
+            vec![0u8; 32],
+            key.public_key().key_data().clone(),
+            after,
+            before,
+        )
+        .unwrap();
+        b.valid_principal("alice").unwrap();
+        b.sign(&keypair(99)).unwrap()
+    }
+
+    #[test]
+    fn certificate_paths_follow_openssh_naming() {
+        assert_eq!(
+            certificate_paths(Path::new("/k/id_ed25519")),
+            vec![PathBuf::from("/k/id_ed25519-cert.pub")]
+        );
+        assert_eq!(
+            certificate_paths(Path::new("/k/work.ppk")),
+            vec![
+                PathBuf::from("/k/work.ppk-cert.pub"),
+                PathBuf::from("/k/work-cert.pub")
+            ]
+        );
+    }
+
+    #[test]
+    fn certificate_must_match_key_and_be_current() {
+        let key = keypair(1);
+        let cert = cert_for(&key, 1000, 2000);
+        assert_eq!(certificate_problem(&cert, key.public_key(), 1500), None);
+        assert_eq!(
+            certificate_problem(&cert, key.public_key(), 999).as_deref(),
+            Some("is not valid yet")
+        );
+        assert_eq!(
+            certificate_problem(&cert, key.public_key(), 2000).as_deref(),
+            Some("has expired")
+        );
+        assert_eq!(
+            certificate_problem(&cert, keypair(2).public_key(), 1500).as_deref(),
+            Some("is for a different key")
+        );
+    }
+
+    #[test]
+    fn local_signer_appends_signature_blob() {
+        let key = Arc::new(keypair(5));
+        let blob = sign_local(&key, None, b"data").unwrap();
+        // string "ssh-ed25519" + string(64-byte signature)
+        assert_eq!(&blob[..4], &11u32.to_be_bytes());
+        assert_eq!(&blob[4..15], b"ssh-ed25519");
+        assert_eq!(blob.len(), 4 + 11 + 4 + 64);
+    }
+
+    struct Quiet;
+    #[async_trait::async_trait]
+    impl Interaction for Quiet {
+        async fn host_key(&self, _: &HostKeyInfo) -> HostKeyDecision {
+            HostKeyDecision::Reject
+        }
+        async fn password(&self, _: &str, _: &str) -> Option<SecretString> {
+            None
+        }
+        async fn key_passphrase(&self, _: &Path) -> Option<SecretString> {
+            panic!("must not ask for a passphrase for a security-key file");
+        }
+        async fn keyboard_interactive(
+            &self,
+            _: &str,
+            _: &str,
+            _: &[(String, bool)],
+        ) -> Option<Vec<String>> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn security_key_files_are_refused_with_advice() {
+        use russh::keys::ssh_key::{LineEnding, public};
+        let pk = private::Ed25519Keypair::from_seed(&[3u8; 32]).public;
+        let sk =
+            private::SkEd25519::new(public::SkEd25519::new(pk, "ssh:"), 1, vec![9; 32]).unwrap();
+        let key = PrivateKey::new(private::KeypairData::SkEd25519(sk), "sk").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("id_ed25519_sk");
+        std::fs::write(&path, key.to_openssh(LineEnding::LF).unwrap().as_bytes()).unwrap();
+        let ctx = AuthCtx {
+            user: "u",
+            host: "h",
+            interaction: &Quiet,
+            credentials: &NoCredentials,
+        };
+        let err = load_key(&path, None, &ctx).await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("add it to ssh-agent / Pageant instead"),
+            "{err}"
+        );
+    }
 }

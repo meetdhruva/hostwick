@@ -3552,9 +3552,11 @@ dependencies = [
  "futures",
  "hex",
  "hostwick-core",
+ "libloading",
  "rand 0.8.8",
  "russh",
  "secrecy",
+ "signature",
  "ssh-key",
  "tempfile",
  "thiserror 2.0.21",
@@ -3562,6 +3564,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 

@@ -26,6 +26,10 @@ pub enum SshError {
     Key { path: String, reason: String },
     #[error("SSH agent unavailable: {0}")]
     Agent(String),
+    /// Kerberos could not be used (no library, no ticket, unknown server
+    /// principal). The auth chain moves on to the next method.
+    #[error("Kerberos: {0}")]
+    Gssapi(String),
     /// The SOCKS/HTTP proxy answered but would not connect us, e.g.
     /// "proxy 10.0.0.1:1080 refused: connection not allowed by ruleset".
     #[error("proxy {proxy} {reason}")]

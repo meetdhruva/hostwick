@@ -13,6 +13,7 @@ mod connection;
 mod error;
 mod exec;
 mod forward;
+mod gssapi;
 mod handler;
 mod interaction;
 mod known_hosts;

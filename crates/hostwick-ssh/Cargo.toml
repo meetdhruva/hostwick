@@ -28,6 +28,17 @@ async-trait.workspace = true
 zeroize.workspace = true
 rand.workspace = true
 hex.workspace = true
+signature = "3"
+
+[target.'cfg(unix)'.dependencies]
+libloading = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security_Credentials",
+    "Win32_Security_Authentication_Identity",
+] }
 
 [dev-dependencies]
 tempfile.workspace = true
