@@ -159,7 +159,7 @@ pub async fn run(app: &App, a: CpArgs) -> Result<i32> {
         rate_limit: a.limit.map(|k| k * 1024),
         ..Default::default()
     });
-    let mut events = engine.subscribe();
+    let events = engine.subscribe();
     let ids = if src_entry.is_dir() {
         if !a.recursive {
             bail!("{src_path} is a directory (use -r)");
@@ -177,6 +177,27 @@ pub async fn run(app: &App, a: CpArgs) -> Result<i32> {
         })]
     };
 
+    let summary = drive(&engine, events, &ids).await;
+    print_summary(&summary);
+    Ok(if summary.failed > 0 { 1 } else { 0 })
+}
+
+/// Totals of one batch of transfers.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct TransferSummary {
+    pub files: usize,
+    pub bytes: u64,
+    pub failed: usize,
+    pub secs: f64,
+}
+
+/// Wait until every transfer in `ids` has finished, drawing progress on a
+/// terminal and reporting skips, resumes and failures on stderr.
+pub(crate) async fn drive(
+    engine: &TransferEngine,
+    mut events: tokio::sync::broadcast::Receiver<TransferEvent>,
+    ids: &[hostwick_transfer::TransferId],
+) -> TransferSummary {
     let show_progress = std::io::stderr().is_terminal();
     let mut remaining = ids.len();
     let (mut failed, mut bytes) = (0usize, 0u64);
@@ -243,23 +264,30 @@ pub async fn run(app: &App, a: CpArgs) -> Result<i32> {
             Err(_) => break,
         }
     }
-    let secs = started.elapsed().as_secs_f64().max(1e-3);
+    TransferSummary {
+        files: ids.len(),
+        bytes,
+        failed,
+        secs: started.elapsed().as_secs_f64().max(1e-3),
+    }
+}
+
+pub(crate) fn print_summary(s: &TransferSummary) {
     eprintln!(
         "{} file(s), {} in {:.1}s ({}/s){}",
-        ids.len(),
-        human(bytes),
-        secs,
-        human((bytes as f64 / secs) as u64),
-        if failed > 0 {
-            format!(", {failed} failed")
+        s.files,
+        human(s.bytes),
+        s.secs,
+        human((s.bytes as f64 / s.secs) as u64),
+        if s.failed > 0 {
+            format!(", {} failed", s.failed)
         } else {
             String::new()
         }
     );
-    Ok(if failed > 0 { 1 } else { 0 })
 }
 
-pub async fn ls(app: &App, target: &str) -> Result<i32> {
+pub async fn ls(app: &App, target: &str, json: bool) -> Result<i32> {
     let Loc::Remote { host, path } = parse_loc(target) else {
         bail!("expected HOST:PATH")
     };
@@ -269,7 +297,20 @@ pub async fn ls(app: &App, target: &str) -> Result<i32> {
     } else {
         path
     };
-    for e in fs.list_dir(&path).await? {
+    let entries = fs.list_dir(&path).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        return Ok(0);
+    }
+    for e in entries {
+        print_entry(&e);
+    }
+    Ok(0)
+}
+
+/// One `ls -l`-style line.
+pub(crate) fn print_entry(e: &hostwick_sftp::Entry) {
+    {
         let kind = match e.kind {
             hostwick_sftp::EntryKind::Dir => 'd',
             hostwick_sftp::EntryKind::Symlink => 'l',
@@ -286,10 +327,9 @@ pub async fn ls(app: &App, target: &str) -> Result<i32> {
             if e.is_dir() { "/" } else { "" }
         );
     }
-    Ok(0)
 }
 
-fn mode_string(m: u32) -> String {
+pub(crate) fn mode_string(m: u32) -> String {
     let mut s = String::with_capacity(9);
     for shift in [6, 3, 0] {
         let b = (m >> shift) & 7;

@@ -41,10 +41,26 @@ pub struct SyncArgs {
     /// Bandwidth cap in KiB/s.
     #[arg(long)]
     limit: Option<u64>,
+    /// Print a JSON summary (one object per sync round with --watch).
+    #[arg(long)]
+    json: bool,
     /// Source directory: local path or HOST:PATH.
     src: String,
     /// Destination directory: local path or HOST:PATH.
     dst: String,
+}
+
+fn report_json(r: &SyncReport, dry_run: bool, src: &str, dst: &str) -> serde_json::Value {
+    serde_json::json!({
+        "source": src,
+        "destination": dst,
+        "dry_run": dry_run,
+        "copied": r.copied,
+        "deleted": r.deleted,
+        "failed": r.failed.iter().map(|(path, error)| serde_json::json!({"path": path, "error": error})).collect::<Vec<_>>(),
+        "bytes": r.bytes,
+        "up_to_date": r.is_noop(),
+    })
 }
 
 fn print_report(r: &SyncReport, dry_run: bool) {
@@ -121,7 +137,14 @@ pub async fn run(app: &App, a: SyncArgs) -> Result<i32> {
 
     if !a.watch || a.dry_run {
         let r = sync_once(&engine, src, &src_root, dst, &dst_root, &opts).await?;
-        print_report(&r, a.dry_run);
+        if a.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report_json(&r, a.dry_run, &src_root, &dst_root))?
+            );
+        } else {
+            print_report(&r, a.dry_run);
+        }
         return Ok(if r.failed.is_empty() { 0 } else { 1 });
     }
 
@@ -144,6 +167,9 @@ pub async fn run(app: &App, a: SyncArgs) -> Result<i32> {
         cancel,
         |r| match r {
             Ok(report) if report.is_noop() => {}
+            Ok(report) if a.json => {
+                println!("{}", report_json(report, false, &src_root, &dst_root))
+            }
             Ok(report) => print_report(report, false),
             Err(e) => eprintln!("sync error (will retry): {e}"),
         },

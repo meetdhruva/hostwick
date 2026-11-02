@@ -6,7 +6,10 @@
 mod app;
 mod cp;
 mod hosts;
+mod keys;
+mod knownhosts;
 mod prompt;
+mod settingssync;
 mod shell;
 mod sync;
 mod tty;
@@ -43,7 +46,12 @@ enum Cmd {
     /// Synchronize directories (like WinSCP): `sync [--delete] [--watch] SRC DST`.
     Sync(sync::SyncArgs),
     /// List a remote directory: `ls HOST:PATH`.
-    Ls { target: String },
+    Ls {
+        target: String,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage saved hosts.
     #[command(subcommand)]
     Hosts(hosts::HostsCmd),
@@ -53,6 +61,18 @@ enum Cmd {
     /// Manage the encrypted credential vault.
     #[command(subcommand)]
     Vault(hosts::VaultCmd),
+    /// Generate an SSH key pair (like ssh-keygen; --ppk for PuTTY).
+    Keygen(keys::KeygenArgs),
+    /// Convert a key between OpenSSH and PuTTY .ppk, or change its passphrase.
+    Keyconv(keys::KeyconvArgs),
+    /// Show a key's type, size, fingerprint, comment and whether it is encrypted.
+    Keyinfo(keys::KeyinfoArgs),
+    /// List, remove or add trusted host keys (known_hosts).
+    #[command(subcommand)]
+    KnownHosts(knownhosts::KnownHostsCmd),
+    /// Sync saved hosts and settings through a cloud-synced folder
+    /// (passphrase from HOSTWICK_SYNC_PASSPHRASE or a prompt).
+    SettingsSync(settingssync::SettingsSyncArgs),
     /// Show where Hostwick stores its files.
     Paths,
 }
@@ -148,7 +168,12 @@ async fn run(cli: Cli) -> i32 {
             Cmd::Ssh(a) => shell::run(&app, a).await,
             Cmd::Cp(a) => cp::run(&app, a).await,
             Cmd::Sync(a) => sync::run(&app, a).await,
-            Cmd::Ls { target } => cp::ls(&app, &target).await,
+            Cmd::Ls { target, json } => cp::ls(&app, &target, json).await,
+            Cmd::Keygen(a) => keys::keygen(&app, a),
+            Cmd::Keyconv(a) => keys::keyconv(&app, a),
+            Cmd::Keyinfo(a) => keys::keyinfo(a),
+            Cmd::KnownHosts(c) => knownhosts::run(&app, c),
+            Cmd::SettingsSync(a) => settingssync::run(&app, a),
             Cmd::Hosts(c) => hosts::run_hosts(&app, c),
             Cmd::Import(c) => hosts::run_import(&app, c),
             Cmd::Vault(c) => hosts::run_vault(&app, c),

@@ -14,7 +14,12 @@ use crate::app::{App, parse_forwards};
 #[derive(Subcommand)]
 pub enum HostsCmd {
     /// List saved hosts (optionally filtered by a substring).
-    List { filter: Option<String> },
+    List {
+        filter: Option<String>,
+        /// Full host details as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show one host in detail.
     Show { name: String },
     /// Save a host: `hosts add NAME [user@]host[:port] [options]`.
@@ -99,16 +104,24 @@ fn find(app: &App, name: &str) -> Result<HostProfile> {
 
 pub fn run_hosts(app: &App, cmd: HostsCmd) -> Result<i32> {
     match cmd {
-        HostsCmd::List { filter } => {
+        HostsCmd::List { filter, json } => {
             let needle = filter.map(|f| f.to_lowercase());
+            let mut shown = Vec::new();
             for p in app.store.list()? {
                 let line = format!("{}  {}@{}:{}", p.path(), p.user_or_local(), p.host, p.port);
                 if needle
                     .as_ref()
                     .is_none_or(|n| line.to_lowercase().contains(n))
                 {
-                    println!("{line}");
+                    if json {
+                        shown.push(p);
+                    } else {
+                        println!("{line}");
+                    }
                 }
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&shown)?);
             }
         }
         HostsCmd::Show { name } => {
