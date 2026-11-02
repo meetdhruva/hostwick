@@ -96,5 +96,10 @@ debug = "line-tables-only"
 split-debuginfo = "packed"
 strip = "none"
 
+[profile.dev]
+# Line tables are enough for backtraces and keep the target dir small.
+debug = "line-tables-only"
+
 [profile.dev.package."*"]
 opt-level = 2
+debug = false
