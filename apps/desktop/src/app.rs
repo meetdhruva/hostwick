@@ -269,14 +269,16 @@ impl HostwickApp {
                 .detach();
             }
             TabKind::Files => {
-                let job = rt.spawn(backend.clone().open_files(profile));
+                let job = rt.spawn(backend.clone().open_files(profile.clone()));
                 cx.spawn_in(window, async move |this, cx| {
                     let result = job.await;
                     let _ = this.update_in(cx, |app, window, cx| {
                         let body = match result {
-                            Ok(Ok(fs)) => {
+                            Ok(Ok(session)) => {
                                 let backend = app.backend.clone();
-                                TabBody::Files(cx.new(|cx| FilesView::new(fs, backend, window, cx)))
+                                TabBody::Files(cx.new(|cx| {
+                                    FilesView::new(session, profile, backend, window, cx)
+                                }))
                             }
                             Ok(Err(e)) => TabBody::Failed(format!("{e:#}")),
                             Err(e) => TabBody::Failed(format!("internal error: {e}")),

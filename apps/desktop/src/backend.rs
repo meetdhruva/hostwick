@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use futures::channel::mpsc::UnboundedSender;
 use futures::channel::oneshot;
 use hostwick_core::{AuthMethod, HostProfile, SecretString, Target};
-use hostwick_sftp::{RemoteFs, SftpFs, SftpOptions};
+use hostwick_sftp::{RemoteFs, SudoError};
 use hostwick_ssh::{
     ConnectContext, Connection, ConnectionPool, HostKeyDecision, HostKeyInfo, Interaction,
     KnownHosts, NoCredentials, PtyOptions, ShellSession,
@@ -170,7 +170,7 @@ impl Backend {
     }
 
     /// Shared, pooled connection for this profile (one login per host).
-    async fn connection(&self, profile: &HostProfile) -> Result<Connection> {
+    pub(crate) async fn connection(&self, profile: &HostProfile) -> Result<Connection> {
         let ctx = self.context();
         let backoff =
             hostwick_core::Backoff::new(Duration::from_millis(500), Duration::from_secs(5))
@@ -207,13 +207,99 @@ impl Backend {
         Ok(shell)
     }
 
-    pub async fn open_files(self: Arc<Self>, profile: HostProfile) -> Result<Arc<dyn RemoteFs>> {
-        let conn = self.connection(&profile).await?;
-        let fs = SftpFs::open(&conn, &SftpOptions::default())
-            .await
-            .context("starting SFTP")?;
-        Ok(Arc::new(fs))
+    /// The file browser's remote side: the profile's file protocol, elevated
+    /// through sudo when the profile says so. If sudo fails the browser
+    /// still opens, unelevated, with the reason in `notice`.
+    pub async fn open_files(self: Arc<Self>, profile: HostProfile) -> Result<FilesSession> {
+        if profile.sudo.enabled {
+            match self.clone().open_remote(profile.clone(), true).await {
+                Ok(s) => return Ok(s),
+                Err(e) => {
+                    let mut s = self.open_remote(profile, false).await?;
+                    s.notice = Some(format!("Could not open as root: {e:#}"));
+                    return Ok(s);
+                }
+            }
+        }
+        self.open_remote(profile, false).await
     }
+
+    /// Open the remote file system, elevated (`sudo`) or not. The sudo
+    /// password comes from the vault (the host's sudo credential, else its
+    /// login password credential) or is asked for through the UI, and
+    /// asked again after a wrong one.
+    pub async fn open_remote(
+        self: Arc<Self>,
+        profile: HostProfile,
+        elevate: bool,
+    ) -> Result<FilesSession> {
+        let conn = self.connection(&profile).await?;
+        let sudo = elevate.then_some(&profile.sudo);
+        let ctx = self.context();
+        let mut saved = profile
+            .sudo
+            .password_credential
+            .as_deref()
+            .or_else(|| {
+                profile.auth.iter().find_map(|a| match a {
+                    AuthMethod::Password { credential } => credential.as_deref(),
+                    _ => None,
+                })
+            })
+            .and_then(|id| ctx.credentials.get(id));
+        let who = format!("{}@{}", profile.user_or_local(), profile.host);
+        let this = self.clone();
+        let fs = hostwick_sftp::open_remote_fs_with(&conn, profile.file_protocol, sudo, |why| {
+            let from_vault = saved.take();
+            let (this, who) = (this.clone(), who.clone());
+            async move {
+                if from_vault.is_some() {
+                    return from_vault;
+                }
+                let title = match why {
+                    Some(SudoError::WrongPassword) => {
+                        format!("Wrong password. sudo password for {who}")
+                    }
+                    _ => format!("sudo password for {who}"),
+                };
+                this.ask_secret(title, "Password".into()).await
+            }
+        })
+        .await
+        .context(if elevate {
+            "opening files as root"
+        } else {
+            "opening the file browser"
+        })?;
+        Ok(FilesSession {
+            elevated: elevate,
+            fs,
+            notice: None,
+        })
+    }
+
+    /// Ask the person for a secret through the app's prompt dialogs.
+    pub async fn ask_secret(&self, title: String, label: String) -> Option<SecretString> {
+        let (reply, rx) = oneshot::channel();
+        self.interaction
+            .tx
+            .unbounded_send(Prompt::Secret {
+                title,
+                label,
+                reply,
+            })
+            .ok()?;
+        rx.await.ok().flatten().map(SecretString::from)
+    }
+}
+
+/// What [`Backend::open_files`] opened.
+pub struct FilesSession {
+    pub fs: Arc<dyn RemoteFs>,
+    /// Running through sudo.
+    pub elevated: bool,
+    /// Something to tell the person (e.g. why sudo was not used).
+    pub notice: Option<String>,
 }
 
 /// Ad-hoc profile from quick-connect text (`user@host:port`).
