@@ -287,6 +287,20 @@ impl Connection {
     }
 }
 
+/// A TCP connection to `host:port` through `spec`, with the same
+/// credentials (vault or prompt) and timeouts SSH connections use. For other
+/// protocols (telnet) that honour a host's proxy setting.
+pub async fn connect_via_proxy(
+    spec: &hostwick_core::ProxySpec,
+    ctx: &ConnectContext,
+    host: &str,
+    port: u16,
+) -> Result<tokio::net::TcpStream, SshError> {
+    let creds = proxy_credentials(spec, ctx).await;
+    tracing::info!(proxy = %spec.to_url(), %host, port, "connecting through proxy");
+    proxy::connect(spec, &creds, host, port, ctx.connect_timeout).await
+}
+
 /// The proxy user and password: the vault entry, else a prompt (only when a
 /// proxy user is set; SOCKS4 has no password).
 async fn proxy_credentials(
