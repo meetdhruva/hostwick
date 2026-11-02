@@ -1220,6 +1220,8 @@ impl HostwickApp {
         p.id = ProfileId::new();
         p.name = t!("host-copy-name", name = &p.name).into();
         p.source = Default::default();
+        // The copy asks for (and saves) its own passwords.
+        crate::vault::drop_foreign_host_ids(&mut p);
         if self.backend.store.upsert(&p).is_ok() {
             self.selected = Some(p.id);
             self.reload_profiles();

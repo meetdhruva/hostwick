@@ -781,10 +781,12 @@ impl HostForm {
                     .collect();
                 if !forgotten.is_empty() && self.backend.vault.is_unlocked() {
                     let vault = self.backend.vault.clone();
+                    let owner = p.id;
                     self.backend.rt.spawn_blocking(move || {
                         for id in forgotten {
-                            // Key passphrases may serve other hosts too.
-                            if !id.starts_with("key:")
+                            // Only this host's own secrets: key passphrases
+                            // and shared ids may serve other hosts too.
+                            if crate::vault::owned_by(&id, owner)
                                 && let Err(e) = vault.remove(&id)
                             {
                                 tracing::warn!("could not remove a saved password: {e}");

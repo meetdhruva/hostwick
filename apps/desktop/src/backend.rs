@@ -532,7 +532,11 @@ impl Backend {
         };
         let mut saved = 0;
         for (kind, secret) in items {
-            let id = existing_id(&p, &kind).unwrap_or_else(|| credential_id(p.id, &kind));
+            // Only this host's own ids are overwritten (a duplicated host
+            // may still point at its source's).
+            let id = existing_id(&p, &kind)
+                .filter(|id| crate::vault::reusable_for(id, p.id))
+                .unwrap_or_else(|| credential_id(p.id, &kind));
             match self.vault.set(&id, secret) {
                 Ok(()) => {
                     if assign_id(&mut p, &kind, Some(id)) {

@@ -171,7 +171,7 @@ pub async fn remove_recursive(fs: &dyn RemoteFs, entry: &Entry) -> Result<(), Fs
     let mut dirs = vec![entry.path.clone()];
     let mut stack = vec![entry.path.clone()];
     while let Some(d) = stack.pop() {
-        for e in fs.list_dir(&d).await? {
+        for e in fs.list_dir_checked(&d).await?.entries {
             if e.is_dir() {
                 dirs.push(e.path.clone());
                 stack.push(e.path);

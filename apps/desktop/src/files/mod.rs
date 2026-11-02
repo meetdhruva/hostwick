@@ -104,7 +104,9 @@ pub struct FilesView {
     /// Message above the panes: (is error, text).
     banner: Option<(bool, String)>,
     edits: Vec<EditSession>,
-    edit_root: PathBuf,
+    edit_root: edit::EditRoot,
+    /// An edit with changes not on the server was stopped: keep the folder.
+    unsaved_stopped: bool,
     next_edit: u64,
     /// Edit ids that were opened for viewing only (no upload).
     open_only: std::collections::HashSet<u64>,
@@ -135,15 +137,16 @@ impl Drop for ActiveSync {
 
 impl Drop for FilesView {
     fn drop(&mut self) {
+        let unsaved = self.unsaved_stopped || self.edits.iter().any(|e| e.has_unsaved_changes());
         for e in &self.edits {
             e.cancel.cancel();
         }
-        // Temporary copies of edited files go with the tab.
-        let root = self.edit_root.clone();
-        if root.exists()
-            && let Err(e) = std::fs::remove_dir_all(&root)
-        {
-            tracing::warn!(error = %e, dir = %root.display(), "could not remove edit folder");
+        // Copies of edited files go with the tab, unless they hold changes
+        // the server never got: then they stay, and the person is told.
+        if let Some(kept) = self.edit_root.finish(unsaved) {
+            tracing::warn!(dir = %kept.display(), "kept edits that were not uploaded");
+            self.backend
+                .notice(t!("edit-kept-folder", path = kept.display().to_string()).to_string());
         }
     }
 }
@@ -192,7 +195,11 @@ impl FilesView {
             }
         });
 
-        backend.rt.spawn_blocking(edit::sweep_stale);
+        let edit_base = edit::edit_base(&backend.paths.data_dir);
+        let sweep_base = edit_base.clone();
+        backend
+            .rt
+            .spawn_blocking(move || edit::sweep_stale(&sweep_base));
         let mut v = Self {
             backend,
             profile,
@@ -204,7 +211,8 @@ impl FilesView {
             switching_root: false,
             banner: session.notice.map(|n| (true, n)),
             edits: Vec::new(),
-            edit_root: edit::new_temp_root(),
+            edit_root: edit::EditRoot::new(&edit_base),
+            unsaved_stopped: false,
             next_edit: 1,
             open_only: Default::default(),
             edit_tx,
@@ -298,7 +306,7 @@ impl FilesView {
         let fs = pane.fs.clone();
         let job = self.backend.rt.spawn(async move {
             let abs = fs.canonicalize(&path).await?;
-            let list = fs.list_dir(&abs).await?;
+            let list = fs.list_dir_checked(&abs).await?;
             Ok::<_, hostwick_sftp::FsError>((abs, list))
         });
         let task = cx.spawn(async move |this, cx| {
@@ -316,18 +324,33 @@ impl FilesView {
         side: Side,
         generation: u64,
         result: Result<
-            Result<(String, Vec<Entry>), hostwick_sftp::FsError>,
+            Result<(String, hostwick_sftp::Listing), hostwick_sftp::FsError>,
             tokio::task::JoinError,
         >,
         cx: &mut Context<Self>,
     ) {
-        let pane = self.pane_mut(side);
-        if pane.generation != generation {
+        if self.pane(side).generation != generation {
             return;
         }
+        // Entries whose names would be unsafe here are hidden; say so.
+        if let Ok(Ok((_, listing))) = &result
+            && !listing.skipped.is_empty()
+        {
+            let names: Vec<String> = listing
+                .skipped
+                .iter()
+                .map(|(n, why)| format!("{n:?} ({why})"))
+                .collect();
+            self.banner = Some((
+                true,
+                t!("files-skipped-unsafe", names = names.join(", ")).into(),
+            ));
+        }
+        let pane = self.pane_mut(side);
         pane.loading = false;
         match result {
-            Ok(Ok((abs, list))) => {
+            Ok(Ok((abs, listing))) => {
+                let list = listing.entries;
                 let same = abs == pane.cwd;
                 let name_at = |ix: Option<usize>| {
                     ix.and_then(|i| pane.entries.get(i)).map(|e| e.name.clone())
@@ -613,7 +636,15 @@ impl FilesView {
             let mut failed: Vec<String> = Vec::new();
             let mut groups = Vec::new();
             for it in items {
-                let target = hostwick_sftp::join(&dir, &it.name);
+                // Names come from the other side's listing: never let one
+                // reach outside `dir`.
+                let target = match hostwick_sftp::join_checked(&dir, &it.name) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        failed.push(e.to_string());
+                        continue;
+                    }
+                };
                 if it.path == target {
                     failed.push(t!("files-same-place", name = &it.name).into());
                     continue;
@@ -1159,10 +1190,23 @@ impl FilesView {
                 return;
             }
         }
+        // The server's name becomes a local file name: refuse names that
+        // would point elsewhere (`..`, `\`, drive letters, …).
+        if let Err(e) = hostwick_sftp::check_name(&entry.name) {
+            self.banner = Some((true, e.to_string()));
+            cx.notify();
+            return;
+        }
+        if let Err(e) = self.edit_root.ensure() {
+            self.banner = Some((true, e.to_string()));
+            cx.notify();
+            return;
+        }
         let id = self.next_edit;
         self.next_edit += 1;
-        let local_path = self.edit_root.join(id.to_string()).join(&entry.name);
+        let local_path = self.edit_root.path.join(id.to_string()).join(&entry.name);
         let cancel = CancellationToken::new();
+        let synced = edit::SyncedMeta::default();
         if watch {
             self.edits.push(EditSession {
                 id,
@@ -1171,6 +1215,7 @@ impl FilesView {
                 local_path: local_path.clone(),
                 status: EditStatus::Downloading,
                 cancel: cancel.clone(),
+                synced: synced.clone(),
             });
         } else {
             self.open_only.insert(id);
@@ -1183,6 +1228,7 @@ impl FilesView {
             watch,
             self.edit_tx.clone(),
             cancel,
+            synced,
         ));
         cx.notify();
     }
@@ -1195,7 +1241,10 @@ impl FilesView {
                 {
                     self.banner = Some((true, e.clone()));
                 }
-                let uploaded = matches!(status, EditStatus::Uploaded(_));
+                let uploaded = matches!(
+                    status,
+                    EditStatus::Uploaded(_) | EditStatus::UploadedInPlace(_)
+                );
                 if let Some(s) = self.edits.iter_mut().find(|s| s.id == id) {
                     s.status = status;
                 }
@@ -1312,13 +1361,16 @@ impl FilesView {
     }
 
     fn stop_edit(&mut self, id: Option<u64>, cx: &mut Context<Self>) {
+        let mut unsaved = false;
         self.edits.retain(|s| {
             let stop = id.is_none_or(|i| i == s.id);
             if stop {
+                unsaved |= s.has_unsaved_changes();
                 s.cancel.cancel();
             }
             !stop
         });
+        self.unsaved_stopped |= unsaved;
         cx.notify();
     }
 

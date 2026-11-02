@@ -231,6 +231,14 @@ impl SyncDialog {
                     cx.notify();
                     return;
                 }
+                // Never delete unseen: a mirror shows its plan first, and
+                // runs when Synchronize is pressed again.
+                if opts.delete {
+                    self.preview(false, cx);
+                    self.error = Some(t!("sync-review-deletions").into());
+                    cx.notify();
+                    return;
+                }
                 let _ = self.view.update(cx, |v, cx| v.plan_and_run(l, r, opts, cx));
                 window.close_dialog(cx);
             }
@@ -687,6 +695,7 @@ fn reason_label(r: Reason) -> SharedString {
         Reason::Unknown => t!("sync-reason-unknown"),
         Reason::DestinationNewer => t!("sync-reason-destination-newer"),
         Reason::NewFolder => t!("sync-reason-new-folder"),
+        Reason::CaseConflict => t!("sync-reason-case-conflict"),
     }
 }
 

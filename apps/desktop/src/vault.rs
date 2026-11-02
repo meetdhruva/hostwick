@@ -39,6 +39,33 @@ pub fn credential_id(profile: ProfileId, kind: &CredKind) -> String {
     }
 }
 
+/// Whether credential `id` is one this app minted for profile `pid`
+/// (`host:<pid>:…`), so it may be replaced or deleted on its behalf.
+pub fn owned_by(id: &str, pid: ProfileId) -> bool {
+    id.strip_prefix("host:")
+        .and_then(|r| r.strip_prefix(&pid.0.to_string()))
+        .is_some_and(|r| r.starts_with(':'))
+}
+
+/// Whether a remembered secret for profile `pid` may be written into the
+/// existing credential `id`: its own ids, and key passphrases (one per key
+/// file, shared on purpose). Anything else — another host's id after
+/// "Duplicate", or an id shared through the CLI — gets a fresh id instead.
+pub fn reusable_for(id: &str, pid: ProfileId) -> bool {
+    owned_by(id, pid) || id.starts_with("key:")
+}
+
+/// Forget the `host:` credential ids that belong to another profile (a
+/// duplicated host keeps its source's references otherwise, and would
+/// overwrite or delete the source's saved passwords).
+pub fn drop_foreign_host_ids(p: &mut HostProfile) {
+    for (kind, id) in profile_ids(p) {
+        if id.starts_with("host:") && !owned_by(&id, p.id) {
+            assign_id(p, &kind, None);
+        }
+    }
+}
+
 /// The credential id the profile already uses for `kind`, if any.
 pub fn existing_id(p: &HostProfile, kind: &CredKind) -> Option<String> {
     match kind {
@@ -320,18 +347,25 @@ impl VaultManager {
     }
 
     /// Run `f` on the open vault, first re-reading the file if something
-    /// else (the CLI) changed it.
+    /// else (the CLI) changed it. If the changed file cannot be read with
+    /// our master password (it was changed elsewhere, or the file is
+    /// damaged), the vault is locked instead: writing the stale copy back
+    /// would undo the other change. The next use asks to unlock again.
     fn with_open<T>(&self, f: impl FnOnce(&mut Vault) -> T) -> Option<T> {
         let mut guard = self.open.lock().ok()?;
         let open = guard.as_mut()?;
         let now = mtime(&self.path);
-        if now.is_some() && now != open.loaded {
+        if now != open.loaded {
             match Vault::unlock(&self.path, &open.master) {
                 Ok(v) => {
                     open.vault = v;
                     open.loaded = now;
                 }
-                Err(e) => tracing::warn!(error = %e, "could not re-read the changed vault"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "the vault changed and cannot be re-read; locking it");
+                    *guard = None;
+                    return None;
+                }
             }
         }
         let out = f(&mut open.vault);
@@ -483,6 +517,66 @@ mod tests {
             "Unused (its host was deleted)"
         );
         assert_eq!(describe("prod-db", &profiles), "prod-db");
+    }
+
+    /// The CLI changed the master password while the app had the vault
+    /// open: the app must lock instead of writing the old copy back.
+    #[test]
+    fn vault_changed_elsewhere_locks_instead_of_overwriting() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let path = dir.path().join("vault.json");
+        let m = VaultManager::new(path.clone());
+        m.create(SecretString::from("old master"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        m.set("a", SecretString::from("1"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        // `hostwick vault passwd` + `vault set b` in another process.
+        let mut other = hostwick_vault::Vault::unlock(&path, &SecretString::from("old master"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        other
+            .change_master(&SecretString::from("new master"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        other
+            .set("b", SecretString::from("2"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        // Make sure the change is visible even with coarse timestamps.
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .and_then(|f| f.set_modified(later))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(m.set("c", SecretString::from("3")).is_err());
+        assert!(!m.is_unlocked());
+        let v = hostwick_vault::Vault::unlock(&path, &SecretString::from("new master"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(v.get("b").is_some() && v.get("c").is_none());
+    }
+
+    #[test]
+    fn duplicated_hosts_do_not_share_saved_passwords() {
+        use super::{drop_foreign_host_ids, owned_by, profile_ids, reusable_for};
+        let mut src = HostProfile::new("web", "10.0.0.1");
+        let pid = credential_id(src.id, &CredKind::Password);
+        assert!(assign_id(&mut src, &CredKind::Password, Some(pid.clone())));
+        src.sudo.password_credential = Some(credential_id(src.id, &CredKind::Sudo));
+        let key = std::path::PathBuf::from("/k");
+        src.auth.push(AuthMethod::KeyFile {
+            path: key.clone(),
+            passphrase_credential: Some(credential_id(src.id, &CredKind::KeyPassphrase(key))),
+        });
+        assert!(owned_by(&pid, src.id));
+        let mut copy = src.clone();
+        copy.id = hostwick_core::ProfileId::new();
+        assert!(!owned_by(&pid, copy.id));
+        assert!(!reusable_for(&pid, copy.id));
+        assert!(reusable_for("key:/k", copy.id));
+        assert!(!reusable_for("prod-db", copy.id));
+        drop_foreign_host_ids(&mut copy);
+        let left: Vec<String> = profile_ids(&copy).into_iter().map(|(_, id)| id).collect();
+        assert_eq!(left, vec!["key:/k".to_owned()]);
+        // A prefix of another id is not ownership.
+        assert!(!owned_by(&format!("host:{}0:password", src.id.0), src.id));
     }
 
     #[test]
