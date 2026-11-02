@@ -39,6 +39,7 @@ crates/
   hostwick-vault     encrypted credential vault (Argon2id + XChaCha20-Poly1305)
   hostwick-store     SQLite profile store with migrations; app paths; portable mode
   hostwick-import    ssh_config, PuTTY, WinSCP and Solar-PuTTY importers
+  hostwick-keys      key generation and conversion: OpenSSH, PuTTY .ppk v2/v3
 apps/
   cli                `hostwick` command-line client
   desktop            `hostwick-desktop` GUI (GPUI + gpui-component + alacritty_terminal)
@@ -91,10 +92,91 @@ hostwick import ssh-config
 
 hostwick vault init && hostwick vault set prod-db
 hostwick hosts add db 10.0.0.9 --password-credential prod-db
+
+hostwick script deploy.txt -D env=prod       # WinSCP-style batch script (see below)
+
+hostwick keygen                              # ~/.ssh/id_ed25519 + .pub (passphrase prompted)
+hostwick keygen -t rsa -b 4096 --ppk -f work.ppk -C me@work   # PuTTY key + work.pub
+hostwick keyconv work.ppk                    # PuTTY → OpenSSH (`work` + `work.pub`)
+hostwick keyconv ~/.ssh/id_ed25519 --to ppk2 # → id_ed25519.ppk for old PuTTY/WinSCP
+hostwick keyconv id_ed25519 --new-passphrase # change ('' removes) the passphrase in place
+hostwick keyinfo work.ppk --randomart        # type, bits, SHA256 fingerprint, comment, encrypted?
+
+hostwick known-hosts list                    # line, hosts or (hashed), type, fingerprint
+hostwick known-hosts remove web:2222         # like `ssh-keygen -R`, hashed entries too
+hostwick known-hosts add web ssh-ed25519 AAAA...   # or a .pub file
+
+hostwick settings-sync sync --folder ~/Dropbox/Hostwick   # later just `settings-sync sync`
+
+hostwick hosts list --json                   # also: known-hosts list, ls, sync, keyinfo
 ```
 
 `--batch` never prompts (for scripts); `--accept-new` trusts first-seen host
 keys but never changed ones.
+
+## Batch scripts (WinSCP-style)
+
+`hostwick script FILE` (or `-` for stdin) runs one command per line, like
+`winscp.com /script`: `open`, `close`, `cd`, `lcd`, `pwd`, `lpwd`, `ls`, `lls`,
+`stat`, `put [-r] [-n]`, `get [-r] [-n]`, `mkdir [-p]`, `rm [-r]`, `rmdir`, `mv`,
+`chmod 640 FILE`, `ln -s TARGET LINK`, `sync remote|local [--delete] [-x PATTERN]`,
+`call SHELL-COMMAND` (output printed; a non-zero exit is an error), `echo`,
+`option batch abort|continue`, `option confirm on|off`, `option json on|off`,
+`exit`.
+
+- `# comments`, `"quoted paths with spaces"`, `*`/`?` wildcards in `put`/`get`/`ls`/`rm`/`mv`/`chmod`.
+- `%NAME%` comes from `-D NAME=VALUE` or the environment, `%1%`, `%2%` from
+  parameters after `--`; `%%` is a literal `%`.
+- `open` takes a saved host, `user@host[:port]` or WinSCP's
+  `sftp://user[:password]@host[:port]/dir`, plus `-hostkey="SHA256:..."` (pin
+  the server key; `*` accepts any), `-privatekey=FILE`, `-passphrase=`,
+  `-password=`, `-port=`.
+- `option batch abort` (default): the first error stops the script, exit
+  code 1, with `script.txt:12: ...` naming the line. `continue` runs every
+  line and still exits 1 if anything failed.
+- `option confirm on` never overwrites existing files (they are skipped);
+  `-n` skips files whose size and time already match.
+- Transfers use the same engine as `cp`/`sync` (parallel, resumable).
+
+See [`docs/examples/deploy-script.txt`](docs/examples/deploy-script.txt).
+
+```sh
+hostwick --batch script deploy.txt -D env=prod -- v1.4.2
+echo 'open web
+ls /var/log/*.log' | hostwick --batch script --json -
+```
+
+## Keys
+
+`hostwick keygen` makes Ed25519 (default), ECDSA P-256/384/521 or RSA
+2048–16384 keys. OpenSSH keys are encrypted like `ssh-keygen`
+(bcrypt-pbkdf + aes256-ctr); `--ppk` writes PuTTY format 3 (Argon2id,
+aes256-cbc, HMAC-SHA-256) and `--ppk2` format 2. Files are `0600` on Unix and
+never overwritten without `--force`. `keyconv` converts OpenSSH, `.ppk` and
+legacy PEM keys either way and changes or removes passphrases; output is
+checked against `puttygen` and `ssh-keygen` in the tests.
+
+## Settings sync
+
+Point every computer at a folder your cloud drive (OneDrive, Dropbox, iCloud
+Drive, Syncthing) or a git checkout keeps in sync:
+
+```sh
+export HOSTWICK_SYNC_PASSPHRASE=...           # or type it when asked
+hostwick settings-sync sync --folder ~/OneDrive/Hostwick
+```
+
+- Saved hosts, deletions and app settings go into one file,
+  `hostwick-sync.hwsync`, encrypted with the sync passphrase (Argon2id +
+  XChaCha20-Poly1305). Vault secrets never leave the computer; hosts only
+  name their vault entries.
+- `sync` merges both ways: per host the newest edit wins, and a deletion
+  wins over older edits. `push` makes the file match this computer (and
+  re-keys it with a new passphrase); `pull` makes this computer match the file.
+- When two computers write at once, cloud clients keep a "conflicted copy"
+  (`hostwick-sync (… conflicted copy …).hwsync`,
+  `hostwick-sync.sync-conflict-….hwsync`, `hostwick-sync-PCNAME.hwsync`);
+  the next sync merges and removes them.
 
 ## Download
 
@@ -221,7 +303,14 @@ cargo test --workspace     # unit + integration tests
 scripts/e2e.sh             # starts sshd on 127.0.0.1:2222, runs the e2e suite
 scripts/e2e-net.sh         # sshd on :2223 (+ KDC, Xvfb, agent, tinyproxy, dante):
                            # proxies, X11/agent forwarding, certificates, FIDO, Kerberos
+# `hostwick script` and the --json outputs against any OpenSSH server:
+HOSTWICK_TOOLS_E2E_PORT=2250 HOSTWICK_TOOLS_E2E_USER=me HOSTWICK_TOOLS_E2E_KEY=~/.ssh/test_key \
+  HOSTWICK_TOOLS_E2E_HOST_PUB=/etc/ssh/ssh_host_ed25519_key.pub \
+  cargo test -p hostwick-cli --test script_e2e
 ```
+
+The key tests also run real `puttygen` and `ssh-keygen` when they are
+installed.
 
 The e2e suite covers password/key/encrypted-key auth, host-key TOFU and
 rejection, PTY shells with resize, `-L`/`-D`/`-R` forwards, jump-host chains,
