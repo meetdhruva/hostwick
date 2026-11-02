@@ -419,3 +419,76 @@ fn fields_from_newer_versions_survive_a_round_trip() {
         Err(SyncError::TooNew(_))
     ));
 }
+
+/// Re-seal a sync file after editing its payload (what a computer with a
+/// wrong clock would have written).
+fn rewrite(path: &Path, edit: impl FnOnce(&mut Payload)) {
+    let mut payload = decrypt(path, "sync pass");
+    edit(&mut payload);
+    let key = SealKey::new(&pass("sync pass"), FAST).unwrap();
+    let bytes = key
+        .seal(&serde_json::to_vec(&payload).unwrap(), PURPOSE)
+        .unwrap();
+    std::fs::write(path, bytes).unwrap();
+}
+
+/// A deletion stamped years ahead (wrong clock) is pulled back to now + 5
+/// minutes, in the file and in the store, so later edits can win again;
+/// and a second sync is quiet (the clamped time is stable).
+#[test]
+fn far_future_times_are_clamped() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = Device::new("A");
+    let web = a.add("web", "10.0.0.1");
+    let db = a.add("db", "10.0.0.2");
+    a.sync_in(dir.path()).sync().unwrap();
+    let file = dir.path().join(SYNC_FILE_NAME);
+    let ten_years = 10 * 365 * 24 * 3600 * 1000;
+    rewrite(&file, |p| {
+        p.state.profiles.remove(&web.id.to_string());
+        p.state
+            .tombstones
+            .insert(web.id.to_string(), now_ms() + ten_years);
+        if let Some(v) = p.state.profiles.get_mut(&db.id.to_string()) {
+            v["updated_ms"] = serde_json::json!(now_ms() + ten_years);
+        }
+    });
+    let before = now_ms();
+    a.sync_in(dir.path()).sync().unwrap();
+    let limit = now_ms() + MAX_FUTURE_MS;
+    assert_eq!(a.names(), ["db"]);
+    let tomb = a.store.tombstones().unwrap();
+    assert_eq!(tomb.len(), 1);
+    assert!(tomb[0].1 >= before && tomb[0].1 <= limit, "{tomb:?}");
+    assert!(a.by_name("db").unwrap().updated_ms <= limit);
+    let p = decrypt(&file, "sync pass");
+    assert!(p.state.tombstones.values().all(|t| *t <= limit));
+    assert!(p.state.profiles.values().all(|v| profile_ms(v) <= limit));
+    let again = a.sync_in(dir.path()).sync().unwrap();
+    assert!(!again.uploaded && again.local_unchanged(), "{again:?}");
+}
+
+/// A host edited here after a deletion elsewhere survives it.
+#[test]
+fn local_edit_newer_than_a_deletion_survives() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = Device::new("A");
+    let web = a.add("web", "10.0.0.1");
+    a.sync_in(dir.path()).sync().unwrap();
+    let file = dir.path().join(SYNC_FILE_NAME);
+    rewrite(&file, |p| {
+        p.state.profiles.remove(&web.id.to_string());
+        p.state
+            .tombstones
+            .insert(web.id.to_string(), now_ms().saturating_sub(3_600_000));
+    });
+    tick();
+    let mut edited = a.by_name("web").unwrap();
+    edited.host = "10.0.0.99".into();
+    a.store.upsert(&edited).unwrap();
+    a.sync_in(dir.path()).sync().unwrap();
+    assert_eq!(a.by_name("web").unwrap().host, "10.0.0.99");
+    let p = decrypt(&file, "sync pass");
+    assert!(p.state.profiles.contains_key(&web.id.to_string()));
+    assert!(p.state.tombstones.is_empty());
+}

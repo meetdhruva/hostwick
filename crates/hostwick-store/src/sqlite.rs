@@ -88,15 +88,39 @@ impl SqliteStore {
     }
 
     /// Copy the database aside before upgrading its schema, so a bad
-    /// migration can always be rolled back by hand.
+    /// migration can always be rolled back by hand. The copy gets a unique
+    /// name (an earlier backup is never in the way), and a backup that cannot
+    /// be written is logged rather than keeping Hostwick from starting.
     fn backup_before_migrate(&self, path: &Path) -> Result<(), StoreError> {
         let conn = self.lock()?;
         let v = Self::version(&conn)?;
         if v < MIGRATIONS.len() && v > 0 {
-            let backup = path.with_extension(format!("db.bak-v{v}"));
-            conn.execute("VACUUM INTO ?1", params![backup.to_string_lossy()])
-                .map_err(be)?;
-            tracing::info!(?backup, "backed up database before migration");
+            let stamp = now_ms();
+            let mut done = false;
+            for n in 0..20 {
+                let suffix = if n == 0 {
+                    format!("db.bak-v{v}-{stamp}")
+                } else {
+                    format!("db.bak-v{v}-{stamp}-{n}")
+                };
+                let backup = path.with_extension(suffix);
+                if backup.exists() {
+                    continue;
+                }
+                match conn.execute("VACUUM INTO ?1", params![backup.to_string_lossy()]) {
+                    Ok(_) => {
+                        tracing::info!(?backup, "backed up database before migration");
+                        done = true;
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!(?backup, error = %e, "could not back up the database");
+                    }
+                }
+            }
+            if !done {
+                tracing::warn!("migrating the database without a backup");
+            }
         }
         Ok(())
     }
@@ -377,6 +401,38 @@ impl ProfileStore for SqliteStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A v1 database whose backup name is already taken still opens (it
+    /// used to fail with "output file already exists").
+    #[test]
+    fn migration_backup_never_blocks_opening() -> Result<(), StoreError> {
+        let dir = tempfile::tempdir().map_err(be)?;
+        let path = dir.path().join("hostwick.db");
+        {
+            let c = Connection::open(&path).map_err(be)?;
+            c.execute_batch(MIGRATIONS[0]).map_err(be)?;
+            c.pragma_update(None, "user_version", 1).map_err(be)?;
+        }
+        // Earlier backups (old and new naming) are left alone.
+        std::fs::write(path.with_extension("db.bak-v1"), b"old").map_err(be)?;
+        let s = SqliteStore::open(&path)?;
+        assert_eq!(s.schema_version()?, MIGRATIONS.len());
+        assert_eq!(
+            std::fs::read(path.with_extension("db.bak-v1")).map_err(be)?,
+            b"old"
+        );
+        let backups = std::fs::read_dir(dir.path())
+            .map_err(be)?
+            .filter_map(Result::ok)
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("hostwick.db.bak-v1-")
+            })
+            .count();
+        assert_eq!(backups, 1);
+        Ok(())
+    }
     use hostwick_core::ForwardSpec;
 
     #[test]
@@ -461,7 +517,15 @@ mod tests {
         }
         let s = SqliteStore::open(&path)?;
         assert_eq!(s.schema_version()?, MIGRATIONS.len());
-        assert!(dir.path().join("hostwick.db.bak-v1").exists());
+        assert!(
+            std::fs::read_dir(dir.path())
+                .map_err(be)?
+                .filter_map(Result::ok)
+                .any(|e| e
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("hostwick.db.bak-v1-"))
+        );
         let p = s.list()?.pop().ok_or_else(|| be("missing"))?;
         assert_eq!((p.name.as_str(), p.updated_ms), ("old", 0));
         s.delete(p.id)?;

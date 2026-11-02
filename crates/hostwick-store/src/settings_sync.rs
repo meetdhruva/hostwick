@@ -16,6 +16,15 @@
 //! `hostwick-sync.sync-conflict-….hwsync`, `hostwick-sync-PCNAME.hwsync`,
 //! `hostwick-sync (1).hwsync`, …) into the result and then removes them.
 //! Files are replaced atomically (temporary file + rename).
+//!
+//! Clocks: all of this compares wall-clock times from different computers.
+//! A host edited on this computer after it was deleted elsewhere comes back
+//! only if its `updated_ms` is later than the deletion's time; a host whose
+//! time is later than a deletion is never removed by it. Times read from
+//! the sync file more than [`MAX_FUTURE_MS`] (5 minutes) ahead of this
+//! computer's clock are pulled back to now + 5 minutes and written back that
+//! way, so one computer with a clock set years ahead cannot make its
+//! deletions (or edits) beat every later change for good.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -37,6 +46,28 @@ const STEM: &str = "hostwick-sync";
 const EXTENSION: &str = ".hwsync";
 const PURPOSE: &str = "settings-sync";
 const FORMAT: u32 = 1;
+
+/// How far ahead of this computer's clock a time in the sync file may be.
+pub const MAX_FUTURE_MS: u64 = 5 * 60 * 1000;
+
+/// Pull every time in `state` back to at most `now + MAX_FUTURE_MS`.
+fn clamp_future(mut state: State, now: u64) -> State {
+    let limit = now.saturating_add(MAX_FUTURE_MS);
+    for v in state.profiles.values_mut() {
+        if profile_ms(v) > limit
+            && let Some(obj) = v.as_object_mut()
+        {
+            obj.insert("updated_ms".into(), Value::from(limit));
+        }
+    }
+    for t in state.tombstones.values_mut() {
+        *t = (*t).min(limit);
+    }
+    if let Some(a) = state.app_settings.as_mut() {
+        a.updated_ms = a.updated_ms.min(limit);
+    }
+    state
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
@@ -472,7 +503,10 @@ impl<'a> SettingsSync<'a> {
             }
             None => (None, cache),
         };
-        let mut state = main_state.clone().unwrap_or_default();
+        // `main_state` stays as read, so a file that needed clamping is
+        // rewritten with the clamped times.
+        let now = now_ms();
+        let mut state = clamp_future(main_state.clone().unwrap_or_default(), now);
         let mut copies = Vec::new();
         let mut skipped = Vec::new();
         for path in self.conflict_copies() {
@@ -481,7 +515,7 @@ impl<'a> SettingsSync<'a> {
                 .and_then(|b| self.open_file(&path, &b, key.as_ref()));
             match res {
                 Ok((s, k)) => {
-                    state = merge(&state, &s);
+                    state = merge(&state, &clamp_future(s, now));
                     key.get_or_insert(k);
                     copies.push(path);
                 }
