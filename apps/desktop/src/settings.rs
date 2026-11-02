@@ -2,7 +2,7 @@
 //! exposed to every view as a GPUI global.
 
 use gpui_kit::{App, Global};
-use hostwick_core::LogMode;
+use hostwick_core::{HighlightRule, LogMode, Snippet};
 use hostwick_store::SqliteStore;
 use serde::{Deserialize, Serialize};
 
@@ -40,6 +40,26 @@ pub struct Settings {
     /// Log every session (unless the host has its own setting).
     pub log_all_sessions: bool,
     pub session_log_mode: LogMode,
+    /// Keyword highlighting rules applied to every terminal.
+    pub highlight_rules: Vec<HighlightRule>,
+    /// Snippets available in every terminal (hosts can add their own).
+    pub snippets: Vec<Snippet>,
+    /// Reconnect dropped sessions automatically (with backoff).
+    pub auto_reconnect: bool,
+    /// Reopen the previous session's tabs at startup.
+    pub restore_tabs: bool,
+    /// Command for "Edit" in the file browser; empty = system default app.
+    /// `{file}` is replaced by the path, otherwise it is appended.
+    pub external_editor: String,
+    /// Folder for encrypted settings sync (OneDrive, Dropbox, git…); empty = off.
+    pub sync_folder: String,
+    /// UI language code (`en`, `hi`, …); empty = follow the OS.
+    pub language: String,
+    /// Send mouse clicks/scrolls to programs that ask (htop, mc, vim).
+    /// Hold Shift to select text instead.
+    pub mouse_reporting: bool,
+    /// Show the snippet button bar above terminals.
+    pub show_button_bar: bool,
 }
 
 impl Default for Settings {
@@ -55,6 +75,15 @@ impl Default for Settings {
             session_log_dir: String::new(),
             log_all_sessions: false,
             session_log_mode: LogMode::Printable,
+            highlight_rules: HighlightRule::defaults(),
+            snippets: Vec::new(),
+            auto_reconnect: true,
+            restore_tabs: true,
+            external_editor: String::new(),
+            sync_folder: String::new(),
+            language: String::new(),
+            mouse_reporting: true,
+            show_button_bar: true,
         }
     }
 }

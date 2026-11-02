@@ -70,6 +70,14 @@ pub enum AuthMethod {
     },
     /// Server-driven prompts (OTP, MFA, PAM).
     KeyboardInteractive,
+    /// Kerberos single sign-on (`gssapi-with-mic`): the current Windows
+    /// domain login, or a `kinit` ticket on macOS/Linux.
+    Gssapi {
+        /// Forward the Kerberos ticket to the server (OpenSSH
+        /// `GSSAPIDelegateCredentials`).
+        #[serde(default)]
+        delegate: bool,
+    },
 }
 
 /// A port forward attached to a profile.
@@ -229,6 +237,36 @@ pub struct HostProfile {
     /// Log terminal output of sessions to this host.
     #[serde(default)]
     pub session_log: Option<crate::SessionLog>,
+    /// SSH (default), telnet or a serial port.
+    #[serde(default)]
+    pub protocol: crate::Protocol,
+    /// SOCKS/HTTP proxy for reaching the first hop.
+    #[serde(default)]
+    pub proxy: Option<crate::ProxySpec>,
+    /// Forward X11 so remote GUI programs show on this computer.
+    #[serde(default)]
+    pub x11_forwarding: bool,
+    /// Local X display for X11 forwarding; None uses `$DISPLAY`, or
+    /// `localhost:0` on Windows (VcXsrv/Xming).
+    #[serde(default)]
+    pub x11_display: Option<String>,
+    #[serde(default)]
+    pub file_protocol: crate::FileProtocol,
+    #[serde(default)]
+    pub sudo: crate::SudoOptions,
+    /// Commands sent after the shell starts; see `parse_login_script`.
+    #[serde(default)]
+    pub login_script: String,
+    /// Make the shell report its current folder (OSC 7), so the file
+    /// browser can follow the terminal.
+    #[serde(default)]
+    pub shell_integration: bool,
+    #[serde(default)]
+    pub snippets: Vec<crate::Snippet>,
+    /// Last change, Unix milliseconds; set by the store, used to merge
+    /// settings sync.
+    #[serde(default)]
+    pub updated_ms: u64,
 }
 
 fn default_auth() -> Vec<AuthMethod> {
@@ -267,6 +305,16 @@ impl HostProfile {
             notes: String::new(),
             source: ProfileSource::Manual,
             session_log: None,
+            protocol: crate::Protocol::Ssh,
+            proxy: None,
+            x11_forwarding: false,
+            x11_display: None,
+            file_protocol: crate::FileProtocol::Auto,
+            sudo: crate::SudoOptions::default(),
+            login_script: String::new(),
+            shell_integration: false,
+            snippets: Vec::new(),
+            updated_ms: 0,
         }
     }
 

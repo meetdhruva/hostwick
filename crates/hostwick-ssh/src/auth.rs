@@ -47,11 +47,13 @@ pub(crate) async fn authenticate(
             ),
             AuthMethod::Password { .. } => "password".to_owned(),
             AuthMethod::KeyboardInteractive => "keyboard-interactive".to_owned(),
+            AuthMethod::Gssapi { .. } => "kerberos".to_owned(),
         };
         let kind = match method {
             AuthMethod::Agent | AuthMethod::KeyFile { .. } => MethodKind::PublicKey,
             AuthMethod::Password { .. } => MethodKind::Password,
             AuthMethod::KeyboardInteractive => MethodKind::KeyboardInteractive,
+            AuthMethod::Gssapi { .. } => MethodKind::GssapiWithMic,
         };
         if !allowed.is_empty() && !allowed.contains(&kind) {
             tried.push(format!("{label}: not offered by server"));
@@ -67,6 +69,9 @@ pub(crate) async fn authenticate(
                 try_password(handle, ctx, credential.as_deref()).await
             }
             AuthMethod::KeyboardInteractive => try_keyboard_interactive(handle, ctx).await,
+            AuthMethod::Gssapi { .. } => {
+                Err(SshError::Agent("Kerberos is not available yet".into()))
+            }
         };
         match result {
             Ok(Step::Done) => return Ok(()),

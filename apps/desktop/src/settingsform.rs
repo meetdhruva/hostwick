@@ -261,6 +261,7 @@ pub fn open(
                 session_log_dir: v(&logdir2),
                 log_all_sessions: all2.get(),
                 session_log_mode: mode2.get(),
+                ..base2.borrow().clone()
             }
             .sanitized();
             if let Err(e) = new.save(&store2.store) {
