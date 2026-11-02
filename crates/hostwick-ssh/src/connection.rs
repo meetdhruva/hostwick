@@ -14,7 +14,9 @@ use crate::forward::{self, ForwardHandle};
 use crate::handler::{ClientHandler, RemoteForwardMap, VerifyOutcome};
 use crate::interaction::{Credentials, Interaction};
 use crate::known_hosts::KnownHosts;
-use crate::shell::{PtyOptions, ShellSession};
+use crate::proxy::{self, ProxyCredentials};
+use crate::shell::{PtyOptions, SessionForwarding, ShellSession};
+use crate::x11::X11Forwarding;
 
 /// Shared services every connection needs.
 #[derive(Clone)]
@@ -49,7 +51,7 @@ pub struct Connection {
 struct Inner {
     handle: Handle<ClientHandler>,
     label: String,
-    agent_forwarding: bool,
+    forwarding: SessionForwarding,
     pub(crate) remote_forwards: RemoteForwardMap,
     /// Keeps the jump-host connection alive for as long as we are.
     _via: Option<Connection>,
@@ -70,11 +72,19 @@ impl Connection {
         let mut via: Option<Connection> = None;
         for hop in &profile.jump {
             let hop_user = hop.user.clone().unwrap_or_else(|| user.clone());
-            let conn =
-                Self::connect_hop(&hop.host, hop.port, &hop_user, profile, ctx, via.take()).await?;
+            let conn = Self::connect_hop(
+                &hop.host,
+                hop.port,
+                &hop_user,
+                profile,
+                ctx,
+                via.take(),
+                false,
+            )
+            .await?;
             via = Some(conn);
         }
-        Self::connect_hop(&profile.host, profile.port, &user, profile, ctx, via).await
+        Self::connect_hop(&profile.host, profile.port, &user, profile, ctx, via, true).await
     }
 
     /// [`Connection::connect`] with exponential backoff on transient errors
@@ -106,11 +116,19 @@ impl Connection {
         profile: &HostProfile,
         ctx: &ConnectContext,
         via: Option<Connection>,
+        // The destination (not a jump host): only it gets X11/agent forwarding.
+        is_target: bool,
     ) -> Result<Self, SshError> {
         let label = format!("{user}@{host}:{port}");
         let config = Arc::new(client_config(profile));
         let outcome = Arc::new(Mutex::new(VerifyOutcome::default()));
         let remote_forwards = RemoteForwardMap::default();
+        let forwarding = SessionForwarding {
+            agent: is_target && profile.agent_forwarding,
+            x11: (is_target && profile.x11_forwarding).then(|| {
+                X11Forwarding::new(profile.x11_display.as_deref(), ctx.interaction.clone())
+            }),
+        };
         let handler = ClientHandler {
             host: host.to_owned(),
             port,
@@ -118,19 +136,35 @@ impl Connection {
             interaction: ctx.interaction.clone(),
             outcome: outcome.clone(),
             remote_forwards: remote_forwards.clone(),
+            x11: forwarding.x11.clone(),
+            agent_forwarding: forwarding.agent,
+            agent_warned: Default::default(),
+        };
+
+        // The proxy (first hop only) runs before the timed handshake: it may
+        // prompt for the proxy password, and has per-step timeouts of its own.
+        let proxied = match (&via, &profile.proxy) {
+            (None, Some(spec)) => {
+                let creds = proxy_credentials(spec, ctx).await;
+                tracing::info!(proxy = %spec.to_url(), %host, port, "connecting through proxy");
+                Some(proxy::connect(spec, &creds, host, port, ctx.connect_timeout).await?)
+            }
+            _ => None,
         };
 
         let handshake = async {
             match &via {
                 None => {
-                    let tcp =
-                        tokio::net::TcpStream::connect((host, port))
-                            .await
-                            .map_err(|reason| SshError::Connect {
+                    let tcp = match proxied {
+                        Some(tcp) => tcp,
+                        None => tokio::net::TcpStream::connect((host, port)).await.map_err(
+                            |reason| SshError::Connect {
                                 host: host.to_owned(),
                                 port,
                                 reason,
-                            })?;
+                            },
+                        )?,
+                    };
                     let _ = tcp.set_nodelay(true);
                     client::connect_stream(config, tcp, handler)
                         .await
@@ -172,7 +206,7 @@ impl Connection {
             inner: Arc::new(Inner {
                 handle,
                 label,
-                agent_forwarding: profile.agent_forwarding,
+                forwarding,
                 remote_forwards,
                 _via: via,
             }),
@@ -197,22 +231,31 @@ impl Connection {
 
     /// Interactive login shell with a PTY.
     pub async fn open_shell(&self, pty: PtyOptions) -> Result<ShellSession, SshError> {
-        ShellSession::open(self.handle(), Some(pty), None, self.inner.agent_forwarding).await
+        ShellSession::open(self.handle(), Some(pty), None, &self.inner.forwarding).await
     }
 
     /// Run a command; stdout/stderr/exit stream back as [`crate::ShellEvent`]s.
-    /// Pass a PTY for interactive commands (`ssh -t`).
+    /// Pass a PTY for interactive commands (`ssh -t`). Agent and X11
+    /// forwarding apply as for the shell (so `ssh -X host xterm` works).
     pub async fn open_exec(
         &self,
         command: &str,
         pty: Option<PtyOptions>,
     ) -> Result<ShellSession, SshError> {
-        ShellSession::open(self.handle(), pty, Some(command), false).await
+        ShellSession::open(self.handle(), pty, Some(command), &self.inner.forwarding).await
     }
 
-    /// Run a command to completion and collect its output.
+    /// Run a command to completion and collect its output. Housekeeping
+    /// commands never forward the agent or X11.
     pub async fn exec(&self, command: &str) -> Result<ExecOutput, SshError> {
-        ExecOutput::collect(self.open_exec(command, None).await?).await
+        let session = ShellSession::open(
+            self.handle(),
+            None,
+            Some(command),
+            &SessionForwarding::default(),
+        )
+        .await?;
+        ExecOutput::collect(session).await
     }
 
     /// Raw stream for a subsystem (e.g. `sftp`).
@@ -241,6 +284,36 @@ impl Connection {
             .handle
             .disconnect(Disconnect::ByApplication, "bye", "en")
             .await;
+    }
+}
+
+/// The proxy user and password: the vault entry, else a prompt (only when a
+/// proxy user is set; SOCKS4 has no password).
+async fn proxy_credentials(
+    spec: &hostwick_core::ProxySpec,
+    ctx: &ConnectContext,
+) -> ProxyCredentials {
+    let Some(user) = spec.user.clone().filter(|u| !u.is_empty()) else {
+        return ProxyCredentials::default();
+    };
+    let password = if spec.kind == hostwick_core::ProxyKind::Socks4 {
+        None
+    } else {
+        match spec
+            .password_credential
+            .as_deref()
+            .and_then(|c| ctx.credentials.get(c))
+        {
+            Some(p) => Some(p),
+            None => {
+                let proxy_host = format!("proxy {}", spec.host);
+                ctx.interaction.password(&user, &proxy_host).await
+            }
+        }
+    };
+    ProxyCredentials {
+        user: Some(user),
+        password,
     }
 }
 

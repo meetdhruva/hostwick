@@ -1,10 +1,24 @@
+use std::sync::Arc;
+use std::time::Duration;
+
 use bytes::Bytes;
-use russh::ChannelMsg;
-use russh::client::Handle;
+use russh::client::{Handle, Msg};
+use russh::{Channel, ChannelMsg};
 use tokio::sync::mpsc;
 
 use crate::SshError;
 use crate::handler::ClientHandler;
+use crate::x11::X11Forwarding;
+
+/// What to forward over a session channel (`ssh -A`, `ssh -X`).
+#[derive(Clone, Default)]
+pub(crate) struct SessionForwarding {
+    pub agent: bool,
+    pub x11: Option<Arc<X11Forwarding>>,
+}
+
+/// How long to wait for the server to answer the X11 request.
+const X11_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
 pub struct PtyOptions {
@@ -67,11 +81,14 @@ impl ShellSession {
         handle: &Handle<ClientHandler>,
         pty: Option<PtyOptions>,
         command: Option<&str>,
-        agent_forwarding: bool,
+        fwd: &SessionForwarding,
     ) -> Result<Self, SshError> {
-        let channel = handle.channel_open_session().await?;
-        if agent_forwarding {
+        let mut channel = handle.channel_open_session().await?;
+        if fwd.agent {
             channel.agent_forward(false).await?;
+        }
+        if let Some(x11) = &fwd.x11 {
+            request_x11(&mut channel, x11).await?;
         }
         if let Some(pty) = &pty {
             channel
@@ -154,4 +171,34 @@ impl ShellSession {
     pub fn split(self) -> (mpsc::Sender<ShellCommand>, mpsc::Receiver<ShellEvent>) {
         (self.input, self.output)
     }
+}
+
+/// Ask for X11 forwarding and wait for the answer, so a refusal is reported
+/// (like OpenSSH's "X11 forwarding request failed") instead of silently
+/// leaving GUI programs without a display. Never fails the session.
+async fn request_x11(channel: &mut Channel<Msg>, x11: &X11Forwarding) -> Result<(), SshError> {
+    let Some((proto, cookie, screen)) = x11.request_params().await else {
+        return Ok(());
+    };
+    channel
+        .request_x11(true, false, proto, cookie, screen)
+        .await?;
+    let answer = tokio::time::timeout(X11_REPLY_TIMEOUT, async {
+        loop {
+            match channel.wait().await {
+                Some(ChannelMsg::Success) => return Some(true),
+                Some(ChannelMsg::Failure) => return Some(false),
+                Some(ChannelMsg::Close) | None => return None,
+                Some(_) => {}
+            }
+        }
+    })
+    .await;
+    match answer {
+        Ok(Some(true)) => tracing::debug!("X11 forwarding enabled"),
+        Ok(Some(false)) => x11.report_refused(),
+        Ok(None) => return Err(SshError::Closed),
+        Err(_) => tracing::warn!("no answer to the X11 forwarding request; continuing"),
+    }
+    Ok(())
 }

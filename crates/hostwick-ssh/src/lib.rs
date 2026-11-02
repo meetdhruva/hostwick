@@ -17,7 +17,9 @@ mod handler;
 mod interaction;
 mod known_hosts;
 mod pool;
+mod proxy;
 mod shell;
+mod x11;
 
 pub use connection::{ConnectContext, Connection};
 pub use error::SshError;
@@ -29,6 +31,7 @@ pub use interaction::{
 pub use known_hosts::KnownHosts;
 pub use pool::ConnectionPool;
 pub use shell::{PtyOptions, ShellCommand, ShellEvent, ShellSession};
+pub use x11::{X11Display, X11Target};
 
 /// Re-exported for crates that open raw channels (e.g. SFTP).
 pub use russh::{ChannelStream, client::Msg as ClientMsg};

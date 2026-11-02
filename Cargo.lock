@@ -3550,7 +3550,9 @@ dependencies = [
  "bytes",
  "dirs 6.0.0",
  "futures",
+ "hex",
  "hostwick-core",
+ "rand 0.8.8",
  "russh",
  "secrecy",
  "ssh-key",
@@ -3560,6 +3562,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]

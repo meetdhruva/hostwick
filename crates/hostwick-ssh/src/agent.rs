@@ -34,3 +34,14 @@ pub(crate) async fn connect() -> Result<Agent, SshError> {
         .map(AgentClient::dynamic)
         .map_err(|e| SshError::Agent(format!("agent not reachable ({e})")))
 }
+
+/// A raw byte stream to the local agent, for bridging forwarded agent
+/// channels (the server's `ssh-add -l` talks straight to it).
+pub(crate) async fn connect_stream()
+-> Result<Box<dyn AgentStream + Send + Unpin + 'static>, SshError> {
+    // A wedged agent must not leave the server's request hanging forever.
+    match tokio::time::timeout(std::time::Duration::from_secs(10), connect()).await {
+        Ok(agent) => Ok(agent?.into_inner()),
+        Err(_) => Err(SshError::Agent("the local agent did not answer".into())),
+    }
+}

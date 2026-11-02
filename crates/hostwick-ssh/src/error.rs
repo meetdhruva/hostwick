@@ -26,6 +26,10 @@ pub enum SshError {
     Key { path: String, reason: String },
     #[error("SSH agent unavailable: {0}")]
     Agent(String),
+    /// The SOCKS/HTTP proxy answered but would not connect us, e.g.
+    /// "proxy 10.0.0.1:1080 refused: connection not allowed by ruleset".
+    #[error("proxy {proxy} {reason}")]
+    Proxy { proxy: String, reason: String },
     #[error("channel request refused: {0}")]
     ChannelRefused(String),
     #[error("connection closed")]
