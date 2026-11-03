@@ -30,6 +30,8 @@ pub struct Settings {
     pub font_size: f32,
     pub theme: ThemeChoice,
     pub scrollback_lines: usize,
+    /// Paste protection, finished-command alerts, status bar, links.
+    pub term: crate::terminal::prefs::TermPrefs,
     pub right_click: RightClick,
     /// PuTTY habit: selecting text copies it.
     pub copy_on_select: bool,
@@ -90,6 +92,7 @@ impl Default for Settings {
             font_size: 14.0,
             theme: ThemeChoice::Dark,
             scrollback_lines: 10_000,
+            term: Default::default(),
             right_click: RightClick::Menu,
             copy_on_select: true,
             log_level: "info".into(),
@@ -182,6 +185,7 @@ impl Settings {
         self.font_size = self.font_size.clamp(6.0, 48.0);
         self.vault_auto_lock_minutes = self.vault_auto_lock_minutes.min(24 * 60);
         self.scrollback_lines = self.scrollback_lines.clamp(100, 1_000_000);
+        self.term = self.term.clamped();
         if !matches!(
             self.log_level.as_str(),
             "error" | "warn" | "info" | "debug" | "trace"
