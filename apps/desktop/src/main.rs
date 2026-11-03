@@ -12,12 +12,16 @@ mod app;
 mod backend;
 mod editors;
 mod files;
+mod firstrun;
+mod fuzzy;
 mod hostform;
+mod hostops;
 mod layout;
 mod logging;
 mod notify;
 mod settings;
 mod settingsform;
+mod shortcuts;
 mod terminal;
 mod tools;
 mod util;
@@ -29,7 +33,19 @@ use std::sync::Arc;
 use gpui_kit::*;
 
 // Icons beyond the component set (tools menu, vault indicator).
-gpui_kit::assets::icon_assets!(ExtraIcons, [Wrench, LockOpen]);
+gpui_kit::assets::icon_assets!(
+    ExtraIcons,
+    [
+        Wrench,
+        LockOpen,
+        CircleQuestionMark,
+        FolderPlus,
+        LayoutGrid,
+        Clock,
+        ScanSearch,
+        Command,
+    ]
+);
 
 /// The component icons plus the few extra ones the app uses.
 struct AppAssets;

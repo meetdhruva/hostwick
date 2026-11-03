@@ -71,6 +71,7 @@ use hostwick_core::{HostProfile, LogMode, Protocol, ScriptStep, Snippet};
 use hostwick_term::{Control, ShellCommand, ShellEvent, TerminalSession, TransportKind};
 
 use crate::settings::{RightClick, Settings};
+use crate::shortcuts::Sc;
 pub use sessionlog::SessionLogger;
 
 pub use element::TerminalElement;
@@ -2169,32 +2170,40 @@ impl Render for TerminalView {
                 let text_view = view.clone();
                 let mut menu = menu
                     .item(
-                        PopupMenuItem::new(t!("term-menu-copy")).on_click(act(|t, cx| {
-                            t.copy_selection(cx);
-                        })),
+                        crate::shortcuts::menu_item(t!("term-menu-copy"), Some(Sc::Copy)).on_click(
+                            act(|t, cx| {
+                                t.copy_selection(cx);
+                            }),
+                        ),
                     )
                     .item(
-                        PopupMenuItem::new(t!("term-menu-paste"))
+                        crate::shortcuts::menu_item(t!("term-menu-paste"), Some(Sc::Paste))
                             .on_click(act(|t, cx| t.paste(cx))),
                     )
                     .item(
                         PopupMenuItem::new(t!("term-menu-select-all"))
                             .on_click(act(|t, cx| t.select_all_visible(cx))),
                     )
-                    .item(PopupMenuItem::new(t!("term-menu-find")).on_click(
-                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                            let _ = find_view.update(cx, |t, cx| t.open_search(window, cx));
-                        },
-                    ))
                     .item(
-                        PopupMenuItem::new(t!("term-menu-read-output"))
-                            .on_click(act(|t, cx| t.read_recent_output(cx))),
+                        crate::shortcuts::menu_item(t!("term-menu-find"), Some(Sc::Find)).on_click(
+                            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                                let _ = find_view.update(cx, |t, cx| t.open_search(window, cx));
+                            },
+                        ),
                     )
-                    .item(PopupMenuItem::new(t!("term-menu-text-view")).on_click(
-                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                            let _ = text_view.update(cx, |t, cx| t.open_text_view(window, cx));
-                        },
-                    ));
+                    .item(
+                        crate::shortcuts::menu_item(
+                            t!("term-menu-read-output"),
+                            Some(Sc::ReadOutput),
+                        )
+                        .on_click(act(|t, cx| t.read_recent_output(cx))),
+                    )
+                    .item(
+                        crate::shortcuts::menu_item(t!("term-menu-text-view"), Some(Sc::TextView))
+                            .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                                let _ = text_view.update(cx, |t, cx| t.open_text_view(window, cx));
+                            }),
+                    );
                 if !menu_snippets.is_empty() {
                     let snips = menu_snippets.clone();
                     let sv = view.clone();
@@ -2229,7 +2238,7 @@ impl Render for TerminalView {
                 }
                 if can_break {
                     menu = menu.item(
-                        PopupMenuItem::new(t!("menu-send-break"))
+                        crate::shortcuts::menu_item(t!("menu-send-break"), Some(Sc::SendBreak))
                             .on_click(act(|t, cx| t.send_break(cx))),
                     );
                 }
@@ -2266,29 +2275,32 @@ impl Render for TerminalView {
                 }
                 menu = menu
                     .item(
-                        PopupMenuItem::new(t!("menu-split-right"))
+                        crate::shortcuts::menu_item(t!("menu-split-right"), Some(Sc::SplitRight))
                             .on_click(act(|_, cx| cx.emit(TerminalEvent::Split(false)))),
                     )
                     .item(
-                        PopupMenuItem::new(t!("menu-split-down"))
+                        crate::shortcuts::menu_item(t!("menu-split-down"), Some(Sc::SplitDown))
                             .on_click(act(|_, cx| cx.emit(TerminalEvent::Split(true)))),
                     )
                     .separator();
                 menu.item(
-                    PopupMenuItem::new(t!("term-menu-duplicate"))
+                    crate::shortcuts::menu_item(t!("term-menu-duplicate"), Some(Sc::DuplicateTab))
                         .on_click(act(|_, cx| cx.emit(TerminalEvent::Duplicate))),
                 )
                 .item(
-                    PopupMenuItem::new(if alive {
-                        t!("menu-reconnect")
-                    } else {
-                        t!("term-menu-reconnect-ended")
-                    })
+                    crate::shortcuts::menu_item(
+                        if alive {
+                            t!("menu-reconnect")
+                        } else {
+                            t!("term-menu-reconnect-ended")
+                        },
+                        Some(Sc::Reconnect),
+                    )
                     .on_click(act(|_, cx| cx.emit(TerminalEvent::Reconnect))),
                 )
                 .separator()
                 .item(
-                    PopupMenuItem::new(t!("menu-close-pane"))
+                    crate::shortcuts::menu_item(t!("menu-close-pane"), Some(Sc::ClosePane))
                         .on_click(act(|_, cx| cx.emit(TerminalEvent::Close))),
                 )
             })

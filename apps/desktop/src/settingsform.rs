@@ -34,7 +34,7 @@ pub enum Section {
 }
 
 impl Section {
-    const ALL: [Section; 9] = [
+    pub(crate) const ALL: [Section; 9] = [
         Section::Appearance,
         Section::Terminal,
         Section::Snippets,
@@ -46,7 +46,7 @@ impl Section {
         Section::Diagnostics,
     ];
 
-    fn label(self) -> SharedString {
+    pub(crate) fn label(self) -> SharedString {
         match self {
             Section::Appearance => t!("settings-section-appearance"),
             Section::Terminal => t!("settings-section-terminal"),
@@ -398,7 +398,7 @@ impl SettingsForm {
     }
 
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let new = match self.collect(cx) {
+        let mut new = match self.collect(cx) {
             Ok(s) => s,
             Err(e) => {
                 self.error = Some(e);
@@ -406,6 +406,11 @@ impl SettingsForm {
                 return;
             }
         };
+        // Changed elsewhere while this dialog was open (sidebar folders,
+        // the welcome screen's keys): keep the current ones.
+        let current = Settings::get(cx);
+        new.folders = current.folders.clone();
+        new.default_keys = current.default_keys.clone();
         if let Err(e) = new.save(&self.backend.store) {
             self.error = Some(t!("settings-save-failed", error = e).into());
             cx.notify();

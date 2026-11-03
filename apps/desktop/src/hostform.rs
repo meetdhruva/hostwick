@@ -287,14 +287,13 @@ fn key_paths(p: &HostProfile) -> String {
 
 impl HostForm {
     fn new(
-        existing: Option<HostProfile>,
+        base: HostProfile,
+        editing: bool,
         backend: Arc<Backend>,
         on_save: OnSave,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let editing = existing.is_some();
-        let base = existing.unwrap_or_else(|| HostProfile::new("", ""));
         let mk = |value: String, ph: SharedString, window: &mut Window, cx: &mut Context<Self>| {
             cx.new(|cx| {
                 InputState::new(window, cx)
@@ -1662,8 +1661,41 @@ pub fn open(
     on_save: impl Fn(HostProfile, &mut Window, &mut App) + 'static,
 ) {
     let editing = existing.is_some();
+    let base = existing.unwrap_or_else(new_host_base);
+    open_with(base, editing, backend, window, cx, on_save);
+}
+
+/// A new host, starting from `base` (quick connect's "Save as host").
+pub fn open_new(
+    base: HostProfile,
+    backend: Arc<Backend>,
+    window: &mut Window,
+    cx: &mut App,
+    on_save: impl Fn(HostProfile, &mut Window, &mut App) + 'static,
+) {
+    open_with(base, false, backend, window, cx, on_save);
+}
+
+/// An empty new host, with the key files chosen on the welcome screen.
+fn new_host_base() -> HostProfile {
+    let mut p = HostProfile::new("", "");
+    let keys = crate::backend::default_keys();
+    if !keys.is_empty() {
+        p.auth = crate::hostops::replace_keys(&p.auth, &keys);
+    }
+    p
+}
+
+fn open_with(
+    base: HostProfile,
+    editing: bool,
+    backend: Arc<Backend>,
+    window: &mut Window,
+    cx: &mut App,
+    on_save: impl Fn(HostProfile, &mut Window, &mut App) + 'static,
+) {
     let on_save: OnSave = Rc::new(on_save);
-    let form = cx.new(|cx| HostForm::new(existing, backend, on_save, window, cx));
+    let form = cx.new(|cx| HostForm::new(base, editing, backend, on_save, window, cx));
     let first = std::rc::Rc::new(std::cell::Cell::new(true));
     window.open_dialog(cx, move |dialog, window, cx| {
         if first.replace(false) {

@@ -146,7 +146,6 @@ remember-hint-create = You'll create a password vault with a master password.
 prompt-server-auth-title = Server authentication
 prompt-password-title = Password for { $user }@{ $host }
 prompt-password-label = Password
-prompt-passphrase-title = Passphrase for { $path }
 prompt-passphrase-label = Passphrase
 prompt-sudo-title = sudo password for { $who }
 prompt-sudo-wrong-title = Wrong password. sudo password for { $who }
@@ -822,7 +821,7 @@ files-opening = opening the file browser
 sidebar-vault-lock = Lock saved passwords
 sidebar-quick-connect = Quick connect (user@host:port, Enter)
 sidebar-hosts-label = Saved hosts
-sidebar-hosts-keys = Arrow keys choose a host. Enter opens a terminal, Shift+Enter the files, F2 edits, Delete removes, Shift+F10 opens the menu.
+sidebar-hosts-keys = Arrow keys move (Shift+arrows select several), Left and Right fold folders. Enter opens a terminal, Ctrl+Enter the files, Shift+Enter a new split, Alt+Enter edits, F2 renames, Delete removes, Ctrl+A selects all, Shift+F10 opens the menu.
 tabs-label = Open sessions
 tabs-keys = Left and Right switch tabs, Enter goes into the tab, Delete closes it, Shift+F10 opens its menu. Ctrl+F6 moves between the host list, the tabs and the session.
 tab-state-not-connected = not connected yet
@@ -870,3 +869,217 @@ toast-error = Error
 toast-close = Close notification
 menu-close-pane = Close pane
 pane-files-title = Files: { $host }
+
+## Command palette, sidebar, bulk edit, welcome (0.4)
+
+prompt-passphrase-title-host = Passphrase for { $path } ({ $host })
+prompt-server-auth-title-host = Server authentication — { $host }
+act-broadcast = Turn broadcast input on or off
+act-new-folder = New folder
+act-quick-connect = Quick connect…
+act-settings-section = Settings: { $section }
+act-toggle-theme = Switch between dark and light theme
+bulk-applies = { $count ->
+    [one] Applies to { $count } host
+   *[other] Applies to { $count } hosts
+}
+bulk-apply = Apply
+bulk-changed = will change
+bulk-done = { $count ->
+    [one] Updated { $count } host
+   *[other] Updated { $count } hosts
+}
+bulk-error-proxy = Proxy: { $error }
+bulk-intro = { $count ->
+    [one] Change the settings of { $count } host.
+   *[other] Change the settings of { $count } hosts at once.
+} A field shows the value they all share; an empty field means they differ. Only fields you change are saved.
+bulk-keep = Keep as is
+bulk-mixed = differs — leave empty to keep
+bulk-only-ssh = Only SSH hosts are changed ({ $ssh } of { $total }).
+bulk-proxy-hint = socks5://[user@]host:1080, socks4://… or http://…; “none” removes the proxy.
+bulk-serial-skipped = { $count ->
+    [one] { $count } serial host keeps everything except its folder.
+   *[other] { $count } serial hosts keep everything except their folder.
+}
+bulk-title = { $count ->
+    [one] Edit { $count } host
+   *[other] Edit { $count } hosts
+}
+folder-delete-body = { $count ->
+    [one] Delete the folder “{ $name }”? Its { $count } host and any subfolders move to “{ $target }”.
+   *[other] Delete the folder “{ $name }”? Its { $count } hosts and any subfolders move to “{ $target }”.
+}
+folder-delete-ok = Delete folder
+folder-delete-title = Delete folder
+folder-new-name = New folder
+group-broadcast-on = Broadcast is on: what you type goes to every terminal. { $keys } turns it off.
+group-confirm-body = { $count ->
+    [one] This opens { $count } connection.
+   *[other] This opens { $count } connections at the same time.
+} Questions such as passwords come one at a time, each naming its host.
+group-confirm-open = Open all
+group-confirm-title = { $count ->
+    [one] Open { $count } host?
+   *[other] Open { $count } hosts?
+}
+hosts-delete-body = These saved hosts will be deleted: { $names }.
+hosts-delete-body-more = These saved hosts will be deleted: { $names } and { $more } more.
+hosts-delete-title = { $count ->
+    [one] Delete { $count } host?
+   *[other] Delete { $count } hosts?
+}
+hosts-save-failed = Could not save: { $error }
+import-menu-scan = Scan this computer…
+keys-palette = Command palette
+keys-shortcuts = Keyboard shortcuts
+keys-new-host = New host
+keys-settings = Settings
+keys-broadcast = Broadcast input to all terminals
+keys-cycle-focus = Move focus: host list, tabs, session
+keys-context-menu = Context menu of the focused item
+keys-duplicate-tab = Duplicate tab
+keys-close-pane = Close the pane, then the tab
+keys-reconnect = Reconnect
+keys-next-tab = Next tab
+keys-prev-tab = Previous tab
+keys-split-right = Split right
+keys-split-down = Split down
+keys-move-pane = Move between split panes
+keys-resize-pane = Resize the focused pane
+keys-host-open = Open a terminal
+keys-host-files = Open the files
+keys-host-split = Open in a new split
+keys-host-edit = Edit (several hosts: edit together)
+keys-host-rename = Rename a host or folder
+keys-host-delete = Delete
+keys-host-select-all = Select all hosts
+keys-host-multi = Select several hosts
+keys-host-range = Select a range of hosts
+keys-copy = Copy
+keys-paste = Paste
+keys-find = Find in scrollback
+keys-find-next = Previous / next match
+keys-scroll-back = Scroll back
+keys-select-in-app = Select text while a program uses the mouse
+keys-send-break = Send break (telnet, serial)
+keys-read-output = Read the latest output again (screen readers)
+keys-text-view = Output as plain text
+keys-files-open = Open
+keys-files-up = Parent folder
+keys-files-edit = Edit in your editor
+keys-files-copy = Upload / download
+keys-files-move = Move
+keys-files-rename = Rename
+keys-files-new-folder = New folder
+keys-files-delete = Delete
+keys-files-refresh = Refresh
+keys-files-switch = Other side
+keys-files-properties = Properties
+keys-files-select-all = Select all
+keys-files-toggle-row = Mark the row
+keys-group-app = App
+keys-group-tabs = Tabs and panes
+keys-group-hosts = Host list
+keys-group-terminal = Terminal
+keys-group-files = Files
+keys-search = Search shortcuts
+keys-note = Plain Ctrl+letter keys always go to the shell. Inside a terminal, F1 and Ctrl+/ belong to the program (htop, mc); Ctrl+Shift+/ opens this list from anywhere. On macOS ⌘ takes the place of Ctrl+Shift.
+menu-bulk-edit = { $count ->
+    [one] Edit { $count } host…
+   *[other] Edit { $count } hosts…
+}
+menu-clear-recent = Clear recent connections
+menu-delete-folder = Delete folder…
+menu-delete-hosts = { $count ->
+    [one] Delete { $count } host…
+   *[other] Delete { $count } hosts…
+}
+menu-favourite = Add to favourites
+menu-unfavourite = Remove from favourites
+menu-new-subfolder = New subfolder
+menu-open-all-files = Open all in file browsers
+menu-open-all-grid = Open all in a grid
+menu-open-all-grid-broadcast = Open all in a grid with broadcast on
+menu-open-all-tabs = Open all in tabs
+menu-open-all-tabs-count = Open all in tabs ({ $count })
+menu-open-split = Open in a new split
+menu-rename = Rename
+palette-connect-to = Connect to { $target }
+palette-save-as-host = Save { $target } as a host…
+palette-group-actions = Actions
+palette-group-connect = Connect
+palette-group-snippets = Snippets
+palette-group-ssh-config = From ~/.ssh/config
+palette-group-tabs = Open tabs
+palette-hint-open = open
+palette-hint-files = files
+palette-hint-split = split
+palette-hint-edit = edit
+palette-hint-close = close
+palette-no-terminal = Snippets are typed into a terminal; open one first.
+palette-nothing = Nothing found
+palette-placeholder = Search hosts and actions, or type user@host:port
+palette-quick-detail = quick connect
+palette-results = Results
+palette-title = Command palette
+quick-hint = ↵ connect · { $files } files · ↑↓ choose
+quick-suggestions = Suggestions
+rename-no-slash = Names cannot contain / or \.
+shortcut-palette = command palette
+shortcut-all-shortcuts = all shortcuts
+sidebar-drag-hosts = { $count ->
+    [one] { $count } host
+   *[other] { $count } hosts
+}
+sidebar-favourite-toggle = Favourite: { $name }
+sidebar-folder-spoken = { $count ->
+    [one] Folder { $name }, { $count } host
+   *[other] Folder { $name }, { $count } hosts
+}
+sidebar-help-tooltip = Keyboard shortcuts ({ $keys })
+sidebar-palette-tooltip = Search hosts and actions ({ $keys })
+sidebar-quick-spoken = Recent quick connection { $target }
+sidebar-section-favourites = Favourites
+sidebar-section-recent = Recent
+sidebar-section-hosts = Hosts
+sidebar-selected-count = { $count } selected
+welcome-title = Welcome to Hostwick
+welcome-intro = Hostwick can bring along the hosts that other SSH tools saved on this computer. Tick what to import; the other programs are not changed.
+welcome-scanning = Looking for saved sessions…
+welcome-found = Found on this computer
+welcome-src-ssh = { $count ->
+    [one] OpenSSH config ({ $path }): { $count } host
+   *[other] OpenSSH config ({ $path }): { $count } hosts
+}
+welcome-src-putty = { $count ->
+    [one] PuTTY sessions: { $count } host
+   *[other] PuTTY sessions: { $count } hosts
+}
+welcome-src-winscp-registry = { $count ->
+    [one] WinSCP sites: { $count } host
+   *[other] WinSCP sites: { $count } hosts
+}
+welcome-src-winscp-ini = { $count ->
+    [one] WinSCP sites ({ $path }): { $count } host
+   *[other] WinSCP sites ({ $path }): { $count } hosts
+}
+welcome-src-solar = { $count ->
+    [one] Solar-PuTTY export ({ $path }): { $count } host
+   *[other] Solar-PuTTY export ({ $path }): { $count } hosts
+}
+welcome-keys = { $count ->
+    [one] Use my key file from ~/.ssh for quick connect and new hosts
+   *[other] Use my { $count } key files from ~/.ssh for quick connect and new hosts
+}
+welcome-agent = { $count ->
+    [one] { $count } key is ready in your SSH agent (Pageant, ssh-agent…); hosts use it automatically.
+   *[other] { $count } keys are ready in your SSH agent (Pageant, ssh-agent…); hosts use them automatically.
+}
+welcome-agent-asking = Asking the SSH agent for its keys…
+welcome-agent-none = No SSH agent with keys is running.
+welcome-nothing = No sessions saved by other SSH tools were found. Add a host, or type user@host in quick connect.
+welcome-note = You can do this again at any time: Import… → Scan this computer.
+welcome-import = Import selected
+welcome-skip = Skip
+welcome-continue = Continue

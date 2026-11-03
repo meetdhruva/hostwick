@@ -145,7 +145,6 @@ remember-hint-create = Vous allez créer un coffre de mots de passe protégé pa
 prompt-server-auth-title = Authentification du serveur
 prompt-password-title = Mot de passe pour { $user }@{ $host }
 prompt-password-label = Mot de passe
-prompt-passphrase-title = Phrase secrète pour { $path }
 prompt-passphrase-label = Phrase secrète
 prompt-sudo-title = Mot de passe sudo pour { $who }
 prompt-sudo-wrong-title = Mot de passe incorrect. Mot de passe sudo pour { $who }
@@ -821,7 +820,7 @@ files-opening = ouverture de l’explorateur de fichiers
 sidebar-vault-lock = Verrouiller les mots de passe enregistrés
 sidebar-quick-connect = Connexion rapide (user@host:port, Entrée)
 sidebar-hosts-label = Hôtes enregistrés
-sidebar-hosts-keys = Les flèches choisissent un hôte. Entrée ouvre un terminal, Maj+Entrée les fichiers, F2 modifie, Suppr supprime, Maj+F10 ouvre le menu.
+sidebar-hosts-keys = Les flèches déplacent (Maj+flèches en sélectionne plusieurs), Gauche et Droite replient les dossiers. Entrée ouvre un terminal, Ctrl+Entrée les fichiers, Maj+Entrée une nouvelle division, Alt+Entrée modifie, F2 renomme, Suppr supprime, Ctrl+A sélectionne tout, Maj+F10 ouvre le menu.
 tabs-label = Sessions ouvertes
 tabs-keys = Gauche et Droite changent d’onglet, Entrée entre dans l’onglet, Suppr le ferme, Maj+F10 ouvre son menu. Ctrl+F6 passe de la liste des hôtes aux onglets puis à la session.
 tab-state-not-connected = pas encore connecté
@@ -869,3 +868,220 @@ toast-error = Erreur
 toast-close = Fermer la notification
 menu-close-pane = Fermer le volet
 pane-files-title = Fichiers : { $host }
+
+## Command palette, sidebar, bulk edit, welcome (0.4)
+
+prompt-passphrase-title-host = Phrase secrète pour { $path } ({ $host })
+prompt-server-auth-title-host = Authentification du serveur — { $host }
+act-broadcast = Activer ou désactiver la diffusion
+act-new-folder = Nouveau dossier
+act-quick-connect = Connexion rapide…
+act-settings-section = Paramètres : { $section }
+act-toggle-theme = Passer du thème sombre au thème clair et inversement
+bulk-applies = { $count ->
+    [one] S’applique à { $count } hôte
+   *[other] S’applique à { $count } hôtes
+}
+bulk-apply = Appliquer
+bulk-changed = sera modifié
+bulk-done = { $count ->
+    [one] { $count } hôte mis à jour
+   *[other] { $count } hôtes mis à jour
+}
+bulk-error-proxy = Proxy : { $error }
+bulk-intro = { $count ->
+    [one] Modifier les paramètres de { $count } hôte.
+   *[other] Modifier les paramètres de { $count } hôtes à la fois.
+} Un champ affiche la valeur qu’ils partagent ; un champ vide signifie qu’elles diffèrent. Seuls les champs que vous modifiez sont enregistrés.
+bulk-keep = Conserver
+bulk-mixed = différent — laisser vide pour conserver
+bulk-only-ssh = Seuls les hôtes SSH sont modifiés ({ $ssh } sur { $total }).
+bulk-proxy-hint = socks5://[utilisateur@]hôte:1080, socks4://… ou http://… ; « none » supprime le proxy.
+bulk-serial-skipped = { $count ->
+    [one] { $count } hôte série conserve tout sauf son dossier.
+   *[other] { $count } hôtes série conservent tout sauf leur dossier.
+}
+bulk-title = { $count ->
+    [one] Modifier { $count } hôte
+   *[other] Modifier { $count } hôtes
+}
+folder-delete-body = { $count ->
+    [one] Supprimer le dossier « { $name } » ? Son contenu ({ $count } hôte et les sous-dossiers) va dans « { $target } ».
+   *[other] Supprimer le dossier « { $name } » ? Son contenu ({ $count } hôtes et les sous-dossiers) va dans « { $target } ».
+}
+folder-delete-ok = Supprimer le dossier
+folder-delete-title = Supprimer le dossier
+folder-new-name = Nouveau dossier
+group-broadcast-on = La diffusion est active : ce que vous tapez va à tous les terminaux. { $keys } la désactive.
+group-confirm-body = { $count ->
+    [one] Cela ouvre { $count } connexion.
+   *[other] Cela ouvre { $count } connexions en même temps.
+} Les questions, comme les mots de passe, arrivent une par une, chacune avec le nom de son hôte.
+group-confirm-open = Tout ouvrir
+group-confirm-title = { $count ->
+    [one] Ouvrir { $count } hôte ?
+   *[other] Ouvrir { $count } hôtes ?
+}
+hosts-delete-body = Ces hôtes enregistrés seront supprimés : { $names }.
+hosts-delete-body-more = Ces hôtes enregistrés seront supprimés : { $names } et { $more } autres.
+hosts-delete-title = { $count ->
+    [one] Supprimer { $count } hôte ?
+   *[other] Supprimer { $count } hôtes ?
+}
+hosts-save-failed = Échec de l’enregistrement : { $error }
+import-menu-scan = Analyser cet ordinateur…
+keys-palette = Palette de commandes
+keys-shortcuts = Raccourcis clavier
+keys-new-host = Nouvel hôte
+keys-settings = Paramètres
+keys-broadcast = Diffuser la saisie à tous les terminaux
+keys-cycle-focus = Déplacer le focus : liste des hôtes, onglets, session
+keys-context-menu = Menu contextuel de l’élément actif
+keys-duplicate-tab = Dupliquer l’onglet
+keys-close-pane = Fermer le volet, puis l’onglet
+keys-reconnect = Se reconnecter
+keys-next-tab = Onglet suivant
+keys-prev-tab = Onglet précédent
+keys-split-right = Diviser à droite
+keys-split-down = Diviser en bas
+keys-move-pane = Passer d’un volet à l’autre
+keys-resize-pane = Redimensionner le volet actif
+keys-host-open = Ouvrir un terminal
+keys-host-files = Ouvrir les fichiers
+keys-host-split = Ouvrir dans une nouvelle division
+keys-host-edit = Modifier (plusieurs hôtes : modifier ensemble)
+keys-host-rename = Renommer un hôte ou un dossier
+keys-host-delete = Supprimer
+keys-host-select-all = Sélectionner tous les hôtes
+keys-host-multi = Sélectionner plusieurs hôtes
+keys-host-range = Sélectionner une plage d’hôtes
+keys-copy = Copier
+keys-paste = Coller
+keys-find = Rechercher dans l’historique
+keys-find-next = Résultat précédent / suivant
+keys-scroll-back = Remonter dans l’historique
+keys-select-in-app = Sélectionner du texte quand un programme utilise la souris
+keys-send-break = Envoyer un break (telnet, série)
+keys-read-output = Relire la dernière sortie (lecteurs d’écran)
+keys-text-view = Sortie en texte brut
+keys-files-open = Ouvrir
+keys-files-up = Dossier parent
+keys-files-edit = Modifier dans votre éditeur
+keys-files-copy = Téléverser / télécharger
+keys-files-move = Déplacer
+keys-files-rename = Renommer
+keys-files-new-folder = Nouveau dossier
+keys-files-delete = Supprimer
+keys-files-refresh = Actualiser
+keys-files-switch = Autre côté
+keys-files-properties = Propriétés
+keys-files-select-all = Tout sélectionner
+keys-files-toggle-row = Marquer la ligne
+keys-group-app = Application
+keys-group-tabs = Onglets et volets
+keys-group-hosts = Liste des hôtes
+keys-group-terminal = Terminal
+keys-group-files = Fichiers
+keys-search = Rechercher un raccourci
+keys-note = Les touches Ctrl+lettre simples vont toujours au shell. Dans un terminal, F1 et Ctrl+/ appartiennent au programme (htop, mc) ; Ctrl+Maj+/ ouvre cette liste de partout. Sous macOS, ⌘ remplace Ctrl+Maj.
+menu-bulk-edit = { $count ->
+    [one] Modifier { $count } hôte…
+   *[other] Modifier { $count } hôtes…
+}
+menu-clear-recent = Effacer les connexions récentes
+menu-delete-folder = Supprimer le dossier…
+menu-delete-hosts = { $count ->
+    [one] Supprimer { $count } hôte…
+   *[other] Supprimer { $count } hôtes…
+}
+menu-favourite = Ajouter aux favoris
+menu-unfavourite = Retirer des favoris
+menu-new-subfolder = Nouveau sous-dossier
+menu-open-all-files = Tout ouvrir dans le navigateur de fichiers
+menu-open-all-grid = Tout ouvrir dans une grille
+menu-open-all-grid-broadcast = Tout ouvrir dans une grille avec la diffusion
+menu-open-all-tabs = Tout ouvrir dans des onglets
+menu-open-all-tabs-count = Tout ouvrir dans des onglets ({ $count })
+menu-open-split = Ouvrir dans une nouvelle division
+menu-rename = Renommer
+palette-connect-to = Se connecter à { $target }
+palette-save-as-host = Enregistrer { $target } comme hôte…
+palette-group-actions = Actions
+palette-group-connect = Connexion
+palette-group-snippets = Extraits
+palette-group-ssh-config = Depuis ~/.ssh/config
+palette-group-tabs = Onglets ouverts
+palette-hint-open = ouvrir
+palette-hint-files = fichiers
+palette-hint-split = diviser
+palette-hint-edit = modifier
+palette-hint-close = fermer
+palette-no-terminal = Les extraits sont saisis dans un terminal ; ouvrez-en un d’abord.
+palette-nothing = Aucun résultat
+palette-placeholder = Rechercher des hôtes et des actions, ou saisir user@host:port
+palette-quick-detail = connexion rapide
+palette-results = Résultats
+palette-title = Palette de commandes
+quick-hint = ↵ se connecter · { $files } fichiers · ↑↓ choisir
+quick-suggestions = Suggestions
+rename-no-slash = Les noms ne peuvent pas contenir / ni \.
+shortcut-palette = palette de commandes
+shortcut-all-shortcuts = tous les raccourcis
+sidebar-drag-hosts = { $count ->
+    [one] { $count } hôte
+   *[other] { $count } hôtes
+}
+sidebar-favourite-toggle = Favori : { $name }
+sidebar-folder-spoken = { $count ->
+    [one] Dossier { $name }, { $count } hôte
+   *[other] Dossier { $name }, { $count } hôtes
+}
+sidebar-help-tooltip = Raccourcis clavier ({ $keys })
+sidebar-palette-tooltip = Rechercher des hôtes et des actions ({ $keys })
+sidebar-quick-spoken = Connexion rapide récente { $target }
+sidebar-section-favourites = Favoris
+sidebar-section-recent = Récents
+sidebar-section-hosts = Hôtes
+sidebar-selected-count = { $count ->
+    [one] { $count } sélectionné
+   *[other] { $count } sélectionnés
+}
+welcome-title = Bienvenue dans Hostwick
+welcome-intro = Hostwick peut reprendre les hôtes que d’autres outils SSH ont enregistrés sur cet ordinateur. Cochez ce qu’il faut importer ; les autres programmes ne sont pas modifiés.
+welcome-scanning = Recherche des sessions enregistrées…
+welcome-found = Trouvé sur cet ordinateur
+welcome-src-ssh = { $count ->
+    [one] Configuration OpenSSH ({ $path }) : { $count } hôte
+   *[other] Configuration OpenSSH ({ $path }) : { $count } hôtes
+}
+welcome-src-putty = { $count ->
+    [one] Sessions PuTTY : { $count } hôte
+   *[other] Sessions PuTTY : { $count } hôtes
+}
+welcome-src-winscp-registry = { $count ->
+    [one] Sites WinSCP : { $count } hôte
+   *[other] Sites WinSCP : { $count } hôtes
+}
+welcome-src-winscp-ini = { $count ->
+    [one] Sites WinSCP ({ $path }) : { $count } hôte
+   *[other] Sites WinSCP ({ $path }) : { $count } hôtes
+}
+welcome-src-solar = { $count ->
+    [one] Export Solar-PuTTY ({ $path }) : { $count } hôte
+   *[other] Export Solar-PuTTY ({ $path }) : { $count } hôtes
+}
+welcome-keys = { $count ->
+    [one] Utiliser mon fichier de clé de ~/.ssh pour la connexion rapide et les nouveaux hôtes
+   *[other] Utiliser mes { $count } fichiers de clé de ~/.ssh pour la connexion rapide et les nouveaux hôtes
+}
+welcome-agent = { $count ->
+    [one] { $count } clé est prête dans votre agent SSH (Pageant, ssh-agent…) ; les hôtes l’utilisent automatiquement.
+   *[other] { $count } clés sont prêtes dans votre agent SSH (Pageant, ssh-agent…) ; les hôtes les utilisent automatiquement.
+}
+welcome-agent-asking = Interrogation de l’agent SSH…
+welcome-agent-none = Aucun agent SSH avec des clés n’est en cours d’exécution.
+welcome-nothing = Aucune session enregistrée par d’autres outils SSH n’a été trouvée. Ajoutez un hôte ou saisissez user@host dans la connexion rapide.
+welcome-note = Vous pouvez recommencer à tout moment : Importer… → Analyser cet ordinateur.
+welcome-import = Importer la sélection
+welcome-skip = Passer
+welcome-continue = Continuer

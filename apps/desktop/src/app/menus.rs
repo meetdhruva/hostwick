@@ -10,7 +10,11 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hostwick_core::{ProfileId, ProfileStore as _};
 
+use super::hosts::GroupOpen;
+use super::palette::{Choice, Mods};
+use super::sidebar::{RowId, Sec};
 use super::{HostwickApp, PaneBody, TabKind};
+use crate::shortcuts::{Sc, menu_item};
 
 impl HostwickApp {
     pub(super) fn delete_profile(
@@ -45,15 +49,8 @@ impl HostwickApp {
                                 .danger()
                                 .label(t!("button-delete"))
                                 .on_click(move |_, window, cx| {
-                                    let _ = app2.update(cx, |a, cx| {
-                                        let _ = a.backend.store.delete(p2.id);
-                                        if a.selected == Some(p2.id) {
-                                            a.selected = None;
-                                        }
-                                        a.reload_profiles();
-                                        a.mark_sync_dirty();
-                                        cx.notify();
-                                    });
+                                    let _ =
+                                        app2.update(cx, |a, cx| a.do_delete_hosts(vec![p2.id], cx));
                                     window.close_dialog(cx);
                                 }),
                         ),
@@ -61,7 +58,12 @@ impl HostwickApp {
         });
     }
 
-    fn import(&mut self, which: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn import(
+        &mut self,
+        which: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // "putty"/"winscp" read this PC's registry (Windows); "*-file" asks for a file.
         let from_registry = cfg!(windows) && matches!(which, "putty" | "winscp");
         let which = which.trim_end_matches("-file");
@@ -118,7 +120,7 @@ impl HostwickApp {
         .detach();
     }
 
-    fn apply_import(
+    pub(super) fn apply_import(
         &mut self,
         result: Result<hostwick_import::ImportResult, String>,
         window: &mut Window,
@@ -243,6 +245,7 @@ impl HostwickApp {
     }
 
     pub(super) fn import_button(app: WeakEntity<Self>) -> impl IntoElement {
+        let scan_app = app.clone();
         let item = move |label: SharedString, which: &'static str| {
             let app = app.clone();
             PopupMenuItem::new(label).on_click(move |_, window, cx| {
@@ -253,7 +256,15 @@ impl HostwickApp {
             .small()
             .label(t!("sidebar-import"))
             .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
-                let m = menu.item(item(t!("import-menu-ssh-config"), "ssh"));
+                let scan_app = scan_app.clone();
+                let m = menu
+                    .item(PopupMenuItem::new(t!("import-menu-scan")).on_click(
+                        move |_, window, cx| {
+                            let _ = scan_app.update(cx, |a, cx| a.scan_computer(window, cx));
+                        },
+                    ))
+                    .separator()
+                    .item(item(t!("import-menu-ssh-config"), "ssh"));
                 let m = if cfg!(windows) {
                     m.item(item(t!("import-menu-putty-registry"), "putty"))
                         .item(item(t!("import-menu-winscp-registry"), "winscp"))
@@ -266,62 +277,268 @@ impl HostwickApp {
             })
     }
 
-    /// Right-click menu for a saved host.
+    /// Right-click menu for a saved host (or the multi-selection it is in).
     pub(super) fn host_menu(
         app: WeakEntity<Self>,
         id: ProfileId,
     ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
-        move |menu, _, _| {
+        move |menu, _, cx| {
             let act = |f: fn(&mut Self, ProfileId, &mut Window, &mut Context<Self>)| {
                 let app = app.clone();
                 move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                     let _ = app.update(cx, |a, cx| f(a, id, window, cx));
                 }
             };
+            let (sel, fav, terminal_tab) = app
+                .upgrade()
+                .map(|a| {
+                    let a = a.read(cx);
+                    let sel = a.selection();
+                    let sel = if sel.contains(&id) { sel } else { vec![id] };
+                    let fav = sel.iter().all(|s| {
+                        a.profiles
+                            .iter()
+                            .find(|p| p.id == *s)
+                            .is_some_and(crate::hostops::is_favourite)
+                    });
+                    let terminal_tab = a
+                        .active
+                        .and_then(|i| a.tabs.get(i))
+                        .is_some_and(|t| t.kind == TabKind::Terminal);
+                    (sel, fav, terminal_tab)
+                })
+                .unwrap_or_else(|| (vec![id], false, false));
+            let fav_label = if fav {
+                t!("menu-unfavourite")
+            } else {
+                t!("menu-favourite")
+            };
+            if sel.len() > 1 {
+                let n = sel.len();
+                let group = |mode: GroupOpen| {
+                    let (app, sel) = (app.clone(), sel.clone());
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        let _ = app.update(cx, |a, cx| a.open_group(sel.clone(), mode, window, cx));
+                    }
+                };
+                let with_sel =
+                    |f: fn(&mut Self, Vec<ProfileId>, &mut Window, &mut Context<Self>)| {
+                        let (app, sel) = (app.clone(), sel.clone());
+                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                            let _ = app.update(cx, |a, cx| f(a, sel.clone(), window, cx));
+                        }
+                    };
+                return menu
+                    .label(t!("sidebar-selected-count", count = n))
+                    .item(
+                        menu_item(t!("menu-open-all-tabs"), Some(Sc::HostOpen))
+                            .on_click(group(GroupOpen::Tabs)),
+                    )
+                    .item(
+                        PopupMenuItem::new(t!("menu-open-all-grid"))
+                            .on_click(group(GroupOpen::Grid)),
+                    )
+                    .item(
+                        PopupMenuItem::new(t!("menu-open-all-grid-broadcast"))
+                            .on_click(group(GroupOpen::GridBroadcast)),
+                    )
+                    .item(
+                        menu_item(t!("menu-open-all-files"), Some(Sc::HostFiles))
+                            .on_click(group(GroupOpen::Files)),
+                    )
+                    .separator()
+                    .item(
+                        menu_item(t!("menu-bulk-edit", count = n), Some(Sc::HostEdit))
+                            .on_click(with_sel(|a, s, w, cx| a.bulk_edit(s, w, cx))),
+                    )
+                    .item(
+                        PopupMenuItem::new(fav_label)
+                            .on_click(with_sel(|a, s, _, cx| a.toggle_favourite(&s, cx))),
+                    )
+                    .separator()
+                    .item(
+                        menu_item(t!("menu-delete-hosts", count = n), Some(Sc::HostDelete))
+                            .on_click(with_sel(|a, s, w, cx| a.delete_hosts(s, w, cx))),
+                    );
+            }
+            let menu = menu
+                .item(
+                    menu_item(t!("menu-open-terminal"), Some(Sc::HostOpen)).on_click(act(
+                        |a, id, w, cx| {
+                            a.note_use(&format!("host:{id}"));
+                            a.open_profile(id, TabKind::Terminal, w, cx)
+                        },
+                    )),
+                )
+                .item(
+                    menu_item(t!("menu-open-files"), Some(Sc::HostFiles)).on_click(act(
+                        |a, id, w, cx| a.open_profile(id, TabKind::Files, w, cx),
+                    )),
+                );
+            let menu = if terminal_tab {
+                menu.item(
+                    menu_item(t!("menu-open-split"), Some(Sc::HostSplit)).on_click(act(
+                        |a, id, w, cx| a.run_choice(Choice::Host(id), Mods::Shift, w, cx),
+                    )),
+                )
+            } else {
+                menu
+            };
+            menu.separator()
+                .item(menu_item(t!("menu-edit"), Some(Sc::HostEdit)).on_click(act(
+                    |a, id, w, cx| {
+                        let p = a.profiles.iter().find(|p| p.id == id).cloned();
+                        if p.is_some() {
+                            a.host_dialog(p, w, cx);
+                        }
+                    },
+                )))
+                .item(
+                    menu_item(t!("menu-rename"), Some(Sc::HostRename)).on_click(act(
+                        |a, id, w, cx| {
+                            a.select_host(id, cx);
+                            a.start_rename(w, cx);
+                        },
+                    )),
+                )
+                .item(
+                    PopupMenuItem::new(t!("menu-duplicate"))
+                        .on_click(act(|a, id, _, cx| a.duplicate_profile(id, cx))),
+                )
+                .item(
+                    PopupMenuItem::new(fav_label)
+                        .on_click(act(|a, id, _, cx| a.toggle_favourite(&[id], cx))),
+                )
+                .item(
+                    PopupMenuItem::new(t!("menu-copy-address")).on_click(act(|a, id, _, cx| {
+                        if let Some(p) = a.profiles.iter().find(|p| p.id == id) {
+                            let user = p.user.as_ref().map(|u| format!("{u}@")).unwrap_or_default();
+                            let port = if p.port == 22 {
+                                String::new()
+                            } else {
+                                format!(":{}", p.port)
+                            };
+                            cx.write_to_clipboard(ClipboardItem::new_string(format!(
+                                "{user}{}{port}",
+                                p.host
+                            )));
+                        }
+                    })),
+                )
+                .separator()
+                .item(
+                    menu_item(t!("menu-delete"), Some(Sc::HostDelete))
+                        .on_click(act(|a, id, w, cx| a.delete_profile(id, w, cx))),
+                )
+        }
+    }
+
+    /// Right-click menu for a folder.
+    pub(super) fn folder_menu(
+        app: WeakEntity<Self>,
+        path: String,
+    ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+        move |menu, _, cx| {
+            let ids = app
+                .upgrade()
+                .map(|a| a.read(cx).hosts_in(&path))
+                .unwrap_or_default();
+            let empty = ids.is_empty();
+            let group = |mode: GroupOpen| {
+                let (app, ids) = (app.clone(), ids.clone());
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let _ = app.update(cx, |a, cx| a.open_group(ids.clone(), mode, window, cx));
+                }
+            };
+            let on_path = |f: fn(&mut Self, String, &mut Window, &mut Context<Self>)| {
+                let (app, path) = (app.clone(), path.clone());
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let _ = app.update(cx, |a, cx| f(a, path.clone(), window, cx));
+                }
+            };
             menu.item(
-                PopupMenuItem::new(t!("menu-open-terminal")).on_click(act(|a, id, w, cx| {
-                    a.open_profile(id, TabKind::Terminal, w, cx)
-                })),
+                PopupMenuItem::new(t!("menu-open-all-tabs-count", count = ids.len()))
+                    .disabled(empty)
+                    .on_click(group(GroupOpen::Tabs)),
             )
             .item(
-                PopupMenuItem::new(t!("menu-open-files")).on_click(act(|a, id, w, cx| {
-                    a.open_profile(id, TabKind::Files, w, cx)
-                })),
+                PopupMenuItem::new(t!("menu-open-all-grid"))
+                    .disabled(empty)
+                    .on_click(group(GroupOpen::Grid)),
+            )
+            .item(
+                PopupMenuItem::new(t!("menu-open-all-grid-broadcast"))
+                    .disabled(empty)
+                    .on_click(group(GroupOpen::GridBroadcast)),
             )
             .separator()
             .item(
-                PopupMenuItem::new(t!("menu-edit")).on_click(act(|a, id, w, cx| {
-                    let p = a.profiles.iter().find(|p| p.id == id).cloned();
-                    if p.is_some() {
-                        a.host_dialog(p, w, cx);
-                    }
-                })),
+                PopupMenuItem::new(t!("menu-new-subfolder"))
+                    .on_click(on_path(|a, p, w, cx| a.new_folder(&p, w, cx))),
             )
             .item(
-                PopupMenuItem::new(t!("menu-duplicate"))
-                    .on_click(act(|a, id, _, cx| a.duplicate_profile(id, cx))),
+                menu_item(t!("menu-rename"), Some(Sc::HostRename)).on_click(on_path(
+                    |a, p, w, cx| {
+                        a.set_cursor(Some(RowId::Folder(p)));
+                        a.start_rename(w, cx);
+                    },
+                )),
             )
             .item(
-                PopupMenuItem::new(t!("menu-copy-address")).on_click(act(|a, id, _, cx| {
-                    if let Some(p) = a.profiles.iter().find(|p| p.id == id) {
-                        let user = p.user.as_ref().map(|u| format!("{u}@")).unwrap_or_default();
-                        let port = if p.port == 22 {
-                            String::new()
-                        } else {
-                            format!(":{}", p.port)
-                        };
-                        cx.write_to_clipboard(ClipboardItem::new_string(format!(
-                            "{user}{}{port}",
-                            p.host
-                        )));
-                    }
-                })),
+                menu_item(t!("menu-delete-folder"), Some(Sc::HostDelete))
+                    .on_click(on_path(|a, p, w, cx| a.delete_folder(p, w, cx))),
             )
-            .separator()
-            .item(
-                PopupMenuItem::new(t!("menu-delete"))
-                    .on_click(act(|a, id, w, cx| a.delete_profile(id, w, cx))),
-            )
+        }
+    }
+
+    /// Right-click menu for a sidebar section header.
+    pub(super) fn section_menu(
+        app: WeakEntity<Self>,
+        sec: Sec,
+    ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+        move |menu, _, cx| {
+            let app = app.clone();
+            match sec {
+                Sec::Hosts => menu.item(PopupMenuItem::new(t!("act-new-folder")).on_click(
+                    move |_, window, cx| {
+                        let _ = app.update(cx, |a, cx| a.new_folder("", window, cx));
+                    },
+                )),
+                Sec::Favourites => {
+                    let ids = app
+                        .upgrade()
+                        .map(|a| a.read(cx).favourite_ids())
+                        .unwrap_or_default();
+                    let group = |mode: GroupOpen| {
+                        let (app, ids) = (app.clone(), ids.clone());
+                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                            let _ =
+                                app.update(cx, |a, cx| a.open_group(ids.clone(), mode, window, cx));
+                        }
+                    };
+                    menu.item(
+                        PopupMenuItem::new(t!("menu-open-all-tabs-count", count = ids.len()))
+                            .on_click(group(GroupOpen::Tabs)),
+                    )
+                    .item(
+                        PopupMenuItem::new(t!("menu-open-all-grid"))
+                            .on_click(group(GroupOpen::Grid)),
+                    )
+                    .item(
+                        PopupMenuItem::new(t!("menu-open-all-grid-broadcast"))
+                            .on_click(group(GroupOpen::GridBroadcast)),
+                    )
+                }
+                Sec::Recent => menu.item(PopupMenuItem::new(t!("menu-clear-recent")).on_click(
+                    move |_, _, cx| {
+                        let _ = app.update(cx, |a, cx| {
+                            a.recents.clear();
+                            a.save_recents();
+                            cx.notify();
+                        });
+                    },
+                )),
+            }
         }
     }
 
@@ -358,34 +575,40 @@ impl HostwickApp {
                 })
                 .unwrap_or((TabKind::Terminal, false, false, false));
             let mut menu = menu.item(
-                PopupMenuItem::new(t!("menu-reconnect"))
+                menu_item(t!("menu-reconnect"), Some(Sc::Reconnect))
                     .on_click(act(|a, ix, w, cx| a.reconnect_focused(ix, w, cx))),
             );
             if kind == TabKind::Terminal {
                 menu = menu
-                    .item(PopupMenuItem::new(t!("menu-split-right")).on_click(act(
-                        |a, ix, w, cx| {
-                            a.activate_tab(ix, w, cx);
-                            a.split_focused(false, w, cx);
-                        },
-                    )))
-                    .item(PopupMenuItem::new(t!("menu-split-down")).on_click(act(
-                        |a, ix, w, cx| {
-                            a.activate_tab(ix, w, cx);
-                            a.split_focused(true, w, cx);
-                        },
-                    )));
+                    .item(
+                        menu_item(t!("menu-split-right"), Some(Sc::SplitRight)).on_click(act(
+                            |a, ix, w, cx| {
+                                a.activate_tab(ix, w, cx);
+                                a.split_focused(false, w, cx);
+                            },
+                        )),
+                    )
+                    .item(
+                        menu_item(t!("menu-split-down"), Some(Sc::SplitDown)).on_click(act(
+                            |a, ix, w, cx| {
+                                a.activate_tab(ix, w, cx);
+                                a.split_focused(true, w, cx);
+                            },
+                        )),
+                    );
             }
             if can_break {
-                menu = menu.item(PopupMenuItem::new(t!("menu-send-break")).on_click(act(
-                    |a, ix, _, cx| {
-                        if let Some(PaneBody::Terminal(v)) =
-                            a.tabs[ix].focused_pane().map(|p| &p.body)
-                        {
-                            v.update(cx, |v, cx| v.send_break(cx));
-                        }
-                    },
-                )));
+                menu = menu.item(
+                    menu_item(t!("menu-send-break"), Some(Sc::SendBreak)).on_click(act(
+                        |a, ix, _, cx| {
+                            if let Some(PaneBody::Terminal(v)) =
+                                a.tabs[ix].focused_pane().map(|p| &p.body)
+                            {
+                                v.update(cx, |v, cx| v.send_break(cx));
+                            }
+                        },
+                    )),
+                );
             }
             if linked {
                 menu = menu.item(
@@ -402,13 +625,15 @@ impl HostwickApp {
             }
             menu.separator()
                 .item(
-                    PopupMenuItem::new(t!("menu-duplicate")).on_click(act(|a, ix, w, cx| {
-                        if let Some(p) = a.tabs[ix].focused_pane() {
-                            let (profile, quick, kind) =
-                                (p.profile.clone(), p.quick.clone(), a.tabs[ix].kind);
-                            a.open_tab_quick(profile, quick, kind, w, cx);
-                        }
-                    })),
+                    menu_item(t!("menu-duplicate"), Some(Sc::DuplicateTab)).on_click(act(
+                        |a, ix, w, cx| {
+                            if let Some(p) = a.tabs[ix].focused_pane() {
+                                let (profile, quick, kind) =
+                                    (p.profile.clone(), p.quick.clone(), a.tabs[ix].kind);
+                                a.open_tab_quick(profile, quick, kind, w, cx);
+                            }
+                        },
+                    )),
                 )
                 .item(
                     PopupMenuItem::new(t!("menu-open-files")).on_click(act(|a, ix, w, cx| {
@@ -428,7 +653,7 @@ impl HostwickApp {
                 )
                 .separator()
                 .item(
-                    PopupMenuItem::new(t!("menu-close"))
+                    menu_item(t!("menu-close"), Some(Sc::ClosePane))
                         .on_click(act(|a, ix, _, cx| a.close_tab(ix, cx))),
                 )
                 .item(

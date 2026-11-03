@@ -1,21 +1,16 @@
 //! Drawing the root view: sidebar, tab bar, pane trees, transfer queue.
 
-use std::rc::Rc;
-
 use gpui_kit::accesskit::Role;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::ContextMenuExt as _;
-use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, IconName, Sizable as _};
+use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use hostwick_core::Protocol;
 use hostwick_transfer::TransferState;
 
-use super::{HostwickApp, Pane, PaneBody, SidebarRow, TabKind, logo};
+use super::{HostwickApp, Pane, PaneBody, TabKind};
 use crate::layout::Node;
-use crate::util::{human_size, keys, protocol_name};
+use crate::util::{human_size, keys};
 
 /// Divider between split panes, in pixels (easy to grab).
 const DIVIDER: f32 = 5.0;
@@ -37,395 +32,8 @@ impl Render for DividerGhost {
     }
 }
 
-/// Short protocol badge for a host row.
-fn badge(p: &Protocol) -> &'static str {
-    match p {
-        Protocol::Ssh => "SSH",
-        Protocol::Telnet => "TEL",
-        Protocol::Serial(_) => "COM",
-    }
-}
-
 impl HostwickApp {
-    pub(super) fn sidebar_rows(&self, cx: &App) -> Vec<SidebarRow> {
-        let needle = self.search.read(cx).value().to_lowercase();
-        let mut rows = Vec::new();
-        let mut last_folder: Option<&str> = None;
-        for (i, p) in self.profiles.iter().enumerate() {
-            if !needle.is_empty() {
-                let hay = format!(
-                    "{} {} {} {} {}",
-                    p.path(),
-                    p.host,
-                    p.user.as_deref().unwrap_or(""),
-                    p.protocol.label(),
-                    protocol_name(&p.protocol)
-                )
-                .to_lowercase();
-                if !needle.split_whitespace().all(|w| hay.contains(w)) {
-                    continue;
-                }
-            }
-            if last_folder != Some(p.folder.as_str()) {
-                if !p.folder.is_empty() {
-                    rows.push(SidebarRow::Folder(p.folder.clone()));
-                }
-                last_folder = Some(p.folder.as_str());
-            }
-            rows.push(SidebarRow::Profile(i));
-        }
-        rows
-    }
-
-    fn render_sidebar(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let rows = Rc::new(self.sidebar_rows(cx));
-        let count = rows.len();
-        let has_sel = self.selected.is_some();
-        let list_focused = self.list_focus.is_focused(window);
-        let anchor = self.host_anchor.clone();
-        anchor.clear();
-        div()
-            .w(px(260.0))
-            .flex_none()
-            .h_full()
-            .flex()
-            .flex_col()
-            .bg(theme.sidebar)
-            .border_r_1()
-            .border_color(theme.sidebar_border)
-            .child(
-                div()
-                    .p(px(10.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(img(logo()).size(px(22.0)))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_size(px(15.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Hostwick"),
-                            )
-                            .when(self.backend.vault.is_unlocked(), |d| {
-                                d.child(
-                                    Button::new("vault-lock")
-                                        .ghost()
-                                        .small()
-                                        .icon(gpui_kit::assets::IconName::LockOpen)
-                                        .tooltip(t!("sidebar-vault-unlocked-tooltip"))
-                                        .accessibility_label(t!("sidebar-vault-lock"))
-                                        .on_click(cx.listener(|app, _, _, cx| {
-                                            app.backend.vault.lock();
-                                            cx.notify();
-                                        })),
-                                )
-                            })
-                            .child(Self::tools_button(cx.entity().downgrade()))
-                            .child(
-                                Button::new("settings")
-                                    .ghost()
-                                    .small()
-                                    .icon(IconName::Settings)
-                                    .tooltip(t!(
-                                        "sidebar-settings-tooltip",
-                                        keys = keys("Ctrl+,", "⌘,")
-                                    ))
-                                    .accessibility_label(t!("settings-title"))
-                                    .on_click(
-                                        cx.listener(|app, _, w, cx| app.open_settings(None, w, cx)),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        Input::new(&self.quick)
-                            .small()
-                            .aria_label(t!("sidebar-quick-connect")),
-                    )
-                    .child(
-                        Input::new(&self.search)
-                            .small()
-                            .cleanable(true)
-                            .aria_label(t!("sidebar-search-placeholder")),
-                    ),
-            )
-            .child(
-                div()
-                    .id("hosts")
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .flex_col()
-                    .track_focus(&self.list_focus)
-                    .role(Role::ListBox)
-                    .aria_label(t!("sidebar-hosts-label"))
-                    .aria_description(t!("sidebar-hosts-keys"))
-                    .on_key_down(cx.listener(Self::on_list_key))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|app, _, window, cx| {
-                            app.list_focus.focus(window, cx);
-                            cx.notify();
-                        }),
-                    )
-                    .child(
-                        uniform_list(
-                            "profiles",
-                            count,
-                            cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                                let theme = cx.theme().clone();
-                                let anchor = anchor.clone();
-                                range
-                                    .map(|ix| match &rows[ix] {
-                                        SidebarRow::Folder(f) => div()
-                                            .id(("folder", ix))
-                                            .w_full()
-                                            .h(px(28.0))
-                                            .px(px(10.0))
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(6.0))
-                                            .text_size(px(12.0))
-                                            .text_color(theme.muted_foreground)
-                                            .child(IconName::FolderOpen)
-                                            .child(
-                                                div()
-                                                    .overflow_hidden()
-                                                    .text_ellipsis()
-                                                    .child(f.clone()),
-                                            )
-                                            .into_any_element(),
-                                        SidebarRow::Profile(i) => {
-                                            let p = &this.profiles[*i];
-                                            let selected = this.selected == Some(p.id);
-                                            let id = p.id;
-                                            let indent =
-                                                if p.folder.is_empty() { 10.0 } else { 22.0 };
-                                            let serial = matches!(p.protocol, Protocol::Serial(_));
-                                            let address = match &p.protocol {
-                                                Protocol::Serial(s) => format!(
-                                                    "{} {}",
-                                                    p.host,
-                                                    hostwick_term::serial::summary(s)
-                                                ),
-                                                _ => {
-                                                    let user = p
-                                                        .user
-                                                        .as_ref()
-                                                        .map(|u| format!("{u}@"))
-                                                        .unwrap_or_default();
-                                                    if p.port == p.protocol.default_port() {
-                                                        format!("{user}{}", p.host)
-                                                    } else {
-                                                        format!("{user}{}:{}", p.host, p.port)
-                                                    }
-                                                }
-                                            };
-                                            let tip = format!(
-                                                "{} — {} {address}",
-                                                p.path(),
-                                                protocol_name(&p.protocol)
-                                            );
-                                            let spoken = format!(
-                                                "{}, {}, {address}",
-                                                p.path(),
-                                                protocol_name(&p.protocol)
-                                            );
-                                            div()
-                                                .id(("profile", ix))
-                                                .role(Role::ListBoxOption)
-                                                .aria_label(spoken)
-                                                .aria_selected(selected)
-                                                .when(selected, |d| {
-                                                    d.aria_active_descendant()
-                                                        .relative()
-                                                        .child(anchor.track())
-                                                })
-                                                .when(selected && list_focused, |d| {
-                                                    d.border_2().border_color(theme.ring)
-                                                })
-                                                .w_full()
-                                                .h(px(28.0))
-                                                .pl(px(indent))
-                                                .pr(px(8.0))
-                                                .flex()
-                                                .items_center()
-                                                .gap(px(6.0))
-                                                .text_size(px(13.0))
-                                                .when(selected, |d| d.bg(theme.sidebar_accent))
-                                                .when(!selected, |d| {
-                                                    d.hover(|s| s.bg(theme.sidebar_accent))
-                                                })
-                                                .tooltip(move |window, cx| {
-                                                    Tooltip::new(tip.clone()).build(window, cx)
-                                                })
-                                                .on_click(cx.listener(
-                                                    move |app, ev: &ClickEvent, window, cx| {
-                                                        app.selected = Some(id);
-                                                        if ev.click_count() >= 2
-                                                            && let Some(p) = app
-                                                                .profiles
-                                                                .iter()
-                                                                .find(|p| p.id == id)
-                                                                .cloned()
-                                                        {
-                                                            app.open_tab(
-                                                                p,
-                                                                TabKind::Terminal,
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        }
-                                                        cx.notify();
-                                                    },
-                                                ))
-                                                .on_mouse_down(
-                                                    MouseButton::Right,
-                                                    cx.listener(move |app, _, _, cx| {
-                                                        app.selected = Some(id);
-                                                        cx.notify();
-                                                    }),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .flex_none()
-                                                        .w(px(30.0))
-                                                        .text_size(px(9.0))
-                                                        .font_weight(FontWeight::SEMIBOLD)
-                                                        .text_center()
-                                                        .rounded(px(3.0))
-                                                        .border_1()
-                                                        .border_color(theme.border)
-                                                        .text_color(theme.muted_foreground)
-                                                        .child(badge(&p.protocol)),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .flex_1()
-                                                        .min_w(px(40.0))
-                                                        .overflow_hidden()
-                                                        .whitespace_nowrap()
-                                                        .text_ellipsis()
-                                                        .child(p.name.clone()),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .max_w(px(110.0))
-                                                        .overflow_hidden()
-                                                        .whitespace_nowrap()
-                                                        .text_size(px(11.0))
-                                                        .text_color(theme.muted_foreground)
-                                                        .map(|d| {
-                                                            // Device paths differ at the end.
-                                                            if serial {
-                                                                d.text_ellipsis_start()
-                                                            } else {
-                                                                d.text_ellipsis()
-                                                            }
-                                                        })
-                                                        .child(p.host.clone()),
-                                                )
-                                                .context_menu(Self::host_menu(
-                                                    cx.entity().downgrade(),
-                                                    id,
-                                                ))
-                                                .into_any_element()
-                                        }
-                                    })
-                                    .collect::<Vec<_>>()
-                            }),
-                        )
-                        .track_scroll(&self.list_scroll)
-                        .flex_1(),
-                    ),
-            )
-            .child(
-                div()
-                    .p(px(10.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.0))
-                    .border_t_1()
-                    .border_color(theme.sidebar_border)
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(6.0))
-                            .child(
-                                Button::new("open-term")
-                                    .small()
-                                    .primary()
-                                    .label(t!("sidebar-open-terminal"))
-                                    .disabled(!has_sel)
-                                    .on_click(cx.listener(|app, _, w, cx| {
-                                        app.open_selected(TabKind::Terminal, w, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("open-files")
-                                    .small()
-                                    .label(t!("sidebar-open-files"))
-                                    .disabled(!has_sel)
-                                    .on_click(cx.listener(|app, _, w, cx| {
-                                        app.open_selected(TabKind::Files, w, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("edit-host")
-                                    .small()
-                                    .ghost()
-                                    .icon(IconName::Settings2)
-                                    .tooltip(t!("sidebar-edit-host"))
-                                    .accessibility_label(t!("sidebar-edit-host"))
-                                    .disabled(!has_sel)
-                                    .on_click(cx.listener(|app, _, w, cx| {
-                                        let p = app
-                                            .selected
-                                            .and_then(|id| app.profiles.iter().find(|p| p.id == id))
-                                            .cloned();
-                                        if p.is_some() {
-                                            app.host_dialog(p, w, cx);
-                                        }
-                                    })),
-                            )
-                            .child(
-                                Button::new("del-host")
-                                    .small()
-                                    .ghost()
-                                    .icon(IconName::Delete)
-                                    .tooltip(t!("sidebar-delete-host"))
-                                    .accessibility_label(t!("sidebar-delete-host"))
-                                    .disabled(!has_sel)
-                                    .on_click(
-                                        cx.listener(|app, _, w, cx| app.delete_selected(w, cx)),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(6.0))
-                            .child(
-                                Button::new("new-host")
-                                    .small()
-                                    .label(t!("sidebar-new-host"))
-                                    .on_click(
-                                        cx.listener(|app, _, w, cx| app.host_dialog(None, w, cx)),
-                                    ),
-                            )
-                            .child(Self::import_button(cx.entity().downgrade())),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    fn pane_title(p: &Pane, cx: &App) -> SharedString {
+    pub(super) fn pane_title(p: &Pane, cx: &App) -> SharedString {
         match &p.body {
             PaneBody::Terminal(v) => {
                 let vt = v.read(cx).title.clone();
@@ -611,6 +219,10 @@ impl HostwickApp {
                 .join(" · ")
         };
         let shortcuts = [
+            line(&[
+                (crate::shortcuts::Sc::Palette.hint(), t!("shortcut-palette")),
+                ("F1", t!("shortcut-all-shortcuts")),
+            ]),
             line(&[
                 (keys("Ctrl+Shift+N", "⌘N"), t!("shortcut-new-host")),
                 (keys("Ctrl+Shift+T", "⌘T"), t!("shortcut-duplicate-tab")),
@@ -962,6 +574,9 @@ impl HostwickApp {
 
     pub(super) fn render_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let Some(tab) = self.active.and_then(|i| self.tabs.get(i)) else {
+            if let Some(w) = &self.welcome {
+                return w.clone().into_any_element();
+            }
             return self.render_empty(cx);
         };
         let multi = tab.root.count() > 1;
@@ -1095,6 +710,7 @@ impl HostwickApp {
 impl Render for HostwickApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        self.flush_pending_error(window, cx);
         let toasts = crate::notify::layer(window, cx);
         let sidebar = self.render_sidebar(window, cx);
         let tabs = self.render_tabs(window, cx);

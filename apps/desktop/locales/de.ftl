@@ -145,7 +145,6 @@ remember-hint-create = Sie legen einen Passworttresor mit einem Master-Passwort 
 prompt-server-auth-title = Server-Anmeldung
 prompt-password-title = Passwort für { $user }@{ $host }
 prompt-password-label = Passwort
-prompt-passphrase-title = Passphrase für { $path }
 prompt-passphrase-label = Passphrase
 prompt-sudo-title = sudo-Passwort für { $who }
 prompt-sudo-wrong-title = Falsches Passwort. sudo-Passwort für { $who }
@@ -821,7 +820,7 @@ files-opening = Dateibrowser wird geöffnet
 sidebar-vault-lock = Gespeicherte Passwörter sperren
 sidebar-quick-connect = Schnellverbindung (user@host:port, Eingabe)
 sidebar-hosts-label = Gespeicherte Hosts
-sidebar-hosts-keys = Pfeiltasten wählen einen Host. Eingabe öffnet ein Terminal, Umschalt+Eingabe die Dateien, F2 bearbeitet, Entf löscht, Umschalt+F10 öffnet das Menü.
+sidebar-hosts-keys = Pfeiltasten bewegen (Umschalt+Pfeile wählt mehrere), Links und Rechts klappen Ordner. Eingabe öffnet ein Terminal, Strg+Eingabe die Dateien, Umschalt+Eingabe eine neue Teilung, Alt+Eingabe bearbeitet, F2 benennt um, Entf löscht, Strg+A wählt alle, Umschalt+F10 öffnet das Menü.
 tabs-label = Offene Sitzungen
 tabs-keys = Links und Rechts wechseln den Tab, Eingabe geht in den Tab, Entf schließt ihn, Umschalt+F10 öffnet sein Menü. Strg+F6 wechselt zwischen Hostliste, Tabs und Sitzung.
 tab-state-not-connected = noch nicht verbunden
@@ -869,3 +868,217 @@ toast-error = Fehler
 toast-close = Benachrichtigung schließen
 menu-close-pane = Bereich schließen
 pane-files-title = Dateien: { $host }
+
+## Command palette, sidebar, bulk edit, welcome (0.4)
+
+prompt-passphrase-title-host = Passphrase für { $path } ({ $host })
+prompt-server-auth-title-host = Server-Anmeldung – { $host }
+act-broadcast = Rundsenden ein- oder ausschalten
+act-new-folder = Neuer Ordner
+act-quick-connect = Schnellverbindung …
+act-settings-section = Einstellungen: { $section }
+act-toggle-theme = Zwischen dunklem und hellem Design wechseln
+bulk-applies = { $count ->
+    [one] Gilt für { $count } Host
+   *[other] Gilt für { $count } Hosts
+}
+bulk-apply = Übernehmen
+bulk-changed = wird geändert
+bulk-done = { $count ->
+    [one] { $count } Host aktualisiert
+   *[other] { $count } Hosts aktualisiert
+}
+bulk-error-proxy = Proxy: { $error }
+bulk-intro = { $count ->
+    [one] Einstellungen von { $count } Host ändern.
+   *[other] Einstellungen von { $count } Hosts auf einmal ändern.
+} Ein Feld zeigt den gemeinsamen Wert; ein leeres Feld bedeutet, dass die Werte verschieden sind. Gespeichert werden nur Felder, die Sie ändern.
+bulk-keep = Beibehalten
+bulk-mixed = verschieden – leer lassen zum Beibehalten
+bulk-only-ssh = Nur SSH-Hosts werden geändert ({ $ssh } von { $total }).
+bulk-proxy-hint = socks5://[benutzer@]host:1080, socks4://… oder http://…; „none“ entfernt den Proxy.
+bulk-serial-skipped = { $count ->
+    [one] { $count } serieller Host behält alles außer seinem Ordner.
+   *[other] { $count } serielle Hosts behalten alles außer ihrem Ordner.
+}
+bulk-title = { $count ->
+    [one] { $count } Host bearbeiten
+   *[other] { $count } Hosts bearbeiten
+}
+folder-delete-body = { $count ->
+    [one] Ordner „{ $name }“ löschen? Sein { $count } Host und alle Unterordner kommen nach „{ $target }“.
+   *[other] Ordner „{ $name }“ löschen? Seine { $count } Hosts und alle Unterordner kommen nach „{ $target }“.
+}
+folder-delete-ok = Ordner löschen
+folder-delete-title = Ordner löschen
+folder-new-name = Neuer Ordner
+group-broadcast-on = Rundsenden ist an: Was Sie tippen, geht an jedes Terminal. { $keys } schaltet es aus.
+group-confirm-body = { $count ->
+    [one] Dies öffnet { $count } Verbindung.
+   *[other] Dies öffnet { $count } Verbindungen gleichzeitig.
+} Fragen wie Passwörter kommen nacheinander, jede mit dem Namen ihres Hosts.
+group-confirm-open = Alle öffnen
+group-confirm-title = { $count ->
+    [one] { $count } Host öffnen?
+   *[other] { $count } Hosts öffnen?
+}
+hosts-delete-body = Diese gespeicherten Hosts werden gelöscht: { $names }.
+hosts-delete-body-more = Diese gespeicherten Hosts werden gelöscht: { $names } und { $more } weitere.
+hosts-delete-title = { $count ->
+    [one] { $count } Host löschen?
+   *[other] { $count } Hosts löschen?
+}
+hosts-save-failed = Speichern fehlgeschlagen: { $error }
+import-menu-scan = Diesen Computer durchsuchen …
+keys-palette = Befehlspalette
+keys-shortcuts = Tastenkürzel
+keys-new-host = Neuer Host
+keys-settings = Einstellungen
+keys-broadcast = Eingaben an alle Terminals rundsenden
+keys-cycle-focus = Fokus wechseln: Hostliste, Tabs, Sitzung
+keys-context-menu = Kontextmenü des fokussierten Elements
+keys-duplicate-tab = Tab duplizieren
+keys-close-pane = Bereich schließen, dann den Tab
+keys-reconnect = Neu verbinden
+keys-next-tab = Nächster Tab
+keys-prev-tab = Vorheriger Tab
+keys-split-right = Rechts teilen
+keys-split-down = Unten teilen
+keys-move-pane = Zwischen geteilten Bereichen wechseln
+keys-resize-pane = Größe des fokussierten Bereichs ändern
+keys-host-open = Terminal öffnen
+keys-host-files = Dateien öffnen
+keys-host-split = In neuer Teilung öffnen
+keys-host-edit = Bearbeiten (mehrere Hosts: gemeinsam bearbeiten)
+keys-host-rename = Host oder Ordner umbenennen
+keys-host-delete = Löschen
+keys-host-select-all = Alle Hosts auswählen
+keys-host-multi = Mehrere Hosts auswählen
+keys-host-range = Einen Bereich von Hosts auswählen
+keys-copy = Kopieren
+keys-paste = Einfügen
+keys-find = Im Verlauf suchen
+keys-find-next = Vorheriger / nächster Treffer
+keys-scroll-back = Zurückblättern
+keys-select-in-app = Text auswählen, während ein Programm die Maus nutzt
+keys-send-break = Break senden (Telnet, seriell)
+keys-read-output = Letzte Ausgabe erneut vorlesen (Screenreader)
+keys-text-view = Ausgabe als reiner Text
+keys-files-open = Öffnen
+keys-files-up = Übergeordneter Ordner
+keys-files-edit = Im eigenen Editor bearbeiten
+keys-files-copy = Hochladen / herunterladen
+keys-files-move = Verschieben
+keys-files-rename = Umbenennen
+keys-files-new-folder = Neuer Ordner
+keys-files-delete = Löschen
+keys-files-refresh = Aktualisieren
+keys-files-switch = Andere Seite
+keys-files-properties = Eigenschaften
+keys-files-select-all = Alles auswählen
+keys-files-toggle-row = Zeile markieren
+keys-group-app = App
+keys-group-tabs = Tabs und Bereiche
+keys-group-hosts = Hostliste
+keys-group-terminal = Terminal
+keys-group-files = Dateien
+keys-search = Tastenkürzel suchen
+keys-note = Einfache Strg+Buchstabe-Tasten gehen immer an die Shell. Im Terminal gehören F1 und Strg+/ dem Programm (htop, mc); Strg+Umschalt+/ öffnet diese Liste von überall. Unter macOS ersetzt ⌘ die Tasten Strg+Umschalt.
+menu-bulk-edit = { $count ->
+    [one] { $count } Host bearbeiten …
+   *[other] { $count } Hosts bearbeiten …
+}
+menu-clear-recent = Zuletzt verwendete Verbindungen leeren
+menu-delete-folder = Ordner löschen …
+menu-delete-hosts = { $count ->
+    [one] { $count } Host löschen …
+   *[other] { $count } Hosts löschen …
+}
+menu-favourite = Zu Favoriten hinzufügen
+menu-unfavourite = Aus Favoriten entfernen
+menu-new-subfolder = Neuer Unterordner
+menu-open-all-files = Alle im Dateibrowser öffnen
+menu-open-all-grid = Alle in einem Raster öffnen
+menu-open-all-grid-broadcast = Alle in einem Raster mit Rundsenden öffnen
+menu-open-all-tabs = Alle in Tabs öffnen
+menu-open-all-tabs-count = Alle in Tabs öffnen ({ $count })
+menu-open-split = In neuer Teilung öffnen
+menu-rename = Umbenennen
+palette-connect-to = Mit { $target } verbinden
+palette-save-as-host = { $target } als Host speichern …
+palette-group-actions = Aktionen
+palette-group-connect = Verbinden
+palette-group-snippets = Textbausteine
+palette-group-ssh-config = Aus ~/.ssh/config
+palette-group-tabs = Offene Tabs
+palette-hint-open = öffnen
+palette-hint-files = Dateien
+palette-hint-split = teilen
+palette-hint-edit = bearbeiten
+palette-hint-close = schließen
+palette-no-terminal = Textbausteine werden in ein Terminal getippt; öffnen Sie zuerst eines.
+palette-nothing = Nichts gefunden
+palette-placeholder = Hosts und Aktionen suchen oder benutzer@host:port eingeben
+palette-quick-detail = Schnellverbindung
+palette-results = Ergebnisse
+palette-title = Befehlspalette
+quick-hint = ↵ verbinden · { $files } Dateien · ↑↓ auswählen
+quick-suggestions = Vorschläge
+rename-no-slash = Namen dürfen kein / oder \ enthalten.
+shortcut-palette = Befehlspalette
+shortcut-all-shortcuts = alle Tastenkürzel
+sidebar-drag-hosts = { $count ->
+    [one] { $count } Host
+   *[other] { $count } Hosts
+}
+sidebar-favourite-toggle = Favorit: { $name }
+sidebar-folder-spoken = { $count ->
+    [one] Ordner { $name }, { $count } Host
+   *[other] Ordner { $name }, { $count } Hosts
+}
+sidebar-help-tooltip = Tastenkürzel ({ $keys })
+sidebar-palette-tooltip = Hosts und Aktionen suchen ({ $keys })
+sidebar-quick-spoken = Zuletzt verwendete Schnellverbindung { $target }
+sidebar-section-favourites = Favoriten
+sidebar-section-recent = Zuletzt verwendet
+sidebar-section-hosts = Hosts
+sidebar-selected-count = { $count } ausgewählt
+welcome-title = Willkommen bei Hostwick
+welcome-intro = Hostwick kann die Hosts übernehmen, die andere SSH-Programme auf diesem Computer gespeichert haben. Haken Sie an, was importiert werden soll; die anderen Programme bleiben unverändert.
+welcome-scanning = Suche nach gespeicherten Sitzungen …
+welcome-found = Auf diesem Computer gefunden
+welcome-src-ssh = { $count ->
+    [one] OpenSSH-Konfiguration ({ $path }): { $count } Host
+   *[other] OpenSSH-Konfiguration ({ $path }): { $count } Hosts
+}
+welcome-src-putty = { $count ->
+    [one] PuTTY-Sitzungen: { $count } Host
+   *[other] PuTTY-Sitzungen: { $count } Hosts
+}
+welcome-src-winscp-registry = { $count ->
+    [one] WinSCP-Verbindungen: { $count } Host
+   *[other] WinSCP-Verbindungen: { $count } Hosts
+}
+welcome-src-winscp-ini = { $count ->
+    [one] WinSCP-Verbindungen ({ $path }): { $count } Host
+   *[other] WinSCP-Verbindungen ({ $path }): { $count } Hosts
+}
+welcome-src-solar = { $count ->
+    [one] Solar-PuTTY-Export ({ $path }): { $count } Host
+   *[other] Solar-PuTTY-Export ({ $path }): { $count } Hosts
+}
+welcome-keys = { $count ->
+    [one] Meine Schlüsseldatei aus ~/.ssh für Schnellverbindungen und neue Hosts verwenden
+   *[other] Meine { $count } Schlüsseldateien aus ~/.ssh für Schnellverbindungen und neue Hosts verwenden
+}
+welcome-agent = { $count ->
+    [one] { $count } Schlüssel liegt in Ihrem SSH-Agenten bereit (Pageant, ssh-agent…); Hosts verwenden ihn automatisch.
+   *[other] { $count } Schlüssel liegen in Ihrem SSH-Agenten bereit (Pageant, ssh-agent…); Hosts verwenden sie automatisch.
+}
+welcome-agent-asking = SSH-Agent wird nach seinen Schlüsseln gefragt …
+welcome-agent-none = Es läuft kein SSH-Agent mit Schlüsseln.
+welcome-nothing = Es wurden keine von anderen SSH-Programmen gespeicherten Sitzungen gefunden. Fügen Sie einen Host hinzu oder geben Sie benutzer@host in die Schnellverbindung ein.
+welcome-note = Das geht jederzeit wieder: Importieren … → Diesen Computer durchsuchen …
+welcome-import = Ausgewählte importieren
+welcome-skip = Überspringen
+welcome-continue = Weiter

@@ -2,13 +2,19 @@
 //! browsers), broadcast input, the transfer queue, saved-password and
 //! host-key dialogs, auto-reconnect, restored tabs and settings sync.
 
+mod bulk;
+mod help;
+mod hosts;
 mod menus;
+mod palette;
 mod prompts;
 mod render;
+mod sidebar;
 mod sync;
+mod welcome;
 
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -94,15 +100,36 @@ struct TransferRow {
     state: Option<TransferState>,
 }
 
-enum SidebarRow {
-    Folder(String),
-    Profile(usize),
-}
-
 pub struct HostwickApp {
     backend: Arc<Backend>,
     profiles: Vec<HostProfile>,
+    /// The saved host under the cursor (kept in step with `cursor`).
     selected: Option<ProfileId>,
+    /// The host-list row with the keyboard cursor.
+    cursor: Option<sidebar::RowId>,
+    /// Multi-selection (Ctrl/⌘+click, Shift+click, Ctrl/⌘+A).
+    marked: BTreeSet<ProfileId>,
+    /// Where a Shift+click range starts.
+    anchor: Option<ProfileId>,
+    /// The row being renamed in place (F2).
+    renaming: Option<sidebar::RowId>,
+    rename_input: Entity<InputState>,
+    /// Collapsed folders and sidebar sections.
+    collapsed: HashSet<String>,
+    collapsed_secs: HashSet<sidebar::Sec>,
+    recents: Vec<crate::hostops::Recent>,
+    frecency: crate::fuzzy::Frecency,
+    /// `~/.ssh/config` hosts that are not saved.
+    ssh_aliases: Vec<Rc<HostProfile>>,
+    palette: Option<WeakEntity<palette::PaletteView>>,
+    /// Quick-connect suggestions and the highlighted one.
+    quick_sugs: Vec<sidebar::QuickSug>,
+    quick_sel: usize,
+    quick_open: bool,
+    /// First-run welcome screen.
+    welcome: Option<Entity<welcome::WelcomeView>>,
+    /// A background save failed; shown at the next draw.
+    pending_error: Option<String>,
     search: Entity<InputState>,
     quick: Entity<InputState>,
     tabs: Vec<Tab>,
@@ -195,6 +222,7 @@ impl HostwickApp {
         let search =
             cx.new(|cx| InputState::new(window, cx).placeholder(t!("sidebar-search-placeholder")));
         let quick = cx.new(|cx| InputState::new(window, cx).placeholder("user@host:port  ⏎"));
+        let rename_input = cx.new(|cx| InputState::new(window, cx));
         let mut subs = vec![
             cx.subscribe_in(&search, window, |_, _, ev: &InputEvent, _, cx| {
                 if let InputEvent::Change = ev {
@@ -212,19 +240,37 @@ impl HostwickApp {
                 }
             }),
         ];
+        // Quick connect: suggestions as you type (Enter is handled by the
+        // sidebar, which knows the highlighted suggestion).
         subs.push(cx.subscribe_in(
             &quick,
             window,
-            |this: &mut Self, input, ev: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { .. } = ev {
-                    let text = input.read(cx).value().trim().to_owned();
-                    if text.is_empty() {
-                        return;
-                    }
-                    match quick_profile(&text) {
-                        Ok(p) => this.open_tab_quick(p, Some(text), TabKind::Terminal, window, cx),
-                        Err(e) => window.toast(Toast::error(e.to_string()), cx),
-                    }
+            |this: &mut Self, input, ev: &InputEvent, _, cx| match ev {
+                InputEvent::Change => {
+                    let text = input.read(cx).value().to_string();
+                    this.quick_sugs = this.quick_suggestions(&text);
+                    this.quick_sel = 0;
+                    this.quick_open = true;
+                    cx.notify();
+                }
+                InputEvent::Focus => {
+                    this.quick_open = true;
+                    cx.notify();
+                }
+                InputEvent::Blur => {
+                    this.quick_open = false;
+                    cx.notify();
+                }
+                _ => {}
+            },
+        ));
+        // Inline rename: losing focus saves (Enter and Escape: sidebar).
+        subs.push(cx.subscribe_in(
+            &rename_input,
+            window,
+            |this: &mut Self, _, ev: &InputEvent, window, cx| {
+                if let InputEvent::Blur = ev {
+                    this.commit_rename(window, cx);
                 }
             },
         ));
@@ -281,10 +327,54 @@ impl HostwickApp {
             }
         });
 
+        let state: sidebar::SidebarState = backend
+            .store
+            .setting(sidebar::SIDEBAR_KEY)
+            .ok()
+            .flatten()
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default();
+        let recents = backend
+            .store
+            .setting(hosts::RECENTS_KEY)
+            .ok()
+            .flatten()
+            .map(|j| crate::hostops::recents_from_json(&j))
+            .unwrap_or_default();
+        let frecency = backend
+            .store
+            .setting(hosts::FRECENCY_KEY)
+            .ok()
+            .flatten()
+            .map(|j| crate::fuzzy::Frecency::from_json(&j))
+            .unwrap_or_default();
+        crate::backend::set_default_keys(
+            Settings::get(cx)
+                .default_keys
+                .iter()
+                .map(std::path::PathBuf::from)
+                .collect(),
+        );
         let mut app = Self {
             backend,
             profiles: Vec::new(),
             selected: None,
+            cursor: None,
+            marked: BTreeSet::new(),
+            anchor: None,
+            renaming: None,
+            rename_input,
+            collapsed: state.collapsed.into_iter().collect(),
+            collapsed_secs: state.sections.into_iter().collect(),
+            recents,
+            frecency,
+            ssh_aliases: Vec::new(),
+            palette: None,
+            quick_sugs: Vec::new(),
+            quick_sel: 0,
+            quick_open: false,
+            welcome: None,
+            pending_error: None,
             search,
             quick,
             tabs: Vec::new(),
@@ -312,12 +402,15 @@ impl HostwickApp {
         app.focus.focus(window, cx);
         app.restore_tabs(window, cx);
         app.startup_sync(window, cx);
+        app.maybe_welcome(cx);
+        app.load_ssh_aliases(cx);
         app
     }
 
     fn reload_profiles(&mut self) {
         self.profiles = self.backend.store.list().unwrap_or_default();
         self.profiles.sort_by_key(|p| p.path().to_lowercase());
+        self.prune_selection();
     }
 
     fn next_id(&mut self) -> u64 {
@@ -377,6 +470,7 @@ impl HostwickApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.note_recent(&profile, quick.as_deref());
         let pane = self.new_pane(profile, quick);
         self.push_tab(pane, kind, window, cx);
     }
@@ -1209,25 +1303,8 @@ impl HostwickApp {
             window,
             cx,
             move |p, window, cx| {
-                let _ = app.update(cx, |a, cx| {
-                    match a.backend.store.upsert(&p) {
-                        Ok(()) => {
-                            a.selected = Some(p.id);
-                            a.reload_profiles();
-                            // Open tabs keep working; new connections use the edit.
-                            for t in &mut a.tabs {
-                                for pane in t.root.leaves_mut() {
-                                    if pane.profile.id == p.id {
-                                        pane.profile = p.clone();
-                                    }
-                                }
-                            }
-                            a.mark_sync_dirty();
-                        }
-                        Err(e) => window.toast(Toast::error(e.to_string()), cx),
-                    }
-                    cx.notify();
-                });
+                // Open tabs keep working; new connections use the edit.
+                let _ = app.update(cx, |a, cx| a.saved_from_editor(p, window, cx));
             },
         );
     }
@@ -1242,17 +1319,11 @@ impl HostwickApp {
         // The copy asks for (and saves) its own passwords.
         crate::vault::drop_foreign_host_ids(&mut p);
         if self.backend.store.upsert(&p).is_ok() {
-            self.selected = Some(p.id);
             self.reload_profiles();
+            self.select_host(p.id, cx);
             self.mark_sync_dirty();
         }
         cx.notify();
-    }
-
-    fn delete_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(id) = self.selected {
-            self.delete_profile(id, window, cx);
-        }
     }
 
     fn open_profile(
@@ -1268,111 +1339,7 @@ impl HostwickApp {
         }
     }
 
-    fn open_selected(&mut self, kind: TabKind, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(p) = self
-            .selected
-            .and_then(|id| self.profiles.iter().find(|p| p.id == id))
-            .cloned()
-        {
-            self.open_tab(p, kind, window, cx);
-        }
-    }
-
     // ---- keyboard ---------------------------------------------------------------
-
-    /// Saved hosts in the order the sidebar shows them (search applied).
-    fn visible_profiles(&self, cx: &App) -> Vec<ProfileId> {
-        self.sidebar_rows(cx)
-            .into_iter()
-            .filter_map(|r| match r {
-                SidebarRow::Profile(i) => self.profiles.get(i).map(|p| p.id),
-                SidebarRow::Folder(_) => None,
-            })
-            .collect()
-    }
-
-    /// Keys in the saved-hosts list: arrows/Home/End/PageUp/PageDown move,
-    /// Enter opens a terminal, Shift+Enter the files, F2 edits, Del deletes
-    /// (after asking), Shift+F10 or the Menu key opens the host's menu.
-    fn on_list_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let ks = &ev.keystroke;
-        let m = ks.modifiers;
-        if crate::a11y::is_menu_key(ks) {
-            if self.selected.is_none() {
-                self.select_relative(0, window, cx);
-            }
-            self.host_anchor.open(window, cx);
-            cx.stop_propagation();
-            return;
-        }
-        if m.control || m.alt || m.platform {
-            return;
-        }
-        let handled = match ks.key.as_str() {
-            "up" => self.select_relative(-1, window, cx),
-            "down" => self.select_relative(1, window, cx),
-            "pageup" => self.select_relative(-10, window, cx),
-            "pagedown" => self.select_relative(10, window, cx),
-            "home" => self.select_relative(isize::MIN, window, cx),
-            "end" => self.select_relative(isize::MAX, window, cx),
-            "enter" => {
-                let kind = if m.shift {
-                    TabKind::Files
-                } else {
-                    TabKind::Terminal
-                };
-                self.open_selected(kind, window, cx);
-                true
-            }
-            "f2" => {
-                let p = self
-                    .selected
-                    .and_then(|id| self.profiles.iter().find(|p| p.id == id))
-                    .cloned();
-                if p.is_some() {
-                    self.host_dialog(p, window, cx);
-                }
-                true
-            }
-            "delete" => {
-                self.delete_selected(window, cx);
-                true
-            }
-            _ => false,
-        };
-        if handled {
-            cx.stop_propagation();
-        }
-    }
-
-    /// Move the host selection by `delta` rows (clamped; `isize::MIN`/`MAX`
-    /// for first/last) and scroll it into view.
-    fn select_relative(&mut self, delta: isize, _: &mut Window, cx: &mut Context<Self>) -> bool {
-        let ids = self.visible_profiles(cx);
-        if ids.is_empty() {
-            return true;
-        }
-        let cur = self
-            .selected
-            .and_then(|s| ids.iter().position(|id| *id == s));
-        let last = ids.len() as isize - 1;
-        let next = match (cur, delta) {
-            (_, isize::MIN) => 0,
-            (_, isize::MAX) => last,
-            (None, _) => 0,
-            (Some(c), d) => (c as isize).saturating_add(d).clamp(0, last),
-        } as usize;
-        self.selected = Some(ids[next]);
-        // Scroll the row (folders are rows too) into view.
-        let rows = self.sidebar_rows(cx);
-        if let Some(ix) = rows.iter().position(|r| {
-            matches!(r, SidebarRow::Profile(i) if self.profiles.get(*i).map(|p| p.id) == Some(ids[next]))
-        }) {
-            self.list_scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
-        }
-        cx.notify();
-        true
-    }
 
     /// Keys on the tab bar: Left/Right (Home/End) switch tabs, Enter or
     /// Down goes into the tab, Delete closes it, Shift+F10/Menu its menu.
@@ -1445,13 +1412,20 @@ impl HostwickApp {
             1 => self.tabs_focus.focus(window, cx),
             2 => self.focus_active(window, cx),
             _ => {
-                if self.selected.is_none() {
-                    self.select_relative(0, window, cx);
+                if self.cursor.is_none() {
+                    self.move_cursor(0, false, cx);
                 }
                 self.list_focus.focus(window, cx)
             }
         }
         cx.notify();
+    }
+
+    /// Does a terminal have the keyboard?
+    fn terminal_has_focus(&self, window: &Window, cx: &App) -> bool {
+        self.all_terminals()
+            .iter()
+            .any(|t| t.read(cx).focus_handle(cx).contains_focused(window, cx))
     }
 
     /// App-wide shortcuts, handled before the terminal sees the key. They
@@ -1471,6 +1445,29 @@ impl HostwickApp {
         } else {
             m.control && m.shift
         };
+        // Command palette: Ctrl+Shift+P / Ctrl+Shift+K; ⌘K / ⌘⇧P.
+        let palette = if mac {
+            m.platform && !m.alt && !m.control && (key == "k" || (key == "p" && m.shift))
+        } else {
+            m.control && m.shift && !m.alt && (key == "p" || key == "k")
+        };
+        if palette {
+            self.open_palette(window, cx);
+            cx.stop_propagation();
+            return;
+        }
+        // Shortcut cheat sheet: Ctrl+Shift+/ (⌘⇧/) anywhere; F1 and
+        // Ctrl+/ (⌘/) unless a terminal has the keys (programs use them).
+        let slash = key == "/" || key == "?";
+        let app_mod = if mac { m.platform } else { m.control };
+        let help_anywhere = slash && app_mod && m.shift && !m.alt;
+        let help_outside =
+            (key == "f1" && !m.modified()) || (slash && app_mod && !m.shift && !m.alt);
+        if help_anywhere || (help_outside && !self.terminal_has_focus(window, cx)) {
+            self.open_shortcuts(window, cx);
+            cx.stop_propagation();
+            return;
+        }
         // Split right: Ctrl+Shift+D / ⌘D. Split down: Ctrl+Shift+E / ⌘⇧D.
         let split = if mac {
             (m.platform && key == "d").then_some(m.shift)
@@ -1525,12 +1522,7 @@ impl HostwickApp {
                 true
             }
             "t" if cmd => {
-                if let Some(t) = self.active.and_then(|i| self.tabs.get(i))
-                    && let Some(p) = t.focused_pane()
-                {
-                    let (profile, quick, kind) = (p.profile.clone(), p.quick.clone(), t.kind);
-                    self.open_tab_quick(profile, quick, kind, window, cx);
-                }
+                self.duplicate_active(window, cx);
                 true
             }
             "w" if cmd => {

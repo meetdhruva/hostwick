@@ -1,6 +1,7 @@
 //! One side of the commander: listing, selection, sorting, rows, drag and
 //! drop.
 
+use crate::shortcuts::Sc;
 use std::sync::Arc;
 
 use gpui_kit::accesskit::Role;
@@ -654,56 +655,60 @@ impl FilesView {
                 Side::Remote if two_panes => t!("files-download"),
                 Side::Remote => t!("files-download-pick"),
             };
-            let key = |label: SharedString, keys: &str| format!("{label}  ({keys})");
             let mut menu = menu;
             if is_dir {
-                menu = menu.item(PopupMenuItem::new(t!("files-menu-open")).on_click(act(
-                    |v, s, _, cx| {
-                        if let Some(ix) = v.pane(s).sel.cursor {
-                            v.open_entry(s, ix, cx);
-                        }
-                    },
-                )));
-            } else {
-                menu = menu
-                    .item(
-                        PopupMenuItem::new(key(t!("files-menu-edit"), "F4"))
-                            .on_click(act(|v, s, _, cx| v.edit_selection(s, cx))),
-                    )
-                    .item(PopupMenuItem::new(t!("files-menu-open")).on_click(act(
-                        |v, s, _, cx| {
+                menu = menu.item(
+                    crate::shortcuts::menu_item(t!("files-menu-open"), Some(Sc::FilesOpen))
+                        .on_click(act(|v, s, _, cx| {
                             if let Some(ix) = v.pane(s).sel.cursor {
                                 v.open_entry(s, ix, cx);
                             }
-                        },
-                    )));
+                        })),
+                );
+            } else {
+                menu = menu
+                    .item(
+                        crate::shortcuts::menu_item(t!("files-menu-edit"), Some(Sc::FilesEdit))
+                            .on_click(act(|v, s, _, cx| v.edit_selection(s, cx))),
+                    )
+                    .item(
+                        crate::shortcuts::menu_item(t!("files-menu-open"), Some(Sc::FilesOpen))
+                            .on_click(act(|v, s, _, cx| {
+                                if let Some(ix) = v.pane(s).sel.cursor {
+                                    v.open_entry(s, ix, cx);
+                                }
+                            })),
+                    );
             }
             if side == Side::Remote || two_panes {
                 menu = menu
                     .item(
-                        PopupMenuItem::new(key(other, "F5"))
+                        crate::shortcuts::menu_item(other, Some(Sc::FilesCopy))
                             .on_click(act(|v, s, w, cx| v.copy_selection(s, false, w, cx))),
                     )
                     .when(two_panes, |m| {
                         m.item(
-                            PopupMenuItem::new(key(t!("files-menu-move"), "F6"))
+                            crate::shortcuts::menu_item(t!("files-menu-move"), Some(Sc::FilesMove))
                                 .on_click(act(|v, s, w, cx| v.copy_selection(s, true, w, cx))),
                         )
                     });
             }
             menu.separator()
                 .item(
-                    PopupMenuItem::new(key(t!("files-menu-rename"), "F2"))
+                    crate::shortcuts::menu_item(t!("files-menu-rename"), Some(Sc::FilesRename))
                         .on_click(act(|v, s, w, cx| v.rename_dialog(s, w, cx))),
                 )
                 .item(
-                    PopupMenuItem::new(key(t!("menu-delete"), "Del"))
+                    crate::shortcuts::menu_item(t!("menu-delete"), Some(Sc::FilesDelete))
                         .on_click(act(|v, s, w, cx| v.confirm_delete(s, w, cx))),
                 )
                 .separator()
                 .item(
-                    PopupMenuItem::new(key(t!("files-menu-new-folder"), "F7"))
-                        .on_click(act(|v, s, w, cx| v.new_folder(s, w, cx))),
+                    crate::shortcuts::menu_item(
+                        t!("files-menu-new-folder"),
+                        Some(Sc::FilesNewFolder),
+                    )
+                    .on_click(act(|v, s, w, cx| v.new_folder(s, w, cx))),
                 )
                 .item(
                     PopupMenuItem::new(t!("files-menu-new-symlink"))
@@ -719,13 +724,16 @@ impl FilesView {
                     },
                 )))
                 .item(
-                    PopupMenuItem::new(key(t!("files-menu-refresh"), "Ctrl+R"))
+                    crate::shortcuts::menu_item(t!("files-menu-refresh"), Some(Sc::FilesRefresh))
                         .on_click(act(|v, s, _, cx| v.refresh(s, cx))),
                 )
                 .separator()
                 .item(
-                    PopupMenuItem::new(key(t!("files-menu-properties"), "Alt+Enter"))
-                        .on_click(act(|v, s, w, cx| v.properties(s, w, cx))),
+                    crate::shortcuts::menu_item(
+                        t!("files-menu-properties"),
+                        Some(Sc::FilesProperties),
+                    )
+                    .on_click(act(|v, s, w, cx| v.properties(s, w, cx))),
                 )
         }
     }

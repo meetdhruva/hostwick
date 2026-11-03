@@ -145,7 +145,6 @@ remember-hint-create = आप मास्टर पासवर्ड वाल
 prompt-server-auth-title = सर्वर प्रमाणीकरण
 prompt-password-title = { $user }@{ $host } का पासवर्ड
 prompt-password-label = पासवर्ड
-prompt-passphrase-title = { $path } का पासफ़्रेज़
 prompt-passphrase-label = पासफ़्रेज़
 prompt-sudo-title = { $who } का sudo पासवर्ड
 prompt-sudo-wrong-title = गलत पासवर्ड। { $who } का sudo पासवर्ड
@@ -821,7 +820,7 @@ files-opening = फ़ाइल ब्राउज़र खोला जा र
 sidebar-vault-lock = सहेजे गए पासवर्ड लॉक करें
 sidebar-quick-connect = त्वरित कनेक्ट (user@host:port, Enter)
 sidebar-hosts-label = सहेजे गए होस्ट
-sidebar-hosts-keys = तीर कुंजियाँ होस्ट चुनती हैं। Enter टर्मिनल खोलता है, Shift+Enter फ़ाइलें, F2 संपादित करता है, Delete हटाता है, Shift+F10 मेनू खोलता है।
+sidebar-hosts-keys = तीर कुंजियाँ चलाती हैं (Shift+तीर कई चुनता है), बाएँ और दाएँ फ़ोल्डर समेटते/खोलते हैं। Enter टर्मिनल खोलता है, Ctrl+Enter फ़ाइलें, Shift+Enter नया विभाजन, Alt+Enter संपादित करता है, F2 नाम बदलता है, Delete हटाता है, Ctrl+A सब चुनता है, Shift+F10 मेनू खोलता है।
 tabs-label = खुले सत्र
 tabs-keys = बाएँ और दाएँ टैब बदलते हैं, Enter टैब के अंदर जाता है, Delete उसे बंद करता है, Shift+F10 उसका मेनू खोलता है। Ctrl+F6 होस्ट सूची, टैब और सत्र के बीच ले जाता है।
 tab-state-not-connected = अभी कनेक्ट नहीं
@@ -869,3 +868,217 @@ toast-error = त्रुटि
 toast-close = सूचना बंद करें
 menu-close-pane = पैन बंद करें
 pane-files-title = फ़ाइलें: { $host }
+
+## Command palette, sidebar, bulk edit, welcome (0.4)
+
+prompt-passphrase-title-host = { $path } का पासफ़्रेज़ ({ $host })
+prompt-server-auth-title-host = सर्वर प्रमाणीकरण — { $host }
+act-broadcast = ब्रॉडकास्ट चालू या बंद करें
+act-new-folder = नया फ़ोल्डर
+act-quick-connect = त्वरित कनेक्ट…
+act-settings-section = सेटिंग्स: { $section }
+act-toggle-theme = गहरी और हल्की थीम के बीच बदलें
+bulk-applies = { $count ->
+    [one] { $count } होस्ट पर लागू
+   *[other] { $count } होस्ट पर लागू
+}
+bulk-apply = लागू करें
+bulk-changed = बदलेगा
+bulk-done = { $count ->
+    [one] { $count } होस्ट अपडेट हुआ
+   *[other] { $count } होस्ट अपडेट हुए
+}
+bulk-error-proxy = प्रॉक्सी: { $error }
+bulk-intro = { $count ->
+    [one] { $count } होस्ट की सेटिंग्स बदलें।
+   *[other] { $count } होस्ट की सेटिंग्स एक साथ बदलें।
+} हर फ़ील्ड वह मान दिखाता है जो सबमें समान है; खाली फ़ील्ड का मतलब है कि मान अलग-अलग हैं। केवल वही फ़ील्ड सहेजे जाते हैं जिन्हें आप बदलते हैं।
+bulk-keep = जैसा है रखें
+bulk-mixed = अलग-अलग — रखने के लिए खाली छोड़ें
+bulk-only-ssh = केवल SSH होस्ट बदले जाते हैं ({ $total } में से { $ssh })।
+bulk-proxy-hint = socks5://[user@]host:1080, socks4://… या http://…; “none” प्रॉक्सी हटाता है।
+bulk-serial-skipped = { $count ->
+    [one] { $count } सीरियल होस्ट में फ़ोल्डर के अलावा कुछ नहीं बदलता।
+   *[other] { $count } सीरियल होस्ट में फ़ोल्डर के अलावा कुछ नहीं बदलता।
+}
+bulk-title = { $count ->
+    [one] { $count } होस्ट संपादित करें
+   *[other] { $count } होस्ट संपादित करें
+}
+folder-delete-body = { $count ->
+    [one] फ़ोल्डर “{ $name }” हटाएँ? इसका { $count } होस्ट और सभी उप-फ़ोल्डर “{ $target }” में चले जाएँगे।
+   *[other] फ़ोल्डर “{ $name }” हटाएँ? इसके { $count } होस्ट और सभी उप-फ़ोल्डर “{ $target }” में चले जाएँगे।
+}
+folder-delete-ok = फ़ोल्डर हटाएँ
+folder-delete-title = फ़ोल्डर हटाएँ
+folder-new-name = नया फ़ोल्डर
+group-broadcast-on = ब्रॉडकास्ट चालू है: आप जो लिखते हैं वह हर टर्मिनल में जाता है। { $keys } इसे बंद करता है।
+group-confirm-body = { $count ->
+    [one] इससे { $count } कनेक्शन खुलेगा।
+   *[other] इससे एक साथ { $count } कनेक्शन खुलेंगे।
+} पासवर्ड जैसे प्रश्न एक-एक करके आते हैं, हर एक में उसके होस्ट का नाम होता है।
+group-confirm-open = सभी खोलें
+group-confirm-title = { $count ->
+    [one] { $count } होस्ट खोलें?
+   *[other] { $count } होस्ट खोलें?
+}
+hosts-delete-body = ये सहेजे गए होस्ट हटाए जाएँगे: { $names }।
+hosts-delete-body-more = ये सहेजे गए होस्ट हटाए जाएँगे: { $names } और { $more } अन्य।
+hosts-delete-title = { $count ->
+    [one] { $count } होस्ट हटाएँ?
+   *[other] { $count } होस्ट हटाएँ?
+}
+hosts-save-failed = सहेजा नहीं जा सका: { $error }
+import-menu-scan = इस कंप्यूटर को स्कैन करें…
+keys-palette = कमांड पैलेट
+keys-shortcuts = कीबोर्ड शॉर्टकट
+keys-new-host = नया होस्ट
+keys-settings = सेटिंग्स
+keys-broadcast = सभी टर्मिनल में इनपुट ब्रॉडकास्ट करें
+keys-cycle-focus = फ़ोकस बदलें: होस्ट सूची, टैब, सत्र
+keys-context-menu = फ़ोकस वाले आइटम का संदर्भ मेनू
+keys-duplicate-tab = टैब की प्रति बनाएँ
+keys-close-pane = पैन बंद करें, फिर टैब
+keys-reconnect = फिर से कनेक्ट करें
+keys-next-tab = अगला टैब
+keys-prev-tab = पिछला टैब
+keys-split-right = दाईं ओर विभाजित करें
+keys-split-down = नीचे विभाजित करें
+keys-move-pane = विभाजित पैन के बीच जाएँ
+keys-resize-pane = फ़ोकस वाले पैन का आकार बदलें
+keys-host-open = टर्मिनल खोलें
+keys-host-files = फ़ाइलें खोलें
+keys-host-split = नए विभाजन में खोलें
+keys-host-edit = संपादित करें (कई होस्ट: एक साथ संपादित करें)
+keys-host-rename = होस्ट या फ़ोल्डर का नाम बदलें
+keys-host-delete = हटाएँ
+keys-host-select-all = सभी होस्ट चुनें
+keys-host-multi = कई होस्ट चुनें
+keys-host-range = होस्ट की एक श्रेणी चुनें
+keys-copy = कॉपी करें
+keys-paste = पेस्ट करें
+keys-find = स्क्रॉलबैक में खोजें
+keys-find-next = पिछला / अगला मिलान
+keys-scroll-back = पीछे स्क्रॉल करें
+keys-select-in-app = जब कोई प्रोग्राम माउस उपयोग कर रहा हो तब टेक्स्ट चुनें
+keys-send-break = ब्रेक भेजें (telnet, सीरियल)
+keys-read-output = नवीनतम आउटपुट फिर से पढ़ें (स्क्रीन रीडर)
+keys-text-view = आउटपुट सादे टेक्स्ट के रूप में
+keys-files-open = खोलें
+keys-files-up = मूल फ़ोल्डर
+keys-files-edit = अपने एडिटर में संपादित करें
+keys-files-copy = अपलोड / डाउनलोड
+keys-files-move = ले जाएँ
+keys-files-rename = नाम बदलें
+keys-files-new-folder = नया फ़ोल्डर
+keys-files-delete = हटाएँ
+keys-files-refresh = रीफ़्रेश करें
+keys-files-switch = दूसरी ओर
+keys-files-properties = गुण
+keys-files-select-all = सब चुनें
+keys-files-toggle-row = पंक्ति चिह्नित करें
+keys-group-app = ऐप
+keys-group-tabs = टैब और पैन
+keys-group-hosts = होस्ट सूची
+keys-group-terminal = टर्मिनल
+keys-group-files = फ़ाइलें
+keys-search = शॉर्टकट खोजें
+keys-note = सादी Ctrl+अक्षर कुंजियाँ हमेशा शेल को जाती हैं। टर्मिनल के अंदर F1 और Ctrl+/ प्रोग्राम (htop, mc) के हैं; Ctrl+Shift+/ यह सूची कहीं से भी खोलता है। macOS पर Ctrl+Shift की जगह ⌘ है।
+menu-bulk-edit = { $count ->
+    [one] { $count } होस्ट संपादित करें…
+   *[other] { $count } होस्ट संपादित करें…
+}
+menu-clear-recent = हाल के कनेक्शन साफ़ करें
+menu-delete-folder = फ़ोल्डर हटाएँ…
+menu-delete-hosts = { $count ->
+    [one] { $count } होस्ट हटाएँ…
+   *[other] { $count } होस्ट हटाएँ…
+}
+menu-favourite = पसंदीदा में जोड़ें
+menu-unfavourite = पसंदीदा से हटाएँ
+menu-new-subfolder = नया उप-फ़ोल्डर
+menu-open-all-files = सभी को फ़ाइल ब्राउज़र में खोलें
+menu-open-all-grid = सभी को ग्रिड में खोलें
+menu-open-all-grid-broadcast = सभी को ब्रॉडकास्ट चालू करके ग्रिड में खोलें
+menu-open-all-tabs = सभी को टैब में खोलें
+menu-open-all-tabs-count = सभी को टैब में खोलें ({ $count })
+menu-open-split = नए विभाजन में खोलें
+menu-rename = नाम बदलें
+palette-connect-to = { $target } से कनेक्ट करें
+palette-save-as-host = { $target } को होस्ट के रूप में सहेजें…
+palette-group-actions = क्रियाएँ
+palette-group-connect = कनेक्ट
+palette-group-snippets = स्निपेट
+palette-group-ssh-config = ~/.ssh/config से
+palette-group-tabs = खुले टैब
+palette-hint-open = खोलें
+palette-hint-files = फ़ाइलें
+palette-hint-split = विभाजित
+palette-hint-edit = संपादित
+palette-hint-close = बंद
+palette-no-terminal = स्निपेट टर्मिनल में लिखे जाते हैं; पहले एक टर्मिनल खोलें।
+palette-nothing = कुछ नहीं मिला
+palette-placeholder = होस्ट और क्रियाएँ खोजें, या user@host:port लिखें
+palette-quick-detail = त्वरित कनेक्ट
+palette-results = परिणाम
+palette-title = कमांड पैलेट
+quick-hint = ↵ कनेक्ट · { $files } फ़ाइलें · ↑↓ चुनें
+quick-suggestions = सुझाव
+rename-no-slash = नाम में / या \ नहीं हो सकता।
+shortcut-palette = कमांड पैलेट
+shortcut-all-shortcuts = सभी शॉर्टकट
+sidebar-drag-hosts = { $count ->
+    [one] { $count } होस्ट
+   *[other] { $count } होस्ट
+}
+sidebar-favourite-toggle = पसंदीदा: { $name }
+sidebar-folder-spoken = { $count ->
+    [one] फ़ोल्डर { $name }, { $count } होस्ट
+   *[other] फ़ोल्डर { $name }, { $count } होस्ट
+}
+sidebar-help-tooltip = कीबोर्ड शॉर्टकट ({ $keys })
+sidebar-palette-tooltip = होस्ट और क्रियाएँ खोजें ({ $keys })
+sidebar-quick-spoken = हाल का त्वरित कनेक्शन { $target }
+sidebar-section-favourites = पसंदीदा
+sidebar-section-recent = हाल के
+sidebar-section-hosts = होस्ट
+sidebar-selected-count = { $count } चुने गए
+welcome-title = Hostwick में आपका स्वागत है
+welcome-intro = Hostwick उन होस्ट को ला सकता है जिन्हें दूसरे SSH टूल ने इस कंप्यूटर पर सहेजा है। जो आयात करना है उसे चुनें; दूसरे प्रोग्राम नहीं बदलते।
+welcome-scanning = सहेजे गए सत्र खोजे जा रहे हैं…
+welcome-found = इस कंप्यूटर पर मिला
+welcome-src-ssh = { $count ->
+    [one] OpenSSH कॉन्फ़िग ({ $path }): { $count } होस्ट
+   *[other] OpenSSH कॉन्फ़िग ({ $path }): { $count } होस्ट
+}
+welcome-src-putty = { $count ->
+    [one] PuTTY सत्र: { $count } होस्ट
+   *[other] PuTTY सत्र: { $count } होस्ट
+}
+welcome-src-winscp-registry = { $count ->
+    [one] WinSCP साइटें: { $count } होस्ट
+   *[other] WinSCP साइटें: { $count } होस्ट
+}
+welcome-src-winscp-ini = { $count ->
+    [one] WinSCP साइटें ({ $path }): { $count } होस्ट
+   *[other] WinSCP साइटें ({ $path }): { $count } होस्ट
+}
+welcome-src-solar = { $count ->
+    [one] Solar-PuTTY निर्यात ({ $path }): { $count } होस्ट
+   *[other] Solar-PuTTY निर्यात ({ $path }): { $count } होस्ट
+}
+welcome-keys = { $count ->
+    [one] ~/.ssh की मेरी कुंजी फ़ाइल त्वरित कनेक्ट और नए होस्ट के लिए उपयोग करें
+   *[other] ~/.ssh की मेरी { $count } कुंजी फ़ाइलें त्वरित कनेक्ट और नए होस्ट के लिए उपयोग करें
+}
+welcome-agent = { $count ->
+    [one] आपके SSH एजेंट (Pageant, ssh-agent…) में { $count } कुंजी तैयार है; होस्ट इसे अपने आप उपयोग करते हैं।
+   *[other] आपके SSH एजेंट (Pageant, ssh-agent…) में { $count } कुंजियाँ तैयार हैं; होस्ट इन्हें अपने आप उपयोग करते हैं।
+}
+welcome-agent-asking = SSH एजेंट से उसकी कुंजियाँ पूछी जा रही हैं…
+welcome-agent-none = कुंजियों वाला कोई SSH एजेंट नहीं चल रहा है।
+welcome-nothing = दूसरे SSH टूल द्वारा सहेजे गए कोई सत्र नहीं मिले। कोई होस्ट जोड़ें, या त्वरित कनेक्ट में user@host लिखें।
+welcome-note = आप यह कभी भी फिर कर सकते हैं: आयात करें… → इस कंप्यूटर को स्कैन करें।
+welcome-import = चुने हुए आयात करें
+welcome-skip = छोड़ें
+welcome-continue = जारी रखें

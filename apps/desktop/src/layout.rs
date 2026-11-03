@@ -258,6 +258,64 @@ pub fn neighbor(rects: &[(u64, Rect)], from: u64, dir: Dir) -> Option<u64> {
         .map(|(id, _)| *id)
 }
 
+// ---- grids ----------------------------------------------------------------
+
+/// Panes per row for a grid of `n` panes: as square as possible
+/// (`ceil(sqrt(n))` columns), rows differing by at most one pane, fuller
+/// rows on top. `[]` for none.
+pub fn grid_shape(n: usize) -> Vec<usize> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let cols = (1..=n).find(|c| c * c >= n).unwrap_or(n);
+    let rows = n.div_ceil(cols);
+    let (base, extra) = (n / rows, n % rows);
+    (0..rows).map(|r| base + usize::from(r < extra)).collect()
+}
+
+/// A tree that tiles `panes` in a grid (see [`grid_shape`]): rows stacked
+/// top to bottom, panes side by side in each row, all the same size within
+/// a row and every row the same height. `split_id` gives each split a
+/// fresh id. None when `panes` is empty.
+pub fn grid_tree<P>(panes: Vec<P>, split_id: &mut dyn FnMut() -> u64) -> Option<Node<P>> {
+    let shape = grid_shape(panes.len());
+    let mut it = panes.into_iter();
+    let rows: Vec<Node<P>> = shape
+        .iter()
+        .filter_map(|&k| {
+            chain(
+                it.by_ref().take(k).map(Node::Leaf).collect(),
+                false,
+                split_id,
+            )
+        })
+        .collect();
+    chain(rows, true, split_id)
+}
+
+/// `nodes` side by side (or stacked when `vertical`) with equal shares.
+fn chain<P>(
+    nodes: Vec<Node<P>>,
+    vertical: bool,
+    split_id: &mut dyn FnMut() -> u64,
+) -> Option<Node<P>> {
+    let mut rev = nodes.into_iter().rev();
+    let mut acc = rev.next()?;
+    let mut count = 1usize;
+    for n in rev {
+        count += 1;
+        acc = Node::Split {
+            id: split_id(),
+            vertical,
+            // The first of `count` equal parts.
+            ratio: 1.0 / count as f32,
+            a: Box::new(n),
+            b: Box::new(acc),
+        };
+    }
+    Some(acc)
+}
+
 // ---- saved layout ---------------------------------------------------------
 
 /// A pane as saved for "restore tabs".
@@ -498,6 +556,80 @@ mod tests {
             "a":{"t":"pane","quick":"a@b"},"b":{"t":"pane","quick":"c@d"}}}],"active":0}"#;
         let s = SavedSession::from_json(old);
         assert!(matches!(s.tabs[0].root, SavedNode::Split { ratio, .. } if ratio == 0.5));
+    }
+
+    #[test]
+    fn grid_shapes_are_even_and_square() {
+        assert_eq!(grid_shape(0), Vec::<usize>::new());
+        assert_eq!(grid_shape(1), vec![1]);
+        assert_eq!(grid_shape(2), vec![2]);
+        assert_eq!(grid_shape(3), vec![2, 1]);
+        assert_eq!(grid_shape(4), vec![2, 2]);
+        assert_eq!(grid_shape(5), vec![3, 2]);
+        assert_eq!(grid_shape(6), vec![3, 3]);
+        assert_eq!(grid_shape(7), vec![3, 2, 2]);
+        assert_eq!(grid_shape(9), vec![3, 3, 3]);
+        assert_eq!(grid_shape(10), vec![4, 3, 3]);
+        assert_eq!(grid_shape(12), vec![4, 4, 4]);
+        for n in 1..200 {
+            let s = grid_shape(n);
+            assert_eq!(s.iter().sum::<usize>(), n);
+            let (min, max) = (s.iter().min(), s.iter().max());
+            assert!(max.zip(min).is_some_and(|(a, b)| a - b <= 1), "{n}: {s:?}");
+            // Never more rows than columns.
+            assert!(s.len() <= s[0], "{n}: {s:?}");
+        }
+    }
+
+    #[test]
+    fn grid_tree_tiles_evenly() {
+        let mut next = 100;
+        let mut ids_fn = || {
+            next += 1;
+            next
+        };
+        assert!(grid_tree(Vec::<T>::new(), &mut ids_fn).is_none());
+        let single = grid_tree(vec![T(1)], &mut ids_fn);
+        assert!(matches!(single, Some(Node::Leaf(T(1)))));
+        let n = grid_tree((1..=5).map(T).collect(), &mut ids_fn).unwrap_or(Node::Empty);
+        assert_eq!(ids(&n), vec![1, 2, 3, 4, 5]);
+        let r = n.rects();
+        let get = |id: u64| {
+            r.iter()
+                .find(|(i, _)| *i == id)
+                .map(|(_, r)| *r)
+                .unwrap_or_default()
+        };
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        // Row one: three thirds; row two: two halves; rows half the height.
+        for (id, x, w) in [
+            (1, 0.0, 1.0 / 3.0),
+            (2, 1.0 / 3.0, 1.0 / 3.0),
+            (3, 2.0 / 3.0, 1.0 / 3.0),
+        ] {
+            let (rx, ry, rw, rh) = get(id);
+            assert!(
+                close(rx, x) && close(rw, w) && close(ry, 0.0) && close(rh, 0.5),
+                "{id}"
+            );
+        }
+        for (id, x) in [(4, 0.0), (5, 0.5)] {
+            let (rx, ry, rw, rh) = get(id);
+            assert!(
+                close(rx, x) && close(rw, 0.5) && close(ry, 0.5) && close(rh, 0.5),
+                "{id}"
+            );
+        }
+        // Split ids are unique; navigation works across rows.
+        assert_eq!(n.neighbor(1, Dir::Down), Some(4));
+        assert!(n.neighbor(5, Dir::Up).is_some());
+        // Twelve panes: 4 × 3, every pane a twelfth.
+        let n = grid_tree((1..=12).map(T).collect(), &mut ids_fn).unwrap_or(Node::Empty);
+        assert!(
+            n.rects()
+                .iter()
+                .all(|(_, (_, _, w, h))| close(w * h, 1.0 / 12.0))
+        );
     }
 
     #[test]

@@ -222,6 +222,9 @@ struct SessionInteraction {
     vault: Arc<VaultManager>,
     /// Saved host (prompts offer to remember); None for quick connect.
     profile: Option<HostProfile>,
+    /// The host's name, so each prompt says which host asks (several
+    /// connect at once when a folder is opened).
+    who: String,
     state: Mutex<SessionState>,
 }
 
@@ -334,7 +337,12 @@ impl Interaction for SessionInteraction {
         let kind = self.classify(SecretUse::KeyPassphrase(path));
         self.ask(
             kind,
-            t!("prompt-passphrase-title", path = path.display().to_string()).into(),
+            t!(
+                "prompt-passphrase-title-host",
+                path = path.display().to_string(),
+                host = &self.who
+            )
+            .into(),
             &t!("prompt-passphrase-label"),
             SecretWhat::Passphrase,
         )
@@ -347,8 +355,13 @@ impl Interaction for SessionInteraction {
         instructions: &str,
         prompts: &[(String, bool)],
     ) -> Option<Vec<String>> {
+        let name = if name.is_empty() {
+            t!("prompt-server-auth-title-host", host = &self.who).to_string()
+        } else {
+            format!("{name} — {}", self.who)
+        };
         self.ui
-            .keyboard_interactive(name, instructions, prompts)
+            .keyboard_interactive(&name, instructions, prompts)
             .await
     }
 
@@ -453,6 +466,7 @@ impl Backend {
             ui: self.interaction.clone(),
             vault: self.vault.clone(),
             profile: saved.then(|| profile.clone()),
+            who: profile.name.clone(),
             state: Mutex::default(),
         });
         let mut ctx = ConnectContext::new(
@@ -776,6 +790,7 @@ impl Backend {
             ui: self.interaction.clone(),
             vault: self.vault.clone(),
             profile: None,
+            who: host.clone(),
             state: Mutex::default(),
         });
         let mut ctx = ConnectContext::new(session, Arc::new(VaultCredentials(self.vault.clone())));
@@ -829,6 +844,19 @@ pub struct FilesSession {
     pub notice: Option<String>,
 }
 
+/// Key files chosen on the welcome screen for quick connect and new hosts.
+static DEFAULT_KEYS: std::sync::RwLock<Vec<PathBuf>> = std::sync::RwLock::new(Vec::new());
+
+pub fn set_default_keys(keys: Vec<PathBuf>) {
+    if let Ok(mut k) = DEFAULT_KEYS.write() {
+        *k = keys;
+    }
+}
+
+pub fn default_keys() -> Vec<PathBuf> {
+    DEFAULT_KEYS.read().map(|k| k.clone()).unwrap_or_default()
+}
+
 /// Ad-hoc profile from quick-connect text (`user@host:port`).
 pub fn quick_profile(text: &str) -> Result<HostProfile> {
     let t = Target::parse(text)?;
@@ -836,7 +864,13 @@ pub fn quick_profile(text: &str) -> Result<HostProfile> {
     p.port = t.port_or_default();
     p.user = t.user;
     let mut auth = vec![AuthMethod::Agent];
-    if let Some(home) = home_dir() {
+    let chosen = default_keys();
+    if !chosen.is_empty() {
+        auth.extend(chosen.into_iter().map(|path| AuthMethod::KeyFile {
+            path,
+            passphrase_credential: None,
+        }));
+    } else if let Some(home) = home_dir() {
         for k in ["id_ed25519", "id_ecdsa", "id_rsa"] {
             let path = home.join(".ssh").join(k);
             if path.exists() {

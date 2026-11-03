@@ -65,6 +65,11 @@ pub struct Settings {
     pub vault_auto_lock_minutes: u32,
     /// Sync settings at startup, after changes and every few minutes.
     pub sync_auto: bool,
+    /// Host folders kept while empty (folders with hosts need no entry).
+    pub folders: Vec<String>,
+    /// Key files for quick connect and new hosts (chosen on the welcome
+    /// screen); paths, so they stay on this computer.
+    pub default_keys: Vec<String>,
 }
 
 /// Which way a settings sync goes.
@@ -102,6 +107,8 @@ impl Default for Settings {
             show_button_bar: true,
             vault_auto_lock_minutes: 0,
             sync_auto: true,
+            folders: Vec::new(),
+            default_keys: Vec::new(),
         }
     }
 }
@@ -136,13 +143,15 @@ impl Settings {
     }
 
     /// The settings other computers get: everything except what belongs to
-    /// this computer (paths, the sync folder, the app log level).
+    /// this computer (paths, the sync folder, the app log level, default
+    /// key files).
     pub fn synced_json(&self) -> String {
         let shared = Self {
             session_log_dir: String::new(),
             external_editor: String::new(),
             sync_folder: String::new(),
             log_level: String::new(),
+            default_keys: Vec::new(),
             ..self.clone()
         };
         serde_json::to_string(&shared).unwrap_or_default()
@@ -157,6 +166,7 @@ impl Settings {
                 external_editor: current.external_editor.clone(),
                 sync_folder: current.sync_folder.clone(),
                 log_level: current.log_level.clone(),
+                default_keys: current.default_keys.clone(),
                 ..s
             }
             .sanitized(),
