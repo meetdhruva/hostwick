@@ -213,6 +213,57 @@ Like WinSCP's *Synchronize* and *Keep remote directory up to date*:
 cargo run --release -p hostwick-desktop
 ```
 
+**Command palette** (Ctrl+Shift+P or Ctrl+Shift+K; ⌘K or ⌘⇧P on macOS; the
+magnifier in the sidebar header): one fuzzy search over saved hosts, recent
+connections, `~/.ssh/config` hosts not saved yet, a typed `user@host:port`
+(connect without saving, or *Save as a host…*), every app action with its
+shortcut (new host or folder, split, close pane, reconnect, broadcast, each
+settings section, key generator, known hosts, imports, *Scan this computer*,
+dark/light theme, find, open files here…), the focused terminal's snippets and
+the open tabs. Matched letters are highlighted; what you use often and
+recently ranks higher (kept in the settings database). Enter opens a terminal
+(or runs the action), Ctrl/⌘+Enter the files, Shift+Enter a new split beside
+the focused terminal, Alt+Enter edits the host; arrows, PageUp/PageDown, the
+mouse and Esc work as expected. It stays instant with thousands of hosts.
+
+**Quick connect** suggests saved hosts, recent quick connections and
+ssh_config aliases while you type (same matching as the palette): Enter takes
+the highlighted one (or connects to what you typed when it is clearly an
+address), Ctrl/⌘+Enter opens files, Up/Down choose, Esc closes the list.
+
+**Favourites and recents**: star a host (the star on its row, or right-click →
+*Add to favourites*; it is a host tag, so settings sync carries it) and it
+appears under *Favourites* at the top of the sidebar; *Recent* lists the last
+eight connections (saved hosts and quick connections). Both sections, and every
+folder, fold and stay folded.
+
+**Folders and many hosts at once**: folders nest (`prod/eu`) and can be
+created empty (*New folder* button, palette or the *Hosts* header menu),
+renamed in place (F2) or deleted (their hosts and subfolders move up one
+level, after asking). Select several hosts with Ctrl/⌘+click, Shift+click,
+Shift+arrows or Ctrl/⌘+A; drag them onto a folder (or onto the *Hosts* header to
+take them out of folders); *Edit N hosts…* changes user, port, key files, jump
+hosts, proxy, folder, keepalive, file protocol or terminal type of all of them
+— a field shows the shared value, and only fields you change are applied;
+deleting asks once. F2 renames a host in place (Enter saves, Esc cancels).
+Right-click a folder or a selection → *Open all in tabs*, *Open all in a
+grid* (one tab, panes tiled as evenly as possible) or *… with broadcast on*;
+above twelve hosts Hostwick asks first. Connections start in parallel;
+password and other questions come one at a time, each naming its host.
+
+**First run**: with no saved hosts, the main area offers to import what this
+computer already has — `~/.ssh/config`, PuTTY sessions (registry), WinSCP
+sites (registry or `WinSCP.ini`), a Solar-PuTTY JSON export in Documents,
+Downloads or Desktop — with the number of hosts in each, the keys your SSH
+agent or Pageant holds, and the key files in `~/.ssh` (tick to use them for
+quick connect and new hosts). One *Import selected* button, or *Skip*. The
+same screen is under Import… → *Scan this computer…*. The search runs in the
+background; sources that are missing are not shown.
+
+**Cheat sheet**: F1 (or Ctrl+/ outside a terminal, Ctrl+Shift+/ anywhere, or
+the ? button) lists every shortcut, grouped and searchable, written the way
+your platform writes keys.
+
 Sidebar with saved hosts (folders, search, quick connect, an SSH/TEL/COM badge
 per host), terminal and file tabs with split panes, a transfer queue with
 progress and cancel, and broadcast input to every open terminal. Host-key,
@@ -267,11 +318,16 @@ and *Settings sync…*.
 stopping: X11 not available, touch your security key, a key file that could
 not be used, a saved forward that failed (repeats are suppressed).
 
+Menu items show their shortcut on the right.
+
 **Right-click everywhere**
 
 | Where | Menu |
 |---|---|
-| Saved host | Open terminal, Open files, Edit…, Duplicate, Copy address, Delete… |
+| Saved host | Open terminal, Open files, Open in a new split, Edit…, Rename, Duplicate, Add to / Remove from favourites, Copy address, Delete… |
+| Several selected hosts | Open all in tabs / in a grid / in a grid with broadcast on / in file browsers, Edit N hosts…, favourites, Delete N hosts… |
+| Folder | Open all in tabs / in a grid / in a grid with broadcast on, New subfolder, Rename, Delete folder… |
+| *Hosts* / *Favourites* / *Recent* header | New folder / open all favourites / Clear recent connections |
 | Tab | Reconnect, Split right/down, Send break (telnet/serial), Follow terminal folder (linked file browser), Duplicate, Open files/terminal, Close, Close others, Close all |
 | Terminal | Copy, Paste, Select all, Find…, Snippets ▸, Copy current folder, Send break (telnet/serial), Stop script, Clear scrollback, Log session to file… / Stop, Open files here / Open files (SSH), Split right, Split down, Duplicate, Reconnect |
 | File | Open, Edit (F4), Upload/Download (F5), Move (F6), Rename… (F2), Delete…, New folder… (F7), New symlink…, Copy path, Refresh, Properties (Alt+Enter) |
@@ -419,6 +475,8 @@ always go to the shell):
 
 | Keys | Action |
 |---|---|
+| Ctrl+Shift+P or Ctrl+Shift+K (⌘K / ⌘⇧P) | Command palette |
+| F1, Ctrl+/ (outside terminals), Ctrl+Shift+/ (anywhere) | Keyboard shortcut cheat sheet |
 | Ctrl+Shift+N | New host |
 | Ctrl+Shift+T | Duplicate current tab |
 | Ctrl+Shift+D / Ctrl+Shift+E (⌘D / ⌘⇧D) | Split the terminal right / down |
@@ -451,8 +509,10 @@ why it failed (for example `key work.ppk: wrong passphrase; password: rejected`)
 through the sidebar, the tab bar and the open tab; inside a terminal Tab
 belongs to the shell, so Ctrl+F6 / Ctrl+Shift+F6 moves between the host
 list, the tab bar and the session. In the host list the arrows, Home/End and
-PageUp/PageDown choose a host, Enter opens a terminal, Shift+Enter files, F2
-edits, Delete deletes (after a confirmation). In the tab bar Left/Right
+PageUp/PageDown move (Shift extends the selection, Left/Right fold folders),
+Enter opens a terminal, Ctrl+Enter the files, Shift+Enter a new split,
+Alt+Enter edits, F2 renames, Space marks, Ctrl+A marks all, Delete deletes
+(after a confirmation). In the tab bar Left/Right
 switch tabs, Enter or Down goes into the tab, Delete closes it. Shift+F10 or
 the Menu key opens the context menu of whatever has focus (host, tab, file
 row, terminal). File lists add Space to toggle a row. Dialogs: Escape

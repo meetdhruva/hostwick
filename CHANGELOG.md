@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+**Desktop: think less, click less**
+- Command palette (Ctrl+Shift+P / Ctrl+Shift+K, ⌘K / ⌘⇧P, or the magnifier in the sidebar): fuzzy search over saved hosts, recent connections, unsaved `~/.ssh/config` hosts, a typed `user@host:port` (connect or save), every app action with its shortcut, snippets and open tabs; matched letters highlighted, ranking boosted by how often and how recently things were used (stored in the settings database); Enter terminal, Ctrl/⌘+Enter files, Shift+Enter new split, Alt+Enter edit; grouped results, at most 50, instant with thousands of hosts.
+- Quick connect suggests saved hosts, recent quick connections and ssh_config aliases as you type; Enter picks the highlighted one or connects to the typed address, Ctrl/⌘+Enter opens files.
+- Favourites (star on the row or right-click; stored as a host tag, so they sync) and the last eight connections in collapsible *Favourites* and *Recent* sections above the folder tree.
+- Folders are a real tree: nested, collapsible (remembered), created empty (*New folder*), renamed in place, deleted with their hosts moving up a level. Drag hosts onto a folder (or the *Hosts* header) to move them.
+- Multi-selection in the host list (Ctrl/⌘+click, Shift+click, Shift+arrows, Space, Ctrl/⌘+A); bulk edit of user, port, key files, jump hosts, proxy, folder, keepalive, file protocol and terminal type (only changed fields are applied, protocol-aware); bulk delete with one confirmation; F2 renames a host or folder in place.
+- Open a folder or a selection in tabs, in a grid (one tab, evenly tiled) or in a grid with broadcast on; asks first above twelve hosts. Connections start in parallel; key-passphrase and keyboard-interactive prompts now name their host.
+- Keyboard shortcut cheat sheet (F1 and Ctrl+/ outside terminals, Ctrl+Shift+/ anywhere, the ? button): grouped, searchable, platform-correct. Context menus show shortcuts right-aligned.
+- First run: a welcome screen finds `~/.ssh/config`, PuTTY and WinSCP sessions, WinSCP.ini, a Solar-PuTTY export, agent keys and `~/.ssh` key files (in the background) and imports the ticked ones at once; later under Import… → *Scan this computer…*. Chosen key files are used by quick connect and new hosts.
+- Palette action to switch between dark and light theme.
+- Host list keys changed to match the palette: Enter terminal, Ctrl/⌘+Enter files (was Shift+Enter), Shift+Enter new split, Alt+Enter edit, F2 rename (was edit).
+
+**SSH**
+- `hostwick_ssh::agent_key_names()` lists the running agent's keys (with a timeout).
+
 ## 0.3.0
 
 **Security and reliability**
