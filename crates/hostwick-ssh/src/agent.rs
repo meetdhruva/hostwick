@@ -45,3 +45,30 @@ pub(crate) async fn connect_stream()
         Err(_) => Err(SshError::Agent("the local agent did not answer".into())),
     }
 }
+
+/// The keys the running agent (Pageant, the OpenSSH agent, 1Password…)
+/// offers, as their comments (or key type when there is none). Gives up
+/// after a few seconds, so a wedged agent never stalls the caller.
+pub async fn agent_key_names() -> Result<Vec<String>, SshError> {
+    let list = async {
+        let mut agent = connect().await?;
+        agent
+            .request_identities()
+            .await
+            .map_err(|e| SshError::Agent(format!("agent did not list its keys ({e})")))
+    };
+    let ids = tokio::time::timeout(std::time::Duration::from_secs(3), list)
+        .await
+        .map_err(|_| SshError::Agent("the local agent did not answer".into()))??;
+    Ok(ids
+        .iter()
+        .map(|id| {
+            let c = id.comment().trim();
+            if c.is_empty() {
+                id.public_key().algorithm().to_string()
+            } else {
+                c.to_owned()
+            }
+        })
+        .collect())
+}

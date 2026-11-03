@@ -23,6 +23,7 @@ mod proxy;
 mod shell;
 mod x11;
 
+pub use agent::agent_key_names;
 pub use connection::{ConnectContext, Connection, connect_via_proxy};
 pub use error::SshError;
 pub use exec::ExecOutput;
