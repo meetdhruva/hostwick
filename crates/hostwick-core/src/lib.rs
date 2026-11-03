@@ -4,12 +4,14 @@
 //! depend on it; it depends on nothing of theirs.
 
 mod backoff;
+mod environment;
 mod options;
 mod profile;
 mod sessionlog;
 mod target;
 
 pub use backoff::Backoff;
+pub use environment::{Environment, parse_hex_color};
 pub use options::{
     FileProtocol, FlowControl, HighlightRule, Parity, Protocol, ProxyKind, ProxySpec, ScriptStep,
     SerialSettings, Snippet, SudoOptions, parse_login_script,

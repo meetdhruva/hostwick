@@ -268,6 +268,15 @@ impl Connection {
         ExecOutput::collect(session).await
     }
 
+    /// Round-trip time to the server: one SSH keepalive request, answered
+    /// by the server's transport layer (no channel, no process). Used by
+    /// the terminal status bar.
+    pub async fn ping(&self) -> Result<std::time::Duration, SshError> {
+        let start = std::time::Instant::now();
+        self.handle().send_ping().await?;
+        Ok(start.elapsed())
+    }
+
     /// Raw stream for a subsystem (e.g. `sftp`).
     pub async fn open_subsystem(&self, name: &str) -> Result<ChannelStream<Msg>, SshError> {
         let ch = self.handle().channel_open_session().await?;
