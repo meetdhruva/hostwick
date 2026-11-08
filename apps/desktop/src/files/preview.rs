@@ -354,12 +354,14 @@ pub fn decode_text(bytes: &[u8], cut: bool) -> Decoded {
     if let Some(enc) = bom_utf16(bytes) {
         let body = &bytes[2..];
         let units: Vec<u16> = body
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|p| {
                 if enc == Encoding::Utf16Le {
-                    u16::from_le_bytes([p[0], p[1]])
+                    u16::from_le_bytes(*p)
                 } else {
-                    u16::from_be_bytes([p[0], p[1]])
+                    u16::from_be_bytes(*p)
                 }
             })
             .collect();
