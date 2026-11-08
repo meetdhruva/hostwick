@@ -4,8 +4,8 @@
 use crate::shortcuts::Sc;
 use std::sync::Arc;
 
+use crate::zoom::px;
 use gpui_kit::accesskit::Role;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _};
@@ -14,7 +14,7 @@ use gpui_kit::*;
 use hostwick_sftp::{Entry, EntryKind, RemoteFs};
 
 use super::FilesView;
-use super::ops::{Selection, SortKey, sort_entries};
+use super::ops::{Selection, SortKey, matches_filter, sort_entries};
 use crate::util::{human_size, local_time, mode_string};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -35,7 +35,17 @@ impl Side {
 pub struct Pane {
     pub fs: Arc<dyn RemoteFs>,
     pub cwd: String,
+    /// What is shown: `all` through the filter, sorted.
     pub entries: Vec<Entry>,
+    /// The folder's listing as loaded.
+    pub all: Vec<Entry>,
+    /// Typing in the list (or the header field) narrows the rows.
+    pub filter: String,
+    pub filter_input: Entity<InputState>,
+    /// The filter field must show `filter` (it was typed in the list).
+    pub filter_dirty: bool,
+    /// The path bar shows an editable text field instead of crumbs.
+    pub editing_path: bool,
     pub sort: SortKey,
     pub ascending: bool,
     pub sel: Selection,
@@ -55,25 +65,56 @@ impl Pane {
         fs: Arc<dyn RemoteFs>,
         window: &mut Window,
         cx: &mut Context<FilesView>,
-    ) -> (Self, Subscription) {
+    ) -> (Self, Vec<Subscription>) {
         let path_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(t!("files-path-placeholder")));
-        let sub = cx.subscribe_in(
+        let filter_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(t!("files-filter-placeholder")));
+        let path_sub = cx.subscribe_in(
             &path_input,
             window,
-            move |this: &mut FilesView, input, ev: &InputEvent, _, cx| {
-                if let InputEvent::PressEnter { .. } = ev {
+            move |this: &mut FilesView, input, ev: &InputEvent, window, cx| match ev {
+                InputEvent::PressEnter { .. } => {
                     let path = input.read(cx).value().trim().to_string();
                     if !path.is_empty() {
                         this.navigate(side, path, cx);
                     }
+                    this.stop_editing_path(side, window, cx);
                 }
+                // Clicking away leaves the text field.
+                InputEvent::Blur => {
+                    let pane = this.pane_mut(side);
+                    if std::mem::take(&mut pane.editing_path) {
+                        cx.notify();
+                    }
+                }
+                _ => {}
+            },
+        );
+        let filter_sub = cx.subscribe_in(
+            &filter_input,
+            window,
+            move |this: &mut FilesView, input, ev: &InputEvent, window, cx| match ev {
+                InputEvent::Change => {
+                    let text = input.read(cx).value().to_string();
+                    this.set_filter(side, text, true, cx);
+                }
+                // Enter goes back to the (filtered) list.
+                InputEvent::PressEnter { .. } => {
+                    this.pane(side).focus.clone().focus(window, cx);
+                }
+                _ => {}
             },
         );
         let pane = Self {
             fs,
             cwd: String::new(),
             entries: Vec::new(),
+            all: Vec::new(),
+            filter: String::new(),
+            filter_input,
+            filter_dirty: false,
+            editing_path: false,
             sort: SortKey::Name,
             ascending: true,
             sel: Selection::default(),
@@ -86,11 +127,42 @@ impl Pane {
             generation: 0,
             load: None,
         };
-        (pane, sub)
+        (pane, vec![path_sub, filter_sub])
     }
 
     pub fn names(&self) -> Vec<&str> {
         self.entries.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    /// Rebuild the rows from the listing after the filter changed: the
+    /// cursor stays on its entry if it still matches, else goes to the
+    /// first match.
+    pub fn refilter(&mut self) {
+        let cursor = self
+            .sel
+            .cursor
+            .and_then(|i| self.entries.get(i))
+            .map(|e| e.name.clone());
+        let anchor = self
+            .sel
+            .anchor
+            .and_then(|i| self.entries.get(i))
+            .map(|e| e.name.clone());
+        self.sel.cursor = None;
+        self.sel.anchor = None;
+        self.entries = self
+            .all
+            .iter()
+            .filter(|e| matches_filter(&e.name, &self.filter))
+            .cloned()
+            .collect();
+        sort_entries(&mut self.entries, self.sort, self.ascending);
+        self.relocate(cursor, anchor);
+        if self.sel.cursor.is_none() && !self.entries.is_empty() {
+            self.sel.cursor = Some(0);
+        }
+        let names: Vec<&str> = self.entries.iter().map(|e| e.name.as_str()).collect();
+        self.sel.retain(&names);
     }
 
     /// Sort, keeping the cursor and anchor on the same entries.
@@ -197,6 +269,11 @@ impl FilesView {
             pane.path_input
                 .update(cx, |s, cx| s.set_value(cwd, window, cx));
         }
+        if std::mem::take(&mut pane.filter_dirty) {
+            let text = pane.filter.clone();
+            pane.filter_input
+                .update(cx, |s, cx| s.set_value(text, window, cx));
+        }
         if active {
             self.menu_anchor.clear();
         }
@@ -207,6 +284,7 @@ impl FilesView {
             Side::Local => t!("files-this-computer").to_string(),
             Side::Remote => format!("{} — {}", self.profile.name, pane.fs.protocol()),
         };
+        let path_bar = self.render_path_bar(side, title.clone().into(), window, cx);
         let header_cell = |key: SortKey, label: SharedString, w: Option<f32>, right: bool| {
             let arrow = if pane.sort == key {
                 if pane.ascending { " ▲" } else { " ▼" }
@@ -242,6 +320,12 @@ impl FilesView {
                 count = count,
                 size = human_size(sel_bytes)
             )
+        } else if !pane.filter.is_empty() {
+            t!(
+                "files-filtered-count",
+                count = count,
+                total = pane.all.len()
+            )
         } else {
             t!("files-item-count", count = count)
         };
@@ -274,7 +358,7 @@ impl FilesView {
                     .items_center()
                     .gap(px(6.0))
                     .px(px(8.0))
-                    .h(px(26.0))
+                    .h(px(30.0))
                     .text_size(px(12.0))
                     .when(active, |d| d.bg(theme.list_active.opacity(0.35)))
                     .text_color(if active {
@@ -292,6 +376,13 @@ impl FilesView {
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .child(title.clone()),
+                    )
+                    .child(
+                        div().flex_none().w(px(150.0)).child(
+                            Input::new(&pane.filter_input)
+                                .xsmall()
+                                .aria_label(t!("files-filter-label", side = title.clone())),
+                        ),
                     )
                     .when(elevated, |d| {
                         d.child(
@@ -312,51 +403,8 @@ impl FilesView {
                         )
                     }),
             )
-            // Path bar.
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.0))
-                    .px(px(6.0))
-                    .py(px(4.0))
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(
-                        Button::new(SharedString::from(format!("{side:?}-up")))
-                            .xsmall()
-                            .ghost()
-                            .icon(IconName::ArrowUp)
-                            .tooltip(t!("files-up-tooltip"))
-                            .accessibility_label(t!("files-up-tooltip"))
-                            .on_click(cx.listener(move |v, _, _, cx| v.up(side, cx))),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("{side:?}-refresh")))
-                            .xsmall()
-                            .ghost()
-                            .icon(IconName::RefreshCw)
-                            .tooltip(t!("files-refresh-tooltip"))
-                            .accessibility_label(t!("files-refresh-tooltip"))
-                            .on_click(cx.listener(move |v, _, _, cx| v.refresh(side, cx))),
-                    )
-                    .child(
-                        div().flex_1().child(
-                            Input::new(&pane.path_input)
-                                .xsmall()
-                                .aria_label(t!("files-path-label", side = title.clone())),
-                        ),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("{side:?}-mkdir")))
-                            .xsmall()
-                            .ghost()
-                            .icon(IconName::Plus)
-                            .tooltip(t!("files-mkdir-tooltip"))
-                            .accessibility_label(t!("files-mkdir-tooltip"))
-                            .on_click(cx.listener(move |v, _, w, cx| v.new_folder(side, w, cx))),
-                    ),
-            )
+            // Path bar: crumbs (click the empty part to type a path), bookmarks.
+            .child(path_bar)
             .when_some(pane.error.clone(), |d, err| {
                 d.child(
                     div()

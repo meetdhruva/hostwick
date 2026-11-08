@@ -301,6 +301,32 @@ click a pane (or Alt+arrow) to focus it; Ctrl+Shift+W closes the focused pane, t
 A new pane opens the same host over the same SSH connection. Broadcast input
 reaches every pane.
 
+**Tabs and windows.**
+- Ctrl+1 … Ctrl+8 (⌘1 … ⌘8) jump to that tab, Ctrl+9 to the last one; it works
+  while the terminal has focus. Middle-click closes a tab. Drag a tab to
+  reorder it (a bar shows where it lands); Ctrl+Shift+←/→ moves the focused
+  tab from the keyboard. Double-click the empty part of the tab bar for the
+  command palette. When there are more tabs than fit, the bar scrolls (mouse
+  wheel) and a **⌄** button lists every tab.
+- Drag a tab onto the edge of the current tab's panes (the zone lights up) to
+  move its panes into a split there.
+- **Reopen closed tab**: Ctrl+Shift+T (⌘⇧T) brings back the last closed tab
+  with its split layout, host and scrollback (a `— reconnected —` line marks
+  where the new connection begins). The last ten closed tabs are kept, also
+  across *Close others* / *Close all* and closed windows. *Duplicate tab* is now
+  Ctrl+Shift+U (⌘T).
+- **Windows**: tab menu → *Move to new window* or *Move to window ▸*, or drag a
+  tab out of the tab bar (onto the desktop for a new window, onto another
+  Hostwick window to move it there). All windows share the vault, settings,
+  connections and transfer queue; closing the last window quits. Window
+  positions, sizes and which tab lives in which window are remembered.
+  A file browser that moves to another window reconnects there.
+- **Zoom**: Ctrl+= / Ctrl++ zoom in, Ctrl+- zoom out, Ctrl+0 reset (⌘ on
+  macOS), or Ctrl+wheel over a terminal; each tab keeps its own size (a brief
+  "120 %" shows the level) and it is restored with the tab. *Settings →
+  Appearance → Interface size* (90–150 %) scales the whole interface for this
+  computer.
+
 **Files follow the terminal.** Right-click a terminal → *Open files here*
 opens the file browser at the shell's current folder and keeps following it
 as you `cd` (*Following terminal* in the toolbar or the tab menu turns it
@@ -459,11 +485,36 @@ is remembered per host).
   Shift+click, Ctrl+A) and keys: Enter open, Backspace up, F5 copy to the other
   side, F6 move, F2 rename, F4 edit, F7 new folder, Del delete, Ctrl+R refresh,
   Tab switch side, Alt+Enter properties, arrows/Home/End/PageUp/PageDown.
+  Ctrl+Space or Insert marks or unmarks the row (plain Space is the preview).
 - **Drag and drop** rows between the panes to copy them, onto a folder row to
   copy (or, within one side, move) into it, and drop files and folders from
   your file manager onto either side. Dragging *out* to the file manager works
   for local rows on macOS and Wayland; remote rows (and X11/Windows) cannot be
   dragged out — use Download.
+- **Path bar**: the folder is a clickable breadcrumb (`/` › `home` › `me`);
+  click a part to go there, a long path folds its first parts into a **…**
+  menu. Click the empty space (or Ctrl+L) to edit the path as text; Enter goes,
+  Esc cancels. Works for POSIX, Windows (`C:\…`) and UNC (`\\server\share`) paths.
+- **Bookmarks**: the star in the path bar (Ctrl+D) bookmarks the folder; the
+  bookmarks button lists them (hover to remove). They are kept per host (and
+  for this computer's side), and saved hosts' bookmarks sync with the host.
+- **Type to filter**: just start typing in a pane to filter its rows (a
+  filter box in the header shows it, with "3 of 41 shown"); Esc or Backspace on
+  an empty filter clears it. Type-ahead selection is replaced by this.
+- **Quick preview** (Space, like macOS Quick Look): text (first 256 KB; UTF-8,
+  UTF-16 and a Windows-1252 fallback), images (PNG, JPEG, GIF, WebP, SVG up to
+  20 MB) or, for anything else, name, size and times. ↑/↓ show the next file
+  while it is open, PageUp/PageDown scroll, Space or Esc closes. Remote files
+  are read in ranges, nothing is downloaded in full.
+- **Transfers**: each transfer can be paused and resumed (from its `.filepart`;
+  SCP transfers restart), failed ones retried (one or all), and everything
+  paused or cancelled at once. Rows show speed and ETA; the list collapses to a
+  one-line summary such as "3 running · 41 MB/s · ETA 0:42". *Show in folder*
+  reveals a finished download. When a batch finishes while Hostwick is in the
+  background (or took more than 10 s) you get a notification (also in the
+  operating system's notification centre, like the *command finished* alert
+  of the terminal). Paused and failed transfers are not kept
+  across a restart.
 - **Edit in your editor** (F4 or right-click → Edit): the file is downloaded to
   a private folder (`0700`, in the app's data directory) under its own name
   and opened with *Settings → External
@@ -545,7 +596,11 @@ always go to the shell):
 | Ctrl+Shift+P or Ctrl+Shift+K (⌘K / ⌘⇧P) | Command palette |
 | F1, Ctrl+/ (outside terminals), Ctrl+Shift+/ (anywhere) | Keyboard shortcut cheat sheet |
 | Ctrl+Shift+N | New host |
-| Ctrl+Shift+T | Duplicate current tab |
+| Ctrl+Shift+T (⌘⇧T) | Reopen the last closed tab |
+| Ctrl+Shift+U (⌘T) | Duplicate current tab |
+| Ctrl+1 … 8, Ctrl+9 (⌘1 … 9) | Go to tab 1–8 / the last tab |
+| Ctrl+Shift+← / → | Move the tab on the tab bar |
+| Ctrl+= / Ctrl+- / Ctrl+0 (⌘) | Zoom the terminal text in / out / reset (also Ctrl+wheel) |
 | Ctrl+Shift+D / Ctrl+Shift+E (⌘D / ⌘⇧D) | Split the terminal right / down |
 | Alt+←→↑↓ | Move between split panes |
 | Ctrl+Shift+W | Close the focused pane, then the tab |

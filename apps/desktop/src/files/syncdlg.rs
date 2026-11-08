@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use crate::zoom::px;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};

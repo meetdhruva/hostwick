@@ -5,6 +5,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::rc::Rc;
 
+use crate::zoom::px;
 use gpui_kit::accesskit::Role;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Enter, Escape, Input, MoveDown, MoveUp};

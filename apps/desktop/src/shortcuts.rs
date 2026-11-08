@@ -2,6 +2,7 @@
 //! writes it: for the cheat sheet, the command palette and the hints in
 //! context menus.
 
+use crate::zoom::px;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::*;
@@ -49,6 +50,11 @@ pub enum Sc {
     CycleFocus,
     ContextMenu,
     DuplicateTab,
+    ReopenTab,
+    TabNumber,
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
     ClosePane,
     Reconnect,
     NextTab,
@@ -88,10 +94,14 @@ pub enum Sc {
     FilesProperties,
     FilesSelectAll,
     FilesToggleRow,
+    FilesPreview,
+    FilesPath,
+    FilesBookmark,
+    FilesFilter,
 }
 
 impl Sc {
-    pub const ALL: [Sc; 47] = [
+    pub const ALL: [Sc; 56] = [
         Sc::Palette,
         Sc::Shortcuts,
         Sc::NewHost,
@@ -100,6 +110,11 @@ impl Sc {
         Sc::CycleFocus,
         Sc::ContextMenu,
         Sc::DuplicateTab,
+        Sc::ReopenTab,
+        Sc::TabNumber,
+        Sc::ZoomIn,
+        Sc::ZoomOut,
+        Sc::ZoomReset,
         Sc::ClosePane,
         Sc::Reconnect,
         Sc::NextTab,
@@ -139,6 +154,10 @@ impl Sc {
         Sc::FilesProperties,
         Sc::FilesSelectAll,
         Sc::FilesToggleRow,
+        Sc::FilesPreview,
+        Sc::FilesPath,
+        Sc::FilesBookmark,
+        Sc::FilesFilter,
     ];
 
     /// The keys, as written on this platform.
@@ -151,7 +170,12 @@ impl Sc {
             Sc::Broadcast => keys("Ctrl+Shift+B", "⌘B"),
             Sc::CycleFocus => keys("Ctrl+F6 · Ctrl+Shift+F6", "⌃F6 · ⌃⇧F6"),
             Sc::ContextMenu => keys("Shift+F10 · Menu", "⇧F10"),
-            Sc::DuplicateTab => keys("Ctrl+Shift+T", "⌘T"),
+            Sc::DuplicateTab => keys("Ctrl+Shift+U", "⌘T"),
+            Sc::ReopenTab => keys("Ctrl+Shift+T", "⌘⇧T"),
+            Sc::TabNumber => keys("Ctrl+1…8 · Ctrl+9", "⌘1…8 · ⌘9"),
+            Sc::ZoomIn => keys("Ctrl+= · Ctrl++ · Ctrl+wheel", "⌘= · ⌘+ · ⌘-wheel"),
+            Sc::ZoomOut => keys("Ctrl+-", "⌘-"),
+            Sc::ZoomReset => keys("Ctrl+0", "⌘0"),
             Sc::ClosePane => keys("Ctrl+Shift+W", "⌘W"),
             Sc::Reconnect => keys("Ctrl+Shift+R", "⌘R"),
             Sc::NextTab => keys("Ctrl+Tab", "⌃Tab"),
@@ -190,7 +214,11 @@ impl Sc {
             Sc::FilesSwitchSide => "Tab",
             Sc::FilesProperties => keys("Alt+Enter", "⌥↩"),
             Sc::FilesSelectAll => keys("Ctrl+A", "⌘A"),
-            Sc::FilesToggleRow => "Space",
+            Sc::FilesToggleRow => keys("Ctrl+Space · Insert", "⌘Space · Insert"),
+            Sc::FilesPreview => "Space",
+            Sc::FilesPath => keys("Ctrl+L", "⌘L"),
+            Sc::FilesBookmark => keys("Ctrl+D", "⌘D"),
+            Sc::FilesFilter => keys("type · Ctrl+F", "type · ⌘F"),
         }
     }
 
@@ -206,8 +234,10 @@ impl Sc {
             Palette | Shortcuts | NewHost | Settings | Broadcast | CycleFocus | ContextMenu => {
                 Group::App
             }
-            DuplicateTab | ClosePane | Reconnect | NextTab | PrevTab | SplitRight | SplitDown
-            | MovePane | ResizePane => Group::Tabs,
+            DuplicateTab | ReopenTab | TabNumber | ZoomIn | ZoomOut | ZoomReset | ClosePane
+            | Reconnect | NextTab | PrevTab | SplitRight | SplitDown | MovePane | ResizePane => {
+                Group::Tabs
+            }
             HostOpen | HostFiles | HostSplit | HostEdit | HostRename | HostDelete
             | HostSelectAll | HostMultiSelect | HostRangeSelect => Group::Hosts,
             Copy | Paste | Find | FindNext | ScrollBack | SelectInApp | SendBreak | ReadOutput
@@ -226,6 +256,11 @@ impl Sc {
             Sc::CycleFocus => t!("keys-cycle-focus"),
             Sc::ContextMenu => t!("keys-context-menu"),
             Sc::DuplicateTab => t!("keys-duplicate-tab"),
+            Sc::ReopenTab => t!("keys-reopen-tab"),
+            Sc::TabNumber => t!("keys-tab-number"),
+            Sc::ZoomIn => t!("keys-zoom-in"),
+            Sc::ZoomOut => t!("keys-zoom-out"),
+            Sc::ZoomReset => t!("keys-zoom-reset"),
             Sc::ClosePane => t!("keys-close-pane"),
             Sc::Reconnect => t!("keys-reconnect"),
             Sc::NextTab => t!("keys-next-tab"),
@@ -265,6 +300,10 @@ impl Sc {
             Sc::FilesProperties => t!("keys-files-properties"),
             Sc::FilesSelectAll => t!("keys-files-select-all"),
             Sc::FilesToggleRow => t!("keys-files-toggle-row"),
+            Sc::FilesPreview => t!("keys-files-preview"),
+            Sc::FilesPath => t!("keys-files-path"),
+            Sc::FilesBookmark => t!("keys-files-bookmark"),
+            Sc::FilesFilter => t!("keys-files-filter"),
         }
     }
 }

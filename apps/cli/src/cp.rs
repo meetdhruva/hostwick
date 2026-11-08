@@ -254,7 +254,7 @@ pub(crate) async fn drive(
     let mut labels = std::collections::HashMap::new();
     while remaining > 0 {
         match events.recv().await {
-            Ok(TransferEvent::Queued { id, label }) => {
+            Ok(TransferEvent::Queued { id, label, .. }) => {
                 labels.insert(id, label);
             }
             Ok(TransferEvent::Progress {

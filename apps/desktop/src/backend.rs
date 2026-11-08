@@ -443,7 +443,16 @@ impl Backend {
         let store = SqliteStore::open(&paths.db).context("opening profile database")?;
         let engine = {
             let _guard = rt.enter();
-            TransferEngine::new(EngineConfig::default())
+            // HOSTWICK_TRANSFER_RATE (bytes per second) caps all transfers:
+            // for demos and for testing pause, resume and ETA on a fast link.
+            let rate_limit = std::env::var("HOSTWICK_TRANSFER_RATE")
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .filter(|r| *r > 0);
+            TransferEngine::new(EngineConfig {
+                rate_limit,
+                ..EngineConfig::default()
+            })
         };
         Ok(Self {
             rt,

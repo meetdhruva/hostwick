@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::TransferError;
-use crate::copy::{CopySpec, ExistingPolicy, Outcome, copy_file};
+use crate::copy::{CopySpec, ExistingPolicy, Outcome, PauseGate, copy_file};
 use crate::rate::RateLimiter;
 use crate::sync::walk;
 
@@ -40,6 +40,16 @@ pub enum TransferEvent {
     Queued {
         id: TransferId,
         label: String,
+        /// Where the file goes, and whether that is a folder on this
+        /// computer (for "show in folder").
+        dst_path: String,
+        dst_local: bool,
+        /// Where it comes from, and whether that is this computer.
+        src_path: String,
+        src_local: bool,
+        /// A retry of this earlier (failed or cancelled) transfer, which it
+        /// replaces in lists.
+        replaces: Option<TransferId>,
     },
     Progress {
         id: TransferId,
@@ -51,6 +61,10 @@ pub enum TransferEvent {
         id: TransferId,
         state: TransferState,
     },
+    /// One transfer was paused or resumed.
+    Paused { id: TransferId, paused: bool },
+    /// Every transfer was paused (or resumed) at once.
+    PausedAll { paused: bool },
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +106,13 @@ impl Job {
 struct Slot {
     cancel: CancellationToken,
     state: watch::Receiver<TransferState>,
+    /// Kept to retry the transfer after it failed.
+    job: Job,
+    paused: watch::Sender<bool>,
+}
+
+fn is_local(fs: &Arc<dyn RemoteFs>) -> bool {
+    fs.protocol() == "local"
 }
 
 /// Queue + worker pool for file transfers. Cheap to clone.
@@ -103,6 +124,7 @@ pub struct TransferEngine {
     events: broadcast::Sender<TransferEvent>,
     jobs: Arc<Mutex<HashMap<TransferId, Slot>>>,
     root_cancel: CancellationToken,
+    paused_all: Arc<watch::Sender<bool>>,
 }
 
 impl TransferEngine {
@@ -115,6 +137,7 @@ impl TransferEngine {
             events,
             jobs: Arc::default(),
             root_cancel: CancellationToken::new(),
+            paused_all: Arc::new(watch::channel(false).0),
         }
     }
 
@@ -125,26 +148,39 @@ impl TransferEngine {
     }
 
     pub fn enqueue(&self, job: Job) -> TransferId {
+        self.enqueue_inner(job, None)
+    }
+
+    fn enqueue_inner(&self, job: Job, replaces: Option<TransferId>) -> TransferId {
         let id = TransferId(Uuid::new_v4());
         let cancel = self.root_cancel.child_token();
         let (state_tx, state_rx) = watch::channel(TransferState::Queued);
+        let (pause_tx, pause_rx) = watch::channel(false);
         if let Ok(mut jobs) = self.jobs.lock() {
             jobs.insert(
                 id,
                 Slot {
                     cancel: cancel.clone(),
                     state: state_rx,
+                    job: job.clone(),
+                    paused: pause_tx,
                 },
             );
         }
         let _ = self.events.send(TransferEvent::Queued {
             id,
             label: job.label(),
+            dst_path: job.dst_path.clone(),
+            dst_local: is_local(&job.dst),
+            src_path: job.src_path.clone(),
+            src_local: is_local(&job.src),
+            replaces,
         });
 
+        let gate = PauseGate::new(pause_rx, self.paused_all.subscribe());
         let this = self.clone();
         tokio::spawn(async move {
-            let state = this.run(id, &job, &cancel, &state_tx).await;
+            let state = this.run(id, &job, &cancel, &state_tx, gate).await;
             let _ = state_tx.send(state.clone());
             let _ = this.events.send(TransferEvent::Finished { id, state });
         });
@@ -157,19 +193,29 @@ impl TransferEngine {
         job: &Job,
         cancel: &CancellationToken,
         state_tx: &watch::Sender<TransferState>,
+        mut gate: PauseGate,
     ) -> TransferState {
-        let _permit = tokio::select! {
-            p = self.permits.clone().acquire_owned() => match p {
-                Ok(p) => p,
-                Err(_) => return TransferState::Cancelled,
-            },
-            _ = cancel.cancelled() => return TransferState::Cancelled,
-        };
-        let _ = state_tx.send(TransferState::Running);
-
         let mut backoff = Backoff::new(Duration::from_millis(500), Duration::from_secs(15))
             .with_max_attempts(self.cfg.max_attempts.saturating_sub(1));
         loop {
+            // A paused transfer holds no slot: wait here, not in the queue.
+            tokio::select! {
+                _ = gate.resumed() => {}
+                _ = cancel.cancelled() => return TransferState::Cancelled,
+            }
+            let permit = tokio::select! {
+                p = self.permits.clone().acquire_owned() => match p {
+                    Ok(p) => p,
+                    Err(_) => return TransferState::Cancelled,
+                },
+                _ = cancel.cancelled() => return TransferState::Cancelled,
+            };
+            if gate.is_paused() {
+                // Paused while waiting for a slot.
+                continue;
+            }
+            let _ = state_tx.send(TransferState::Running);
+
             let spec = CopySpec {
                 src: &job.src,
                 src_path: &job.src_path,
@@ -178,6 +224,7 @@ impl TransferEngine {
                 policy: job.policy,
                 cancel,
                 rate: self.rate.as_ref(),
+                pause: gate.clone(),
             };
             let started = Instant::now();
             let mut first: Option<u64> = None;
@@ -194,6 +241,7 @@ impl TransferEngine {
                 });
             })
             .await;
+            drop(permit);
             match result {
                 Ok(Outcome::Copied {
                     bytes,
@@ -206,6 +254,11 @@ impl TransferEngine {
                 }
                 Ok(Outcome::Skipped) => return TransferState::Skipped,
                 Err(TransferError::Cancelled) => return TransferState::Cancelled,
+                // Back to the top: wait for the resume, then continue from
+                // the partial file.
+                Err(TransferError::Paused) => {
+                    let _ = state_tx.send(TransferState::Queued);
+                }
                 Err(e) if e.is_transient() => match backoff.next_delay() {
                     Some(d) => {
                         tracing::warn!(error = %e, delay = ?d, "transfer failed; retrying with resume");
@@ -278,6 +331,68 @@ impl TransferEngine {
                 slot.cancel.cancel();
             }
         }
+    }
+
+    /// Pause one transfer: the stream stops and the partial file stays;
+    /// [`TransferEngine::resume`] continues from it (protocols that cannot
+    /// continue, like SCP, start over). A queued transfer waits without
+    /// taking a slot.
+    pub fn pause(&self, id: TransferId) {
+        self.set_paused(id, true);
+    }
+
+    pub fn resume(&self, id: TransferId) {
+        self.set_paused(id, false);
+    }
+
+    fn set_paused(&self, id: TransferId, paused: bool) {
+        let changed = self.jobs.lock().ok().is_some_and(|jobs| {
+            jobs.get(&id).is_some_and(|s| {
+                !s.state.borrow().is_finished() && s.paused.send_replace(paused) != paused
+            })
+        });
+        if changed {
+            let _ = self.events.send(TransferEvent::Paused { id, paused });
+        }
+    }
+
+    /// Pause every transfer, including ones queued later, until
+    /// [`TransferEngine::resume_all`].
+    pub fn pause_all(&self) {
+        self.set_paused_all(true);
+    }
+
+    pub fn resume_all(&self) {
+        self.set_paused_all(false);
+    }
+
+    fn set_paused_all(&self, paused: bool) {
+        if self.paused_all.send_replace(paused) != paused {
+            let _ = self.events.send(TransferEvent::PausedAll { paused });
+        }
+    }
+
+    pub fn is_paused_all(&self) -> bool {
+        *self.paused_all.borrow()
+    }
+
+    /// Run a failed (or cancelled) transfer again as a new one; a partial
+    /// file left by the first try is continued. `None` when `id` is unknown
+    /// or has not ended in failure or cancellation.
+    pub fn retry(&self, id: TransferId) -> Option<TransferId> {
+        let job = {
+            let jobs = self.jobs.lock().ok()?;
+            let slot = jobs.get(&id)?;
+            match &*slot.state.borrow() {
+                TransferState::Failed { .. } | TransferState::Cancelled => {}
+                _ => return None,
+            }
+            slot.job.clone()
+        };
+        if let Ok(mut jobs) = self.jobs.lock() {
+            jobs.remove(&id);
+        }
+        Some(self.enqueue_inner(job, Some(id)))
     }
 
     pub fn state(&self, id: TransferId) -> Option<TransferState> {

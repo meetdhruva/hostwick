@@ -9,6 +9,7 @@
 
 use std::time::Duration;
 
+use crate::zoom::px;
 use gpui_kit::accesskit::{Live, Role};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _};
@@ -132,6 +133,20 @@ impl ToastExt for Window {
         push(toast, cx);
         self.refresh();
     }
+}
+
+/// A notification in the operating system's notification centre (for things
+/// that finish while the window is not in front, such as a transfer batch).
+/// This is the one path to the system: the finished-command alert goes through
+/// the same library call (`Notification::system`). Does nothing where the
+/// platform has no notifications or the user denied them.
+pub fn system(tag: &'static str, title: &str, body: &str, cx: &App) {
+    cx.show_system_notification(SystemNotification {
+        tag: tag.into(),
+        title: title.to_owned().into(),
+        body: body.to_owned().into(),
+        actions: Vec::new(),
+    });
 }
 
 /// Show a notification in every window (there is one).

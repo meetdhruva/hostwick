@@ -6,6 +6,7 @@ pub mod knownhosts;
 
 use std::path::{Path, PathBuf};
 
+use crate::zoom::px;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 

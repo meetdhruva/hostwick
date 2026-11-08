@@ -11,6 +11,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::zoom::px;
 use bytes::Bytes;
 use gpui_kit::accesskit::Role;
 use gpui_kit::component::button::{Button, ButtonVariants as _};

@@ -72,6 +72,8 @@ pub struct Settings {
     /// Key files for quick connect and new hosts (chosen on the welcome
     /// screen); paths, so they stay on this computer.
     pub default_keys: Vec<String>,
+    /// Size of the whole interface in percent (90–150), for this screen.
+    pub ui_scale: u32,
 }
 
 /// Which way a settings sync goes.
@@ -112,6 +114,7 @@ impl Default for Settings {
             sync_auto: true,
             folders: Vec::new(),
             default_keys: Vec::new(),
+            ui_scale: 100,
         }
     }
 }
@@ -155,6 +158,7 @@ impl Settings {
             sync_folder: String::new(),
             log_level: String::new(),
             default_keys: Vec::new(),
+            ui_scale: 100,
             ..self.clone()
         };
         serde_json::to_string(&shared).unwrap_or_default()
@@ -170,6 +174,7 @@ impl Settings {
                 sync_folder: current.sync_folder.clone(),
                 log_level: current.log_level.clone(),
                 default_keys: current.default_keys.clone(),
+                ui_scale: current.ui_scale,
                 ..s
             }
             .sanitized(),
@@ -183,6 +188,7 @@ impl Settings {
     /// Clamp values a hand-edited database might contain.
     pub fn sanitized(mut self) -> Self {
         self.font_size = self.font_size.clamp(6.0, 48.0);
+        self.ui_scale = crate::zoom::clamp_ui_scale(self.ui_scale);
         self.vault_auto_lock_minutes = self.vault_auto_lock_minutes.min(24 * 60);
         self.scrollback_lines = self.scrollback_lines.clamp(100, 1_000_000);
         self.term = self.term.clamped();

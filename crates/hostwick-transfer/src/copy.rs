@@ -8,6 +8,46 @@ use tokio_util::sync::CancellationToken;
 
 use crate::TransferError;
 use crate::rate::RateLimiter;
+use tokio::sync::watch;
+
+/// Pause switches of one job: its own and the engine-wide one. Either being
+/// set pauses the copy.
+#[derive(Clone)]
+pub(crate) struct PauseGate {
+    job: watch::Receiver<bool>,
+    all: watch::Receiver<bool>,
+}
+
+impl PauseGate {
+    pub(crate) fn new(job: watch::Receiver<bool>, all: watch::Receiver<bool>) -> Self {
+        Self { job, all }
+    }
+
+    pub(crate) fn is_paused(&self) -> bool {
+        *self.job.borrow() || *self.all.borrow()
+    }
+
+    /// Resolves when paused (at once if it already is).
+    pub(crate) async fn paused(&mut self) {
+        while !self.is_paused() {
+            self.changed().await;
+        }
+    }
+
+    /// Resolves when not paused.
+    pub(crate) async fn resumed(&mut self) {
+        while self.is_paused() {
+            self.changed().await;
+        }
+    }
+
+    async fn changed(&mut self) {
+        tokio::select! {
+            r = self.job.changed() => if r.is_err() { std::future::pending::<()>().await },
+            r = self.all.changed() => if r.is_err() { std::future::pending::<()>().await },
+        }
+    }
+}
 
 pub const PART_SUFFIX: &str = ".filepart";
 const CHUNK: usize = 256 * 1024;
@@ -41,6 +81,7 @@ pub(crate) struct CopySpec<'a> {
     pub policy: ExistingPolicy,
     pub cancel: &'a CancellationToken,
     pub rate: Option<&'a RateLimiter>,
+    pub pause: PauseGate,
 }
 
 /// Copy one file with resume. `progress(done, total)` is called at most
@@ -94,6 +135,7 @@ pub(crate) async fn copy_file(
 
     if let Some((mut reader, mut writer)) = streams {
         let mut buf = vec![0u8; CHUNK];
+        let mut gate = s.pause.clone();
         let mut last_tick = tokio::time::Instant::now();
         loop {
             let n = tokio::select! {
@@ -102,6 +144,11 @@ pub(crate) async fn copy_file(
                     // Flush what we have so the .filepart is resumable.
                     let _ = writer.shutdown().await;
                     return Err(TransferError::Cancelled);
+                }
+                _ = gate.paused() => {
+                    // Stop the stream, keep the partial file for resuming.
+                    let _ = writer.shutdown().await;
+                    return Err(TransferError::Paused);
                 }
                 r = reader.read(&mut buf) => r?,
             };

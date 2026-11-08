@@ -6,6 +6,7 @@
 
 use std::rc::Rc;
 
+use crate::zoom::px;
 use gpui_kit::accesskit::Role;
 use gpui_kit::component::input::{
     Enter, Input, InputEvent, InputState, MoveDown, MovePageDown, MovePageUp, MoveUp,
@@ -73,6 +74,11 @@ pub(crate) enum Act {
     ClosePane,
     Reconnect,
     DuplicateTab,
+    ReopenTab,
+    MoveToNewWindow,
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
     NextTab,
     PrevTab,
     Broadcast,
@@ -108,6 +114,11 @@ impl Act {
             Act::ClosePane,
             Act::Reconnect,
             Act::DuplicateTab,
+            Act::ReopenTab,
+            Act::MoveToNewWindow,
+            Act::ZoomIn,
+            Act::ZoomOut,
+            Act::ZoomReset,
             Act::NextTab,
             Act::PrevTab,
             Act::Broadcast,
@@ -153,6 +164,11 @@ impl Act {
             Act::ClosePane => t!("menu-close-pane"),
             Act::Reconnect => t!("menu-reconnect"),
             Act::DuplicateTab => t!("keys-duplicate-tab"),
+            Act::ReopenTab => t!("keys-reopen-tab"),
+            Act::MoveToNewWindow => t!("menu-move-new-window"),
+            Act::ZoomIn => t!("keys-zoom-in"),
+            Act::ZoomOut => t!("keys-zoom-out"),
+            Act::ZoomReset => t!("keys-zoom-reset"),
             Act::NextTab => t!("keys-next-tab"),
             Act::PrevTab => t!("keys-prev-tab"),
             Act::Broadcast => t!("act-broadcast"),
@@ -197,6 +213,11 @@ impl Act {
             | Act::ClosePane
             | Act::Reconnect
             | Act::DuplicateTab
+            | Act::ReopenTab
+            | Act::MoveToNewWindow
+            | Act::ZoomIn
+            | Act::ZoomOut
+            | Act::ZoomReset
             | Act::NextTab
             | Act::PrevTab => t!("keys-group-tabs"),
             Act::Find | Act::FilesHere | Act::ReadOutput | Act::TextView => {
@@ -214,6 +235,10 @@ impl Act {
             Act::ClosePane => Sc::ClosePane,
             Act::Reconnect => Sc::Reconnect,
             Act::DuplicateTab => Sc::DuplicateTab,
+            Act::ReopenTab => Sc::ReopenTab,
+            Act::ZoomIn => Sc::ZoomIn,
+            Act::ZoomOut => Sc::ZoomOut,
+            Act::ZoomReset => Sc::ZoomReset,
             Act::NextTab => Sc::NextTab,
             Act::PrevTab => Sc::PrevTab,
             Act::Broadcast => Sc::Broadcast,
@@ -944,7 +969,11 @@ impl HostwickApp {
         match a {
             Act::SplitRight | Act::SplitDown => tab.is_some_and(|t| t.kind == TabKind::Terminal),
             Act::ClosePane | Act::Reconnect | Act::DuplicateTab | Act::OpenFiles => tab.is_some(),
-            Act::NextTab | Act::PrevTab => self.tabs.len() > 1,
+            Act::NextTab | Act::PrevTab | Act::MoveToNewWindow => self.tabs.len() > 1,
+            Act::ReopenTab => Self::has_closed_tabs(cx),
+            Act::ZoomIn | Act::ZoomOut | Act::ZoomReset => {
+                tab.is_some_and(|t| t.kind == TabKind::Terminal)
+            }
             Act::Find | Act::ReadOutput | Act::TextView => term.is_some(),
             Act::FilesHere => {
                 term.is_some_and(|t| t.read(cx).transport() == hostwick_term::TransportKind::Ssh)
@@ -1110,6 +1139,21 @@ impl HostwickApp {
                 }
             }
             Act::DuplicateTab => self.duplicate_active(window, cx),
+            Act::ReopenTab => self.reopen_closed_tab(window, cx),
+            Act::MoveToNewWindow => {
+                if let Some(id) = tab.and_then(|i| self.tabs.get(i)).map(|t| t.id) {
+                    self.move_to_new_window(id, None, window, cx);
+                }
+            }
+            Act::ZoomIn => {
+                self.zoom_active(1, cx);
+            }
+            Act::ZoomOut => {
+                self.zoom_active(-1, cx);
+            }
+            Act::ZoomReset => {
+                self.zoom_active(0, cx);
+            }
             Act::NextTab | Act::PrevTab => {
                 let n = self.tabs.len();
                 if n > 0 {

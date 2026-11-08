@@ -49,6 +49,57 @@ pub enum Dir {
     Down,
 }
 
+/// A side of a pane: where a dragged tab's panes are dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+/// How much of a pane's width or height, from each side, is a drop zone.
+pub const EDGE_BAND: f32 = 0.28;
+
+/// The drop zone under a point at (`fx`, `fy`) inside a pane (both 0..1,
+/// from the top left): the nearest side when the point is within
+/// [`EDGE_BAND`] of it, nothing in the middle.
+pub fn edge_at(fx: f32, fy: f32) -> Option<Edge> {
+    if !(fx.is_finite() && fy.is_finite()) {
+        return None;
+    }
+    let (fx, fy) = (fx.clamp(0.0, 1.0), fy.clamp(0.0, 1.0));
+    let candidates = [
+        (fx, Edge::Left),
+        (1.0 - fx, Edge::Right),
+        (fy, Edge::Top),
+        (1.0 - fy, Edge::Bottom),
+    ];
+    candidates
+        .into_iter()
+        .filter(|(d, _)| *d < EDGE_BAND)
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, e)| e)
+}
+
+/// Move the item at `from` so it lands in gap `slot` (0 = before the first,
+/// `len` = after the last), as when a tab is dropped between two others.
+/// Returns its new index, or `None` when nothing moved.
+pub fn reorder<T>(items: &mut Vec<T>, from: usize, slot: usize) -> Option<usize> {
+    if from >= items.len() {
+        return None;
+    }
+    let slot = slot.min(items.len());
+    // Dropping into the gap right before or after itself changes nothing.
+    if slot == from || slot == from + 1 {
+        return None;
+    }
+    let item = items.remove(from);
+    let to = if slot > from { slot - 1 } else { slot };
+    items.insert(to, item);
+    Some(to)
+}
+
 /// A rectangle in the unit square: x, y, w, h.
 pub type Rect = (f32, f32, f32, f32);
 
@@ -122,6 +173,40 @@ impl<P: PaneId> Node<P> {
             Node::Split { a, b, .. } => match a.split(target, new, vertical, split_id) {
                 Ok(()) => Ok(()),
                 Err(new) => b.split(target, new, vertical, split_id),
+            },
+        }
+    }
+
+    /// Put a whole subtree beside pane `target`, on its `edge` (a dragged
+    /// tab's panes become a split next to it). Gives the subtree back if
+    /// `target` is not in this tree.
+    pub fn insert_at(
+        &mut self,
+        target: u64,
+        edge: Edge,
+        subtree: Node<P>,
+        split_id: u64,
+    ) -> Result<(), Node<P>> {
+        match self {
+            Node::Leaf(p) if p.pane_id() == target => {
+                let old = std::mem::replace(self, Node::Empty);
+                let (first, second) = match edge {
+                    Edge::Left | Edge::Top => (subtree, old),
+                    Edge::Right | Edge::Bottom => (old, subtree),
+                };
+                *self = Node::Split {
+                    id: split_id,
+                    vertical: matches!(edge, Edge::Top | Edge::Bottom),
+                    ratio: 0.5,
+                    a: Box::new(first),
+                    b: Box::new(second),
+                };
+                Ok(())
+            }
+            Node::Leaf(_) | Node::Empty => Err(subtree),
+            Node::Split { a, b, .. } => match a.insert_at(target, edge, subtree, split_id) {
+                Ok(()) => Ok(()),
+                Err(sub) => b.insert_at(target, edge, sub, split_id),
             },
         }
     }
@@ -367,13 +452,68 @@ pub enum SavedKind {
 pub struct SavedTab {
     pub kind: SavedKind,
     pub root: SavedNode,
+    /// Terminal zoom in percent (absent = 100).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zoom: Option<u32>,
+}
+
+/// Where a window was, in screen pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SavedBounds {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    #[serde(default)]
+    pub maximized: bool,
+}
+
+impl SavedBounds {
+    /// Bounds that are safe to open a window with: finite, not tiny, not
+    /// absurdly large, and at least partly on screen. `screens` is the
+    /// rectangle (left, top, right, bottom) covering every display: a
+    /// monitor that has been unplugged since must not strand the window.
+    pub fn usable(self, screens: Option<(f32, f32, f32, f32)>) -> Option<Self> {
+        let finite = [self.x, self.y, self.w, self.h]
+            .iter()
+            .all(|v| v.is_finite());
+        if !finite || self.w < 320.0 || self.h < 240.0 || self.w > 20_000.0 || self.h > 20_000.0 {
+            return None;
+        }
+        if let Some((l, t, r, b)) = screens
+            && (self.x > r - 80.0
+                || self.y > b - 40.0
+                || self.x + self.w < l + 80.0
+                || self.y + self.h < t + 40.0)
+        {
+            return None;
+        }
+        Some(self)
+    }
+}
+
+/// A second window and its tabs.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SavedWindow {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bounds: Option<SavedBounds>,
+    pub tabs: Vec<SavedTab>,
+    #[serde(default)]
+    pub active: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SavedSession {
+    /// The first window's tabs (older saves have only these).
     pub tabs: Vec<SavedTab>,
     #[serde(default)]
     pub active: Option<usize>,
+    /// The first window's position and size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bounds: Option<SavedBounds>,
+    /// More windows, each with its own tabs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub windows: Vec<SavedWindow>,
 }
 
 pub const TABS_KEY: &str = "desktop.tabs";
@@ -386,19 +526,26 @@ impl SavedSession {
     /// Parse, dropping tabs that are unusable (no host to reconnect to).
     pub fn from_json(json: &str) -> Self {
         let mut s: Self = serde_json::from_str(json).unwrap_or_default();
-        s.tabs.retain(|t| t.root.usable());
+        s.tabs.retain(|t| t.root.is_usable());
         if s.active.is_some_and(|a| a >= s.tabs.len()) {
             s.active = s.tabs.len().checked_sub(1);
         }
+        for w in &mut s.windows {
+            w.tabs.retain(|t| t.root.is_usable());
+            if w.active.is_some_and(|a| a >= w.tabs.len()) {
+                w.active = w.tabs.len().checked_sub(1);
+            }
+        }
+        s.windows.retain(|w| !w.tabs.is_empty());
         s
     }
 }
 
 impl SavedNode {
-    fn usable(&self) -> bool {
+    pub fn is_usable(&self) -> bool {
         match self {
             SavedNode::Pane(p) => p.profile.is_some() || p.quick.is_some(),
-            SavedNode::Split { a, b, .. } => a.usable() && b.usable(),
+            SavedNode::Split { a, b, .. } => a.is_usable() && b.is_usable(),
         }
     }
 
@@ -498,19 +645,23 @@ mod tests {
                 SavedTab {
                     kind: SavedKind::Terminal,
                     root: tree.clone(),
+                    zoom: Some(120),
                 },
                 SavedTab {
                     kind: SavedKind::Files,
                     root: SavedNode::Pane(SavedPane::default()),
+                    zoom: None,
                 },
             ],
             active: Some(1),
+            ..Default::default()
         };
         let back = SavedSession::from_json(&s.to_json());
         // The unusable tab is dropped and `active` clamped.
         assert_eq!(back.tabs.len(), 1);
         assert_eq!(back.active, Some(0));
         assert_eq!(back.tabs[0].root, tree);
+        assert_eq!(back.tabs[0].zoom, Some(120));
         // The deleted host's pane goes; its sibling takes the whole tab.
         let pruned = tree.prune(&|p| p.profile.is_none());
         assert!(matches!(
@@ -645,10 +796,164 @@ mod tests {
             tabs: vec![SavedTab {
                 kind: SavedKind::Files,
                 root: SavedNode::Pane(p.clone()),
+                zoom: None,
             }],
             active: Some(0),
+            ..Default::default()
         };
         let back = SavedSession::from_json(&s.to_json());
         assert_eq!(back.tabs[0].root, SavedNode::Pane(p));
+    }
+
+    #[test]
+    fn dropping_a_tab_on_a_pane_edge_makes_a_split() {
+        let mut n = Node::Leaf(T(1));
+        let _ = n.split(1, T(2), false, 100); // 1 | 2
+        // A dragged tab with two panes goes to the left of pane 2.
+        let mut sub = Node::Leaf(T(10));
+        let _ = sub.split(10, T(11), true, 101); // 10 / 11
+        assert!(n.insert_at(2, Edge::Left, sub, 102).is_ok());
+        assert_eq!(ids(&n), vec![1, 10, 11, 2]);
+        assert_eq!(n.count(), 4);
+        // 10 and 11 stay stacked; the group sits between 1 and 2.
+        assert_eq!(n.neighbor(10, Dir::Left), Some(1));
+        assert_eq!(n.neighbor(11, Dir::Up), Some(10));
+        assert_eq!(n.neighbor(10, Dir::Right), Some(2));
+        // Bottom edge: below pane 1.
+        assert!(n.insert_at(1, Edge::Bottom, Node::Leaf(T(20)), 103).is_ok());
+        assert_eq!(n.neighbor(1, Dir::Down), Some(20));
+        // Top edge puts it above.
+        assert!(n.insert_at(2, Edge::Top, Node::Leaf(T(21)), 104).is_ok());
+        assert_eq!(n.neighbor(2, Dir::Up), Some(21));
+        // Right edge puts it after.
+        assert!(n.insert_at(2, Edge::Right, Node::Leaf(T(22)), 105).is_ok());
+        assert_eq!(n.neighbor(2, Dir::Right), Some(22));
+        // An unknown target gives the subtree back untouched.
+        let back = n.insert_at(99, Edge::Left, Node::Leaf(T(30)), 106);
+        assert!(matches!(back, Err(Node::Leaf(T(30)))));
+        // The panes can still be closed one by one afterwards.
+        assert_eq!(n.remove(10), Some(T(10)));
+        assert_eq!(n.count(), 6);
+    }
+
+    #[test]
+    fn drop_zones_are_the_pane_edges() {
+        assert_eq!(edge_at(0.05, 0.5), Some(Edge::Left));
+        assert_eq!(edge_at(0.95, 0.5), Some(Edge::Right));
+        assert_eq!(edge_at(0.5, 0.05), Some(Edge::Top));
+        assert_eq!(edge_at(0.5, 0.97), Some(Edge::Bottom));
+        assert_eq!(edge_at(0.5, 0.5), None);
+        // In a corner the nearer side wins.
+        assert_eq!(edge_at(0.10, 0.05), Some(Edge::Top));
+        assert_eq!(edge_at(0.04, 0.2), Some(Edge::Left));
+        // Just outside the band, and the extremes.
+        assert_eq!(edge_at(EDGE_BAND + 0.01, 0.5), None);
+        assert_eq!(edge_at(0.0, 0.0), Some(Edge::Left));
+        assert_eq!(edge_at(-3.0, 0.5), Some(Edge::Left));
+        assert_eq!(edge_at(f32::NAN, 0.5), None);
+    }
+
+    #[test]
+    fn tabs_reorder_into_gaps() {
+        let mk = || vec!['a', 'b', 'c', 'd'];
+        // Gap numbers: 0 a 1 b 2 c 3 d 4.
+        let mut v = mk();
+        assert_eq!(reorder(&mut v, 0, 3), Some(2));
+        assert_eq!(v, ['b', 'c', 'a', 'd']);
+        let mut v = mk();
+        assert_eq!(reorder(&mut v, 3, 0), Some(0));
+        assert_eq!(v, ['d', 'a', 'b', 'c']);
+        let mut v = mk();
+        assert_eq!(reorder(&mut v, 1, 4), Some(3));
+        assert_eq!(v, ['a', 'c', 'd', 'b']);
+        // Dropping next to itself, or on a missing tab, changes nothing.
+        for (from, slot) in [(1, 1), (1, 2), (0, 0), (3, 4), (9, 0)] {
+            let mut v = mk();
+            assert_eq!(reorder(&mut v, from, slot), None, "{from}->{slot}");
+            assert_eq!(v, mk());
+        }
+        // A slot past the end counts as the end.
+        let mut v = mk();
+        assert_eq!(reorder(&mut v, 0, 99), Some(3));
+        assert_eq!(v, ['b', 'c', 'd', 'a']);
+    }
+
+    #[test]
+    fn windows_round_trip_and_bad_data_is_dropped() {
+        let tab = |q: &str| SavedTab {
+            kind: SavedKind::Terminal,
+            root: SavedNode::Pane(SavedPane {
+                quick: Some(q.into()),
+                ..Default::default()
+            }),
+            zoom: None,
+        };
+        let s = SavedSession {
+            tabs: vec![tab("a@b")],
+            active: Some(0),
+            bounds: Some(SavedBounds {
+                x: 10.0,
+                y: 20.0,
+                w: 1200.0,
+                h: 800.0,
+                maximized: false,
+            }),
+            windows: vec![
+                SavedWindow {
+                    bounds: Some(SavedBounds {
+                        x: 900.0,
+                        y: 40.0,
+                        w: 700.0,
+                        h: 500.0,
+                        maximized: true,
+                    }),
+                    tabs: vec![tab("c@d"), tab("e@f")],
+                    active: Some(9),
+                },
+                // A window whose tabs are all unusable disappears.
+                SavedWindow {
+                    bounds: None,
+                    tabs: vec![SavedTab {
+                        kind: SavedKind::Files,
+                        root: SavedNode::Pane(SavedPane::default()),
+                        zoom: None,
+                    }],
+                    active: None,
+                },
+            ],
+        };
+        let back = SavedSession::from_json(&s.to_json());
+        assert_eq!(back.bounds, s.bounds);
+        assert_eq!(back.windows.len(), 1);
+        assert_eq!(back.windows[0].tabs.len(), 2);
+        assert_eq!(back.windows[0].active, Some(1), "active is clamped");
+        assert!(back.windows[0].bounds.is_some_and(|b| b.maximized));
+        // Saves from before windows existed still load.
+        let old = r#"{"tabs":[{"kind":"terminal","root":{"t":"pane","quick":"a@b"}}],"active":0}"#;
+        let o = SavedSession::from_json(old);
+        assert_eq!((o.tabs.len(), o.windows.len(), o.bounds), (1, 0, None));
+    }
+
+    #[test]
+    fn saved_bounds_must_be_usable() {
+        let b = |x: f32, y: f32, w: f32, h: f32| SavedBounds {
+            x,
+            y,
+            w,
+            h,
+            maximized: false,
+        };
+        let screen = Some((0.0, 0.0, 1920.0, 1080.0));
+        assert!(b(100.0, 100.0, 1000.0, 700.0).usable(screen).is_some());
+        // Negative origins are fine (a monitor to the left).
+        assert!(b(-1200.0, 50.0, 1000.0, 700.0).usable(None).is_some());
+        assert!(b(100.0, 100.0, 50.0, 700.0).usable(screen).is_none());
+        assert!(b(f32::NAN, 0.0, 800.0, 600.0).usable(None).is_none());
+        // Off every screen: the monitor is gone.
+        assert!(b(4000.0, 100.0, 800.0, 600.0).usable(screen).is_none());
+        assert!(b(-5000.0, 100.0, 800.0, 600.0).usable(screen).is_none());
+        // With a monitor to the left the union starts at a negative x.
+        let two = Some((-1920.0, 0.0, 1920.0, 1080.0));
+        assert!(b(-1800.0, 100.0, 800.0, 600.0).usable(two).is_some());
     }
 }
