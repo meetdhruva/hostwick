@@ -403,7 +403,9 @@ Menu items show their shortcut on the right.
   `HIST_IGNORE_SPACE`) and is erased from the screen. Shells that already
   send OSC 7 (fish, many distro configs) need nothing. Right-click → *Copy
   current folder*. The same hook also reports where each command starts and
-  ends (OSC 133, bash and zsh), which powers the *command finished* alerts;
+  ends (OSC 133, bash and zsh), which powers the *command finished* alerts
+  (bash older than 4.4, e.g. macOS's bash 3.2, reports exit status and
+  duration but not the command name);
   anywhere the app says the terminal has not reported its folder (*Open files
   here*, following the terminal, dropping files) there is an **Enable now**
   button: it turns the setting on for that host (saved with the profile) and

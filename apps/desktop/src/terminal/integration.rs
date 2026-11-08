@@ -127,8 +127,18 @@ mod tests {
                 all.contains("\x1b]133;A\x07"),
                 "{shell}: no prompt mark: {all:?}"
             );
+            // Bash reports the command start through PS0, which needs bash
+            // 4.4+; macOS still ships 3.2, where only prompt/exit marks exist.
+            let old_bash = shell == "bash"
+                && Command::new("bash")
+                    .args([
+                        "-c",
+                        "(( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] < 404 ))",
+                    ])
+                    .status()
+                    .is_ok_and(|s| s.success());
             assert!(
-                all.contains("\x1b]133;C;cmd=false\x07"),
+                old_bash || all.contains("\x1b]133;C;cmd=false\x07"),
                 "{shell}: no command start: {all:?}"
             );
             let reported = all.matches(want).count();
