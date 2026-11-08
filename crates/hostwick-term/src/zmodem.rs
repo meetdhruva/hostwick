@@ -20,8 +20,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
 use crate::xfer::{
-    Link, Outcome, Progress, ProgressFn, SendFile, XferError, next_chunk, safe_file_name,
-    unique_path,
+    Link, Outcome, PartFile, Progress, ProgressFn, SendFile, XferError, next_chunk, safe_file_name,
 };
 
 pub const ZPAD: u8 = b'*';
@@ -67,6 +66,10 @@ const ACK_EVERY: usize = 16;
 /// Bytes that may be unacknowledged while sending.
 const WINDOW: u64 = 256 * 1024;
 const BLOCK: usize = 4096;
+/// Longest data subpacket the decoder accepts (after unescaping). Real
+/// senders use 1 KiB (lrzsz default) up to 8 KiB; anything longer is
+/// damage or an attack on memory, and is answered with a resync.
+pub const MAX_SUBPACKET: usize = 16 * 1024;
 /// How long to wait for the other side before giving up.
 const PATIENCE: Duration = Duration::from_secs(30);
 
@@ -361,6 +364,16 @@ impl Decoder {
         }
     }
 
+    /// Bytes held for the subpacket being collected (tests check the cap).
+    #[cfg(test)]
+    fn buffered(&self) -> usize {
+        match &self.st {
+            St::Data { buf, .. } => buf.len(),
+            St::DataCrc { data, .. } => data.len(),
+            _ => 0,
+        }
+    }
+
     /// Text that was not part of any frame (up to 4 KB); taken once.
     pub fn take_noise(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.noise)
@@ -510,6 +523,12 @@ impl Decoder {
                 mut buf,
                 esc,
             } => {
+                // No terminator after this many bytes: damage, or a peer
+                // trying to make us buffer without limit.
+                if buf.len() > MAX_SUBPACKET {
+                    out.push_back(Item::DataError);
+                    return St::Hunt;
+                }
                 if esc {
                     match unescape(b) {
                         Unesc::Byte(v) => {
@@ -763,8 +782,9 @@ fn fits(size: u64, name: &str) -> Result<(), XferError> {
 }
 
 struct RxFile {
-    file: tokio::fs::File,
-    path: std::path::PathBuf,
+    /// Written as `name.part`, renamed to its final name at ZEOF; deleted
+    /// when dropped (cancel, error, a new ZFILE mid-file).
+    file: PartFile,
     name: String,
     size: u64,
     pos: u64,
@@ -793,8 +813,10 @@ pub fn parse_file_info(data: &[u8]) -> Option<(String, u64, u64, u32)> {
 }
 
 /// Receive files from a remote `sz` into `dest`. `initial` holds the bytes
-/// from the start sequence on. Existing files are never overwritten (the
-/// new one gets ` (1)`…).
+/// from the start sequence on. Data goes to a `.part` file that gets its
+/// real name only when the file ended cleanly (ZEOF at the right position);
+/// a cancelled or failed transfer leaves nothing behind. Existing files are
+/// never overwritten (the new one gets ` (1)`…).
 pub async fn receive(
     link: &mut Link,
     initial: &[u8],
@@ -879,10 +901,9 @@ async fn receive_inner(
                     z.send(hex_header(ZSKIP, [0; 4])).await?;
                     continue;
                 };
-                let path = unique_path(dest, &name);
-                let file = match tokio::fs::File::create(&path).await {
+                let file = match PartFile::create(dest, &name) {
                     Ok(f) => f,
-                    Err(e) => return Err(XferError::Io(format!("{}: {e}", path.display()))),
+                    Err(e) => return Err(XferError::Io(format!("{}: {e}", dest.display()))),
                 };
                 index += 1;
                 progress(&Progress {
@@ -894,7 +915,6 @@ async fn receive_inner(
                 });
                 cur = Some(RxFile {
                     file,
-                    path,
                     name,
                     size,
                     pos: 0,
@@ -915,7 +935,7 @@ async fn receive_inner(
                 loop {
                     match z.next(PATIENCE).await? {
                         Item::Data { data, end } => {
-                            f.file.write_all(&data).await?;
+                            f.file.file().write_all(&data).await?;
                             f.pos += data.len() as u64;
                             out.bytes += data.len() as u64;
                             progress(&Progress {
@@ -959,15 +979,15 @@ async fn receive_inner(
                     z.send(hex_header(ZRPOS, pos_arg(f.pos as u32))).await?;
                     continue;
                 }
-                let Some(mut f) = cur.take() else { continue };
-                f.file.flush().await?;
-                let std_file = f.file.into_std().await;
-                if f.mtime > 0 {
-                    let t = std::time::UNIX_EPOCH + Duration::from_secs(f.mtime);
-                    let _ = std_file.set_modified(t);
-                }
-                drop(std_file);
-                out.files.push(f.path);
+                let Some(f) = cur.take() else { continue };
+                let mtime =
+                    (f.mtime > 0).then(|| std::time::UNIX_EPOCH + Duration::from_secs(f.mtime));
+                let path = f
+                    .file
+                    .commit(mtime)
+                    .await
+                    .map_err(|e| XferError::Io(format!("{}: {e}", f.name)))?;
+                out.files.push(path);
                 z.send(zrinit()).await?;
             }
             ZFIN => {
@@ -1555,6 +1575,277 @@ mod tests {
             assert_eq!(back.len(), data.len(), "{name}");
         }
         assert!(files.is_empty() || seen.last().is_some());
+    }
+
+    // ---- limits and partial files -------------------------------------------
+
+    #[test]
+    fn a_data_subpacket_without_terminator_is_capped_and_errors() {
+        let mut d = Decoder::new();
+        let mut q = VecDeque::new();
+        d.push(&bin_header(ZDATA, [0; 4], true, false), &mut q);
+        assert!(matches!(q.pop_front(), Some(Item::Header(_))));
+        let mut worst = 0;
+        let mut errors = 0;
+        // 4 MiB of payload bytes and escaped bytes, never a terminator.
+        let chunk: Vec<u8> = (0..1024)
+            .map(|i| if i % 3 == 0 { b'a' } else { b'b' })
+            .collect();
+        for _ in 0..4096 {
+            d.push(&chunk, &mut q);
+            worst = worst.max(d.buffered());
+            while let Some(i) = q.pop_front() {
+                assert!(matches!(i, Item::DataError), "{i:?}");
+                errors += 1;
+            }
+        }
+        assert!(worst <= MAX_SUBPACKET + 1, "buffered {worst} bytes");
+        assert!(errors >= 1);
+        // Escaped bytes count after unescaping.
+        let mut d = Decoder::new();
+        let mut q = VecDeque::new();
+        d.push(&bin_header(ZDATA, [0; 4], true, false), &mut q);
+        q.clear();
+        let esc: Vec<u8> = [ZDLE, b'A'].repeat(100_000);
+        d.push(&esc, &mut q);
+        assert!(d.buffered() <= MAX_SUBPACKET + 1);
+        assert!(q.iter().any(|i| matches!(i, Item::DataError)));
+    }
+
+    #[test]
+    fn a_full_size_subpacket_still_passes_and_decoding_resumes_after_an_oversized_one() {
+        let ok = vec![7u8; MAX_SUBPACKET];
+        let items = decode_all(
+            &[
+                bin_header(ZDATA, [0; 4], true, false),
+                data_subpacket(&ok, ZCRCE, true, false),
+            ]
+            .concat(),
+        );
+        assert!(matches!(&items[1], Item::Data { data, .. } if data.len() == MAX_SUBPACKET));
+        // An oversized run, then a header and a good block: the decoder finds
+        // its way back.
+        let big = vec![7u8; MAX_SUBPACKET * 3];
+        let items = decode_all(
+            &[
+                bin_header(ZDATA, [0; 4], true, false),
+                big,
+                bin_header(ZDATA, [0; 4], true, false),
+                data_subpacket(b"hello", ZCRCE, true, false),
+            ]
+            .concat(),
+        );
+        assert!(items.iter().any(|i| matches!(i, Item::DataError)));
+        assert!(
+            items
+                .iter()
+                .any(|i| matches!(i, Item::Data { data, .. } if data == b"hello"))
+        );
+    }
+
+    /// Reads what the receiver says to us, header by header.
+    struct Peer {
+        link: Link,
+        dec: Decoder,
+        q: VecDeque<Item>,
+    }
+
+    impl Peer {
+        fn new(link: Link) -> Self {
+            Self {
+                link,
+                dec: Decoder::new(),
+                q: VecDeque::new(),
+            }
+        }
+
+        async fn header(&mut self) -> Header {
+            loop {
+                while let Some(i) = self.q.pop_front() {
+                    if let Item::Header(h) = i {
+                        return h;
+                    }
+                }
+                let c = tokio::time::timeout(Duration::from_secs(5), self.link.rx.recv())
+                    .await
+                    .unwrap_or_else(|_| panic!("the receiver said nothing"))
+                    .unwrap_or_else(|| panic!("closed"));
+                self.dec.push(&c, &mut self.q);
+            }
+        }
+
+        async fn say(&self, b: Vec<u8>) {
+            self.link.send(b).await.unwrap_or_else(|e| panic!("{e}"));
+        }
+
+        /// ZFILE for `name` (size announced as `size`).
+        async fn offer(&mut self, name: &str, size: usize) {
+            let info = format!("{name}\0{size} 0 100644 0 1 {size}\0");
+            self.say(bin_header(ZFILE, [0, 0, 0, 1], true, false)).await;
+            self.say(data_subpacket(info.as_bytes(), ZCRCW, true, false))
+                .await;
+            let h = self.header().await;
+            assert_eq!(h.kind, ZRPOS, "{h:?}");
+            assert_eq!(h.pos(), 0);
+        }
+    }
+
+    fn files_in(d: &std::path::Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(d)
+            .map(|r| {
+                r.filter_map(Result::ok)
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        v.sort();
+        v
+    }
+
+    /// Start `receive` into `dest` and hand back the sender's end.
+    async fn start_receiver(
+        dest: &std::path::Path,
+    ) -> (
+        Peer,
+        CancellationToken,
+        tokio::task::JoinHandle<Result<Outcome, XferError>>,
+    ) {
+        let (mut a, b) = loopback();
+        let cancel = CancellationToken::new();
+        let dest = dest.to_owned();
+        let c2 = cancel.clone();
+        let job = tokio::spawn(async move {
+            receive(
+                &mut a,
+                &hex_header(ZRQINIT, [0; 4]),
+                &dest,
+                &c2,
+                &mut |_| {},
+            )
+            .await
+        });
+        let mut peer = Peer::new(b);
+        assert_eq!(peer.header().await.kind, ZRINIT);
+        (peer, cancel, job)
+    }
+
+    #[tokio::test]
+    async fn an_endless_zdata_stream_is_answered_with_zrpos_and_never_buffered() {
+        let dst = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let (mut peer, cancel, job) = start_receiver(dst.path()).await;
+        peer.offer("endless.bin", 1_000_000).await;
+        // ZDATA, then plain bytes and no terminator, much more than the cap.
+        peer.say(bin_header(ZDATA, [0; 4], true, false)).await;
+        for _ in 0..8 {
+            peer.say(vec![b'x'; MAX_SUBPACKET]).await;
+        }
+        let h = peer.header().await;
+        assert_eq!((h.kind, h.pos()), (ZRPOS, 0), "{h:?}");
+        // Nothing was written, the transfer is still alive and resyncs: a
+        // proper block now arrives.
+        peer.say(bin_header(ZDATA, [0; 4], true, false)).await;
+        peer.say(data_subpacket(b"abc", ZCRCG, true, false)).await;
+        cancel.cancel();
+        let r = job.await.unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(r.err(), Some(XferError::Cancelled));
+        assert!(
+            files_in(dst.path()).is_empty(),
+            "{:?}",
+            files_in(dst.path())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_download_leaves_no_file_under_the_real_name() {
+        let dst = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let (mut peer, cancel, job) = start_receiver(dst.path()).await;
+        peer.offer("half.bin", 100_000).await;
+        peer.say(bin_header(ZDATA, [0; 4], true, false)).await;
+        peer.say(data_subpacket(&sample(4096), ZCRCG, true, false))
+            .await;
+        // Data lands in the .part file; the real name does not exist.
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if std::fs::metadata(dst.path().join("half.bin.part")).is_ok_and(|m| m.len() == 4096) {
+                break;
+            }
+        }
+        assert_eq!(files_in(dst.path()), ["half.bin.part"]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let m = std::fs::metadata(dst.path().join("half.bin.part"))
+                .map(|m| m.permissions().mode() & 0o777);
+            assert_eq!(m.ok(), Some(0o600));
+        }
+        cancel.cancel();
+        let r = job.await.unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(r.err(), Some(XferError::Cancelled));
+        assert!(
+            files_in(dst.path()).is_empty(),
+            "{:?}",
+            files_in(dst.path())
+        );
+    }
+
+    #[tokio::test]
+    async fn the_other_side_cancelling_removes_the_partial_file() {
+        let dst = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let (mut peer, _cancel, job) = start_receiver(dst.path()).await;
+        peer.offer("gone.bin", 100_000).await;
+        peer.say(bin_header(ZDATA, [0; 4], true, false)).await;
+        peer.say(data_subpacket(&sample(2048), ZCRCG, true, false))
+            .await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        peer.say(vec![CAN; 5]).await;
+        let r = job.await.unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(r.err(), Some(XferError::RemoteCancelled));
+        assert!(
+            files_in(dst.path()).is_empty(),
+            "{:?}",
+            files_in(dst.path())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_zfile_mid_file_drops_the_unfinished_one_and_eof_publishes_the_next() {
+        let dst = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let (mut peer, cancel, job) = start_receiver(dst.path()).await;
+        peer.offer("first.bin", 100_000).await;
+        peer.say(bin_header(ZDATA, [0; 4], true, false)).await;
+        peer.say(data_subpacket(&sample(1024), ZCRCE, true, false))
+            .await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // The sender gives up on first.bin and offers another file.
+        peer.offer("second.bin", 5).await;
+        assert_eq!(files_in(dst.path()), ["second.bin.part"]);
+        peer.say(bin_header(ZDATA, [0; 4], true, false)).await;
+        peer.say(data_subpacket(b"hello", ZCRCE, true, false)).await;
+        peer.say(bin_header(ZEOF, pos_arg(5), true, false)).await;
+        assert_eq!(peer.header().await.kind, ZRINIT);
+        assert_eq!(files_in(dst.path()), ["second.bin"]);
+        assert_eq!(
+            std::fs::read(dst.path().join("second.bin")).unwrap_or_default(),
+            b"hello"
+        );
+        cancel.cancel();
+        let _ = job.await;
+        assert_eq!(files_in(dst.path()), ["second.bin"]);
+    }
+
+    #[tokio::test]
+    async fn a_dropped_receive_task_removes_the_partial_file() {
+        let dst = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let (mut peer, _cancel, job) = start_receiver(dst.path()).await;
+        peer.offer("abort.bin", 100_000).await;
+        assert_eq!(files_in(dst.path()), ["abort.bin.part"]);
+        job.abort();
+        let _ = job.await;
+        assert!(
+            files_in(dst.path()).is_empty(),
+            "{:?}",
+            files_in(dst.path())
+        );
     }
 
     #[tokio::test]

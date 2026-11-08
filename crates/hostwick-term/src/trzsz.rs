@@ -26,7 +26,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
 use crate::xfer::{
-    Link, Outcome, Progress, ProgressFn, SendFile, XferError, next_chunk, safe_file_name,
+    Link, Outcome, PartFile, Progress, ProgressFn, SendFile, XferError, next_chunk, safe_file_name,
     unique_path,
 };
 
@@ -35,6 +35,16 @@ const MAGIC: &[u8] = b"::TRZSZ:TRANSFER:";
 const PATIENCE: Duration = Duration::from_secs(30);
 /// Protocol version we speak.
 const PROTOCOL: u32 = 1;
+/// Largest decoded text value (`#NAME`, `#CFG`, `#FAIL`…) accepted from the
+/// server. Real ones are a few hundred bytes.
+pub const MAX_STRING: usize = 8 * 1024;
+/// Largest decoded checksum value (MD5 is 16 bytes).
+const MAX_DIGEST: usize = 64;
+/// The most file data accepted in one `#DATA` message, whatever the server
+/// says its buffer size is (trzsz's default is 10 MiB).
+const MAX_CHUNK: usize = 16 * 1024 * 1024;
+/// Longest line (base64 of a full compressed chunk plus slack).
+const MAX_LINE: usize = MAX_CHUNK * 3 / 2;
 
 /// What the server's magic line announced.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,15 +111,29 @@ pub fn encode_buffer(data: &[u8]) -> String {
     B64.encode(packed)
 }
 
-pub fn decode_buffer(text: &str) -> Result<Vec<u8>, XferError> {
+/// Decode a zlib + base64 value that expands to at most `limit` bytes.
+/// A few KB of zlib can claim to be gigabytes, so decompression stops one
+/// byte past the limit and the value is refused.
+pub fn decode_limited(text: &str, limit: usize) -> Result<Vec<u8>, XferError> {
     let packed = B64
         .decode(text.trim())
         .map_err(|e| XferError::Protocol(format!("bad base64 from the server: {e}")))?;
     let mut out = Vec::new();
     flate2::read::ZlibDecoder::new(&packed[..])
+        .take(limit as u64 + 1)
         .read_to_end(&mut out)
         .map_err(|e| XferError::Protocol(format!("bad compressed data from the server: {e}")))?;
+    if out.len() > limit {
+        return Err(XferError::Protocol(format!(
+            "the server sent more than {limit} bytes in one message"
+        )));
+    }
     Ok(out)
+}
+
+/// [`decode_limited`] with the largest size any message may have.
+pub fn decode_buffer(text: &str) -> Result<Vec<u8>, XferError> {
+    decode_limited(text, MAX_CHUNK)
 }
 
 /// `#TYPE:payload\n`.
@@ -190,6 +214,14 @@ struct Config {
     directory: bool,
 }
 
+impl Config {
+    /// Most file data one `#DATA` message may carry: the buffer size the
+    /// server announced, never above [`MAX_CHUNK`].
+    fn max_data(&self) -> usize {
+        self.bufsize.clamp(1024, MAX_CHUNK)
+    }
+}
+
 // ---- the line reader --------------------------------------------------------
 
 struct Wire<'a> {
@@ -224,7 +256,7 @@ impl<'a> Wire<'a> {
                 }
                 return Ok(String::from_utf8_lossy(&l).into_owned());
             }
-            if self.buf.len() > 64 * 1024 * 1024 {
+            if self.buf.len() > MAX_LINE {
                 return Err(XferError::Protocol("line too long".into()));
             }
             self.fill().await?;
@@ -257,9 +289,9 @@ impl<'a> Wire<'a> {
             return Ok(payload.to_owned());
         }
         if matches!(k, "FAIL" | "fail" | "EXIT") {
-            let msg = decode_buffer(payload)
+            let msg = decode_limited(payload, MAX_STRING)
                 .map(|b| String::from_utf8_lossy(&b).into_owned())
-                .unwrap_or_else(|_| payload.to_owned());
+                .unwrap_or_else(|_| payload.chars().take(200).collect());
             return Err(XferError::Remote(msg));
         }
         Err(XferError::Protocol(format!(
@@ -276,12 +308,13 @@ impl<'a> Wire<'a> {
 
     async fn expect_string(&mut self, kind: &str) -> Result<String, XferError> {
         let p = self.expect(kind).await?;
-        Ok(String::from_utf8_lossy(&decode_buffer(&p)?).into_owned())
+        Ok(String::from_utf8_lossy(&decode_limited(&p, MAX_STRING)?).into_owned())
     }
 
-    async fn expect_binary(&mut self, kind: &str) -> Result<Vec<u8>, XferError> {
+    /// A binary value of at most `limit` bytes.
+    async fn expect_binary(&mut self, kind: &str, limit: usize) -> Result<Vec<u8>, XferError> {
         let p = self.expect(kind).await?;
-        decode_buffer(&p)
+        decode_limited(&p, limit)
     }
 
     async fn say(&self, kind: &str, payload: &str) -> Result<(), XferError> {
@@ -343,7 +376,9 @@ async fn handshake(w: &mut Wire<'_>, version: &str) -> Result<Config, XferError>
         bufsize: v
             .get("bufsize")
             .and_then(|x| x.as_u64())
-            .map_or(10 * 1024 * 1024, |n| n as usize),
+            .map_or(10 * 1024 * 1024, |n| {
+                usize::try_from(n).unwrap_or(usize::MAX)
+            }),
         directory: v
             .get("directory")
             .and_then(|x| x.as_bool())
@@ -402,15 +437,17 @@ async fn download_inner(
     let mut out = Outcome::default();
     let count = w.expect_int("NUM").await?;
     w.say("SUCC", &count.to_string()).await?;
+    let max_data = cfg.max_data();
     for index in 1..=count as usize {
         let name = w.expect_string("NAME").await?;
         let name = safe_file_name(&name).unwrap_or_else(|| format!("file-{index}"));
-        let path = unique_path(dest, &name);
-        let local = path
+        // The name we expect to end up with (the server shows it); the
+        // data goes to a `.part` file meanwhile, deleted on any failure.
+        let local = unique_path(dest, &name)
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| name.clone());
-        let mut file = tokio::fs::File::create(&path).await?;
+        let mut file = PartFile::create(dest, &name)?;
         w.say("SUCC", &encode_buffer(local.as_bytes())).await?;
         let size = w.expect_int("SIZE").await?;
         w.say("SUCC", &size.to_string()).await?;
@@ -428,26 +465,47 @@ async fn download_inner(
         report(progress, 0);
         while done < size {
             let data = if cfg.binary {
-                let n = w.expect_int("DATA").await? as usize;
-                let raw = w.read_exact(n).await?;
-                cfg.escapes.unescape(&raw)
+                let n = w.expect_int("DATA").await?;
+                // Escaping at most doubles the data.
+                if n > (max_data as u64).saturating_mul(2) {
+                    return Err(XferError::Protocol(format!(
+                        "the server announced {n} bytes in one message (limit {})",
+                        max_data.saturating_mul(2)
+                    )));
+                }
+                let raw = w.read_exact(n as usize).await?;
+                let data = cfg.escapes.unescape(&raw);
+                if data.len() > max_data {
+                    return Err(XferError::Protocol(
+                        "the server sent more data in one message than its buffer size".into(),
+                    ));
+                }
+                data
             } else {
-                w.expect_binary("DATA").await?
+                w.expect_binary("DATA", max_data).await?
             };
-            file.write_all(&data).await?;
+            if data.is_empty() || done + data.len() as u64 > size {
+                return Err(XferError::Protocol(format!(
+                    "{local}: the server sent {} data than announced",
+                    if data.is_empty() { "no" } else { "more" }
+                )));
+            }
+            file.file().write_all(&data).await?;
             md5.update(&data);
             done += data.len() as u64;
             w.say("SUCC", &data.len().to_string()).await?;
             report(progress, done);
         }
-        file.flush().await?;
+        file.file().flush().await?;
         let digest = md5.finalize().to_vec();
-        let theirs = w.expect_binary("MD5").await?;
+        let theirs = w.expect_binary("MD5", MAX_DIGEST).await?;
         if theirs != digest {
+            // Dropping `file` deletes the `.part`.
             return Err(XferError::Protocol(format!(
                 "{local}: the MD5 check failed"
             )));
         }
+        let path = file.commit(None).await?;
         w.say("SUCC", &encode_buffer(&digest)).await?;
         out.files.push(path);
         out.bytes += size;
@@ -563,7 +621,7 @@ async fn upload_inner(
         }
         let digest = md5.finalize().to_vec();
         w.say("MD5", &encode_buffer(&digest)).await?;
-        let theirs = w.expect_binary("SUCC").await?;
+        let theirs = w.expect_binary("SUCC", MAX_DIGEST).await?;
         if theirs != digest {
             return Err(XferError::Protocol(format!(
                 "{}: the MD5 check failed",
@@ -637,6 +695,260 @@ mod tests {
         assert!(!esc.contains(&2));
         assert_eq!(e.unescape(&esc), data);
         assert_eq!(Escapes::default().escape(b"abc"), b"abc");
+    }
+
+    // ---- limits and partial files (scripted server) -------------------------
+
+    fn zeros_bomb(n: usize) -> String {
+        encode_buffer(&vec![0u8; n])
+    }
+
+    #[test]
+    fn a_small_compressed_value_cannot_expand_past_the_limit() {
+        // 64 MiB of zeros compress to about 64 KB.
+        let bomb = zeros_bomb(64 * 1024 * 1024);
+        assert!(bomb.len() < 200_000, "{}", bomb.len());
+        for limit in [MAX_STRING, 64 * 1024, 1024 * 1024] {
+            let e = decode_limited(&bomb, limit);
+            assert!(matches!(e, Err(XferError::Protocol(_))), "{limit}: {e:?}");
+        }
+        // The general decoder stops at its own ceiling, never at 64 MiB.
+        assert!(decode_buffer(&bomb).is_err());
+        // A value exactly at the limit is fine, one byte more is not.
+        let at = encode_buffer(&[1u8; 1000]);
+        assert_eq!(decode_limited(&at, 1000).map(|v| v.len()).ok(), Some(1000));
+        assert!(decode_limited(&at, 999).is_err());
+    }
+
+    /// A scripted `tsz`: sends `lines` after the handshake bytes, then lets
+    /// the client run.
+    async fn run_download(
+        binary: bool,
+        bufsize: usize,
+        server: Vec<u8>,
+        dest: &Path,
+        cancel: &CancellationToken,
+    ) -> Result<Outcome, XferError> {
+        let (mut a, b) = crate::xfer::testutil::loopback();
+        let cfg = serde_json::json!({
+            "binary": binary, "bufsize": bufsize, "directory": false,
+            "escape_chars": [["\u{ee}", "\u{ee}\u{ee}"], ["~", "\u{ee}1"]],
+        })
+        .to_string();
+        let mut wire = line("CFG", &encode_buffer(cfg.as_bytes()));
+        wire.extend(server);
+        b.send(wire).await.unwrap_or_else(|e| panic!("{e}"));
+        let r = tokio::time::timeout(
+            Duration::from_secs(10),
+            download(&mut a, b"", "0.4.0", dest, "done", cancel, &mut |_| {}),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("the download hung"));
+        drop(b);
+        r
+    }
+
+    fn one_file(name: &str, size: usize) -> Vec<u8> {
+        let mut v = line("NUM", "1");
+        v.extend(line("NAME", &encode_buffer(name.as_bytes())));
+        v.extend(line("SIZE", &size.to_string()));
+        v
+    }
+
+    fn md5_of(data: &[u8]) -> Vec<u8> {
+        Md5::digest(data).to_vec()
+    }
+
+    fn names(d: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(d)
+            .map(|r| {
+                r.filter_map(Result::ok)
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        v.sort();
+        v
+    }
+
+    #[tokio::test]
+    async fn a_zip_bomb_in_data_is_refused_and_leaves_no_file() {
+        let dest = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let mut srv = one_file("bomb.bin", 10_000_000_000);
+        // bufsize 1 MiB: 64 MiB of zeros in one message is far too much.
+        srv.extend(line("DATA", &zeros_bomb(64 * 1024 * 1024)));
+        let r = run_download(
+            false,
+            1024 * 1024,
+            srv,
+            dest.path(),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(r, Err(XferError::Protocol(m)) if m.contains("more than")),);
+        assert!(names(dest.path()).is_empty(), "{:?}", names(dest.path()));
+    }
+
+    #[tokio::test]
+    async fn a_zip_bomb_in_a_name_is_refused() {
+        let dest = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let mut srv = line("NUM", "1");
+        srv.extend(line("NAME", &zeros_bomb(32 * 1024 * 1024)));
+        let r = run_download(false, 1 << 20, srv, dest.path(), &CancellationToken::new()).await;
+        assert!(matches!(r, Err(XferError::Protocol(_))), "{r:?}");
+        assert!(names(dest.path()).is_empty());
+        // And in #CFG itself.
+        let (mut a, b) = crate::xfer::testutil::loopback();
+        b.send(line("CFG", &zeros_bomb(32 * 1024 * 1024)))
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        let r = download(
+            &mut a,
+            b"",
+            "0.4.0",
+            dest.path(),
+            "x",
+            &CancellationToken::new(),
+            &mut |_| {},
+        )
+        .await;
+        assert!(matches!(r, Err(XferError::Protocol(_))), "{r:?}");
+    }
+
+    #[tokio::test]
+    async fn a_binary_data_length_above_the_buffer_size_is_rejected_at_once() {
+        let dest = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let mut srv = one_file("big.bin", 4_000_000_000);
+        // Announce 3 GB; no bytes follow. Must fail now, not after reading 3 GB
+        // (or waiting 30 s for it).
+        srv.extend(b"#DATA:3000000000\n".to_vec());
+        let r = run_download(
+            true,
+            2 * 1024 * 1024,
+            srv,
+            dest.path(),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(r, Err(XferError::Protocol(m)) if m.contains("announced")),);
+        assert!(names(dest.path()).is_empty());
+        // Just above twice the buffer (the escape worst case) also fails;
+        // a length that fits is waited for instead.
+        let mut srv = one_file("big.bin", 4_000_000_000);
+        srv.extend(b"#DATA:4194305\n".to_vec());
+        let r = run_download(
+            true,
+            2 * 1024 * 1024,
+            srv,
+            dest.path(),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(r, Err(XferError::Protocol(_))), "{r:?}");
+    }
+
+    #[tokio::test]
+    async fn escaped_binary_data_that_unescapes_past_the_buffer_is_rejected() {
+        let dest = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        // 4 KiB message of unescaped bytes while the buffer size is 1 KiB.
+        let mut srv = one_file("x.bin", 100_000);
+        srv.extend(b"#DATA:2000\n".to_vec());
+        srv.extend(vec![b'a'; 2000]);
+        let r = run_download(true, 1024, srv, dest.path(), &CancellationToken::new()).await;
+        assert!(matches!(r, Err(XferError::Protocol(_))), "{r:?}");
+        assert!(names(dest.path()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn data_beyond_the_announced_size_is_refused() {
+        let dest = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let mut srv = one_file("x.bin", 4);
+        srv.extend(line("DATA", &encode_buffer(b"too long")));
+        let r = run_download(false, 1 << 20, srv, dest.path(), &CancellationToken::new()).await;
+        assert!(matches!(r, Err(XferError::Protocol(_))), "{r:?}");
+        assert!(names(dest.path()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_good_download_in_both_modes_appears_under_its_name_without_part_files() {
+        for binary in [false, true] {
+            let dest = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+            std::fs::write(dest.path().join("ok.bin"), b"old").unwrap_or_else(|e| panic!("{e}"));
+            let data = b"hello ~ world \xee!".to_vec();
+            let mut srv = one_file("ok.bin", data.len());
+            if binary {
+                let esc = Escapes::from_json(&serde_json::json!([
+                    ["\u{ee}", "\u{ee}\u{ee}"],
+                    ["~", "\u{ee}1"]
+                ]))
+                .escape(&data);
+                srv.extend(format!("#DATA:{}\n", esc.len()).into_bytes());
+                srv.extend(esc);
+            } else {
+                srv.extend(line("DATA", &encode_buffer(&data)));
+            }
+            srv.extend(line("MD5", &encode_buffer(&md5_of(&data))));
+            let r = run_download(binary, 1 << 20, srv, dest.path(), &CancellationToken::new())
+                .await
+                .unwrap_or_else(|e| panic!("binary={binary}: {e}"));
+            assert_eq!(r.files, vec![dest.path().join("ok (1).bin")]);
+            assert_eq!(names(dest.path()), ["ok (1).bin", "ok.bin"]);
+            assert_eq!(std::fs::read(&r.files[0]).unwrap_or_default(), data);
+            assert_eq!(
+                std::fs::read(dest.path().join("ok.bin")).unwrap_or_default(),
+                b"old"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_md5_leaves_nothing_behind() {
+        let dest = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let mut srv = one_file("sum.bin", 5);
+        srv.extend(line("DATA", &encode_buffer(b"hello")));
+        srv.extend(line("MD5", &encode_buffer(&md5_of(b"HELLO"))));
+        let r = run_download(false, 1 << 20, srv, dest.path(), &CancellationToken::new()).await;
+        assert!(matches!(r, Err(XferError::Protocol(m)) if m.contains("MD5")),);
+        assert!(names(dest.path()).is_empty(), "{:?}", names(dest.path()));
+    }
+
+    #[tokio::test]
+    async fn a_server_failure_or_cancel_mid_file_removes_the_part_file() {
+        let dest = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let mut srv = one_file("cut.bin", 10);
+        srv.extend(line("DATA", &encode_buffer(b"hello")));
+        srv.extend(line("FAIL", &encode_buffer(b"disk full")));
+        let r = run_download(false, 1 << 20, srv, dest.path(), &CancellationToken::new()).await;
+        assert_eq!(r.err(), Some(XferError::Remote("disk full".into())));
+        assert!(names(dest.path()).is_empty(), "{:?}", names(dest.path()));
+
+        // Cancel while the part file exists.
+        let (mut a, b) = crate::xfer::testutil::loopback();
+        let cfg = serde_json::json!({"binary": false, "bufsize": 1 << 20}).to_string();
+        let mut wire = line("CFG", &encode_buffer(cfg.as_bytes()));
+        wire.extend(one_file("slow.bin", 10));
+        wire.extend(line("DATA", &encode_buffer(b"hello")));
+        b.send(wire).await.unwrap_or_else(|e| panic!("{e}"));
+        let cancel = CancellationToken::new();
+        let c2 = cancel.clone();
+        let d = dest.path().to_owned();
+        let job =
+            tokio::spawn(
+                async move { download(&mut a, b"", "0.4.0", &d, "x", &c2, &mut |_| {}).await },
+            );
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if names(dest.path()) == ["slow.bin.part"]
+                && std::fs::metadata(dest.path().join("slow.bin.part")).is_ok_and(|m| m.len() == 5)
+            {
+                break;
+            }
+        }
+        assert_eq!(names(dest.path()), ["slow.bin.part"]);
+        cancel.cancel();
+        let r = job.await.unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(r.err(), Some(XferError::Cancelled));
+        assert!(names(dest.path()).is_empty(), "{:?}", names(dest.path()));
     }
 
     // ---- against the real trzsz server (Python `trz` / `tsz`) --------------
