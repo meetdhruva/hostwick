@@ -11,7 +11,11 @@ mod prompts;
 mod render;
 mod sidebar;
 mod sync;
+mod tabbar;
+mod tabs;
+mod transfers;
 mod welcome;
+mod windows;
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
@@ -21,17 +25,19 @@ use std::time::{Duration, Instant};
 
 use crate::notify::{Toast, ToastExt as _};
 use futures::StreamExt;
-use futures::channel::mpsc::{UnboundedReceiver, unbounded};
+use futures::channel::mpsc::unbounded;
 use futures::channel::oneshot;
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::*;
 use hostwick_core::{HostProfile, LogVars, ProfileId, ProfileStore, expand_log_path};
 use hostwick_term::TransportKind;
-use hostwick_transfer::{TransferEvent, TransferId, TransferState};
+use hostwick_transfer::TransferEvent;
 
 use crate::backend::{Backend, Prompt, quick_profile};
-use crate::files::FilesView;
-use crate::layout::{Dir, Node, PaneId, SavedKind, SavedNode, SavedPane, SavedSession, SavedTab};
+use crate::files::{FilesEvent, FilesView};
+use crate::layout::{
+    Dir, Edge, Node, PaneId, SavedBounds, SavedKind, SavedNode, SavedPane, SavedTab, SavedWindow,
+};
 use crate::settings::Settings;
 use crate::terminal::{GridSize, TerminalEvent, TerminalView};
 
@@ -54,6 +60,33 @@ pub(crate) struct Pane {
     follows: Option<u64>,
     /// Files pane: open at this remote folder.
     start_dir: Option<String>,
+    /// Terminal pane of a reopened tab: what the old session showed, put
+    /// above the new one once it starts.
+    history: Option<String>,
+}
+
+impl Pane {
+    /// The pane's tab moves to another window: a file browser's views
+    /// belong to the old window, so it opens again there at the same folder.
+    fn leave_window(&mut self, cx: &App) {
+        if let PaneBody::Files(v) = &self.body {
+            let dir = v.read(cx).remote_dir().to_owned();
+            if !dir.is_empty() {
+                self.start_dir = Some(dir);
+            }
+            self.body = PaneBody::Pending;
+        }
+    }
+}
+
+/// What a new window starts with.
+pub enum Init {
+    /// The first window: the tabs saved last time.
+    First,
+    /// A window saved last time besides the first.
+    Extra(SavedWindow),
+    /// Nothing: a tab is about to be moved in.
+    Empty,
 }
 
 impl PaneId for Pane {
@@ -73,6 +106,8 @@ pub(crate) struct Tab {
     kind: TabKind,
     root: Node<Pane>,
     focused: u64,
+    /// Terminal text size in percent (Ctrl+= / Ctrl+-).
+    zoom: u32,
 }
 
 impl Tab {
@@ -89,15 +124,6 @@ impl Tab {
     fn panes(&self) -> Vec<&Pane> {
         self.root.leaves()
     }
-}
-
-struct TransferRow {
-    id: TransferId,
-    label: String,
-    done: u64,
-    total: u64,
-    rate: f64,
-    state: Option<TransferState>,
 }
 
 pub struct HostwickApp {
@@ -134,9 +160,21 @@ pub struct HostwickApp {
     quick: Entity<InputState>,
     tabs: Vec<Tab>,
     active: Option<usize>,
-    next_id: u64,
+    /// Which window this is (the key in the window list).
+    win_key: u64,
+    bounds: Option<SavedBounds>,
+    bounds_gen: u64,
+    /// The tab bar's scrolling, and what a dragged tab is over.
+    tab_scroll: ScrollHandle,
+    tab_drop: Option<usize>,
+    dragging_tab: Option<u64>,
+    drop_zone: Option<(u64, Edge)>,
+    reveal_active: bool,
+    /// The "120%" shown briefly after zooming.
+    zoom_hud: Option<u32>,
+    hud_gen: u64,
     broadcast: bool,
-    transfers: Vec<TransferRow>,
+    transfers: transfers::TransferPanel,
     prompts: VecDeque<Prompt>,
     prompt_open: bool,
     /// Recently shown notices, for de-duplication and rate limiting.
@@ -155,10 +193,19 @@ pub struct HostwickApp {
     tab_anchor: crate::a11y::MenuAnchor,
     /// Language the window was last drawn in (placeholders follow it).
     lang: &'static str,
-    /// The tab layout last written, to skip writing the same again.
-    saved_tabs: RefCell<String>,
     _tasks: Vec<Task<()>>,
     _subs: Vec<Subscription>,
+}
+
+pub(crate) use windows::{mark_quitting, options_for, route_prompt, saved_extra};
+
+/// Open the windows beyond the first that were open last time.
+pub(crate) fn restore_extra_windows(
+    backend: &Arc<Backend>,
+    windows: Vec<crate::layout::SavedWindow>,
+    cx: &mut App,
+) {
+    windows::restore_extra(backend, windows, cx);
 }
 
 /// Settings key of the settings-sync folder.
@@ -215,9 +262,9 @@ fn answer<T>(s: &ReplySlot<T>, v: T) {
 impl HostwickApp {
     pub fn new(
         backend: Arc<Backend>,
-        prompts_rx: UnboundedReceiver<Prompt>,
         window: &mut Window,
         cx: &mut Context<Self>,
+        init: Init,
     ) -> Self {
         let search =
             cx.new(|cx| InputState::new(window, cx).placeholder(t!("sidebar-search-placeholder")));
@@ -274,19 +321,6 @@ impl HostwickApp {
                 }
             },
         ));
-
-        // Prompts from the SSH layer → dialogs, one at a time.
-        let prompt_task = cx.spawn_in(window, async move |this, cx| {
-            let mut rx = prompts_rx;
-            while let Some(p) = rx.next().await {
-                if this
-                    .update_in(cx, |app, window, cx| app.enqueue_prompt(p, window, cx))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
 
         // Transfer engine events (Tokio broadcast) → UI.
         let (tx, mut rx) = unbounded::<TransferEvent>();
@@ -379,9 +413,18 @@ impl HostwickApp {
             quick,
             tabs: Vec::new(),
             active: None,
-            next_id: 1,
+            win_key: tabs::fresh_id(),
+            bounds: None,
+            bounds_gen: 0,
+            tab_scroll: ScrollHandle::new(),
+            tab_drop: None,
+            dragging_tab: None,
+            drop_zone: None,
+            reveal_active: false,
+            zoom_hud: None,
+            hud_gen: 0,
             broadcast: false,
-            transfers: Vec::new(),
+            transfers: transfers::TransferPanel::default(),
             prompts: VecDeque::new(),
             prompt_open: false,
             notices: HashMap::new(),
@@ -394,16 +437,37 @@ impl HostwickApp {
             host_anchor: Default::default(),
             tab_anchor: Default::default(),
             lang: crate::i18n::current(),
-            saved_tabs: RefCell::default(),
-            _tasks: vec![prompt_task, transfer_task, tick_task],
+            _tasks: vec![transfer_task, tick_task],
             _subs: subs,
         };
+        app.register_window(window, cx);
+        app.bounds = Some(windows::saved_bounds(window));
         app.reload_profiles();
         app.focus.focus(window, cx);
-        app.restore_tabs(window, cx);
-        app.startup_sync(window, cx);
-        app.maybe_welcome(cx);
+        let first = matches!(init, Init::First);
+        match init {
+            Init::First => app.restore_saved_session(window, cx),
+            Init::Extra(w) => {
+                app.restore_tabs(w.tabs, w.active, HashMap::new(), window, cx);
+            }
+            Init::Empty => {}
+        }
+        if first {
+            app.startup_sync(window, cx);
+            app.maybe_welcome(cx);
+        }
         app.load_ssh_aliases(cx);
+        // Where the window is is part of the saved layout.
+        let sub = cx.observe_window_bounds(window, |app, window, cx| app.note_bounds(window, cx));
+        app._subs.push(sub);
+        // Another window may have changed the saved hosts.
+        let sub = cx.observe_window_activation(window, |app, window, cx| {
+            if window.is_window_active() {
+                app.reload_profiles();
+                cx.notify();
+            }
+        });
+        app._subs.push(sub);
         app
     }
 
@@ -414,12 +478,14 @@ impl HostwickApp {
     }
 
     fn next_id(&mut self) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
-        id
+        tabs::fresh_id()
     }
 
     fn housekeeping(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // One window does the chores (vault auto-lock, settings sync).
+        if !self.is_primary(cx) {
+            return;
+        }
         let minutes = Settings::get(cx).vault_auto_lock_minutes;
         if self.backend.vault.lock_if_idle(minutes) {
             cx.notify();
@@ -439,6 +505,7 @@ impl HostwickApp {
             body: PaneBody::Pending,
             follows: None,
             start_dir: None,
+            history: None,
         }
     }
 
@@ -483,8 +550,10 @@ impl HostwickApp {
             kind,
             root: Node::Leaf(pane),
             focused: pane_id,
+            zoom: crate::zoom::DEFAULT_ZOOM,
         });
         self.active = Some(self.tabs.len() - 1);
+        self.reveal_active = true;
         self.connect_pane(pane_id, window, cx);
         self.persist_tabs(cx);
         cx.notify();
@@ -583,6 +652,7 @@ impl HostwickApp {
                     rows: 32,
                 };
                 let title: SharedString = crate::terminal::tab_title(&profile).into();
+                let history = self.pane_mut(pane_id).and_then(|p| p.history.take());
                 let job = rt.spawn(backend.open_shell(profile.clone(), 120, 32));
                 cx.spawn_in(window, async move |this, cx| {
                     let result = job.await;
@@ -596,6 +666,13 @@ impl HostwickApp {
                                 app._subs.push(sub);
                                 app.auto_session_log(&profile, &view, cx);
                                 view.update(cx, |v, cx| v.attach_profile(&profile, cx));
+                                let zoom = app.tab_zoom_of(pane_id);
+                                if zoom != crate::zoom::DEFAULT_ZOOM {
+                                    view.update(cx, |v, cx| v.set_zoom(zoom, cx));
+                                }
+                                if let Some(text) = &history {
+                                    view.update(cx, |v, cx| v.show_history(text, cx));
+                                }
                                 let focused = app
                                     .active
                                     .and_then(|i| app.tabs.get(i))
@@ -643,6 +720,20 @@ impl HostwickApp {
                                     v.set_link(link, cx);
                                     v
                                 });
+                                // Bookmarks are saved with the host.
+                                let sub = cx.subscribe_in(
+                                    &view,
+                                    window,
+                                    |app: &mut Self, _, ev: &FilesEvent, _, cx| match ev {
+                                        FilesEvent::BookmarksChanged => {
+                                            app.reload_profiles();
+                                            app.refresh_tab_profiles();
+                                            app.mark_sync_dirty();
+                                            cx.notify();
+                                        }
+                                    },
+                                );
+                                app._subs.push(sub);
                                 PaneBody::Files(view)
                             }
                             Ok(Err(e)) => PaneBody::Failed(format!("{e:#}")),
@@ -678,7 +769,8 @@ impl HostwickApp {
 
     pub(crate) fn close_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
         if ix < self.tabs.len() {
-            self.tabs.remove(ix);
+            let tab = self.tabs.remove(ix);
+            self.remember_closed(&tab, cx);
             self.active = match self.active {
                 _ if self.tabs.is_empty() => None,
                 Some(a) if a >= self.tabs.len() => Some(self.tabs.len() - 1),
@@ -859,6 +951,7 @@ impl HostwickApp {
             return;
         }
         self.active = Some(ix);
+        self.reveal_active = true;
         // Restored tabs connect when first shown.
         let pending: Vec<u64> = self.tabs[ix]
             .panes()
@@ -891,6 +984,7 @@ impl HostwickApp {
             body: PaneBody::Pending,
             follows: Some(term_pane),
             start_dir: cwd.clone(),
+            history: None,
         };
         files.id = self.next_id();
         if cwd.is_none() {
@@ -907,7 +1001,13 @@ impl HostwickApp {
         cx: &mut Context<Self>,
     ) {
         let pane_id = self.pane_of_terminal(source.entity_id());
+        // A terminal that moved to another window still tells this one
+        // (its old subscription): the new window handles it.
+        if pane_id.is_none() {
+            return;
+        }
         match ev {
+            TerminalEvent::Zoom(dir) => self.zoom_terminal(source.entity_id(), *dir, cx),
             TerminalEvent::UserInput(bytes) if self.broadcast => {
                 for v in self.all_terminals() {
                     if v.entity_id() != source.entity_id() {
@@ -1057,41 +1157,33 @@ impl HostwickApp {
         }
     }
 
-    /// Remember the open tabs (when "Restore tabs" is on).
-    pub(crate) fn persist_tabs(&self, cx: &App) {
-        let json = if Settings::get(cx).restore_tabs {
-            SavedSession {
-                tabs: self
-                    .tabs
-                    .iter()
-                    .map(|t| SavedTab {
-                        kind: match t.kind {
-                            TabKind::Terminal => SavedKind::Terminal,
-                            TabKind::Files => SavedKind::Files,
-                        },
-                        root: crate::layout::save_tree(&t.root, &|p| Self::saved_pane(p, cx)),
-                    })
-                    .collect(),
-                active: self.active,
-            }
-            .to_json()
-        } else {
-            String::new()
-        };
-        if *self.saved_tabs.borrow() == json {
-            return;
-        }
-        match self
-            .backend
-            .store
-            .set_setting(crate::layout::TABS_KEY, &json)
-        {
-            Ok(()) => *self.saved_tabs.borrow_mut() = json,
-            Err(e) => tracing::warn!(error = %e, "could not save open tabs"),
+    /// This window's tabs and place, as saved.
+    fn saved_window(&self, cx: &App) -> SavedWindow {
+        SavedWindow {
+            bounds: self.bounds,
+            tabs: self
+                .tabs
+                .iter()
+                .map(|t| SavedTab {
+                    kind: match t.kind {
+                        TabKind::Terminal => SavedKind::Terminal,
+                        TabKind::Files => SavedKind::Files,
+                    },
+                    root: crate::layout::save_tree(&t.root, &|p| Self::saved_pane(p, cx)),
+                    zoom: (t.zoom != crate::zoom::DEFAULT_ZOOM).then_some(t.zoom),
+                })
+                .collect(),
+            active: self.active,
         }
     }
 
-    fn restore_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Remember the open tabs and windows (when "Restore tabs" is on).
+    pub(crate) fn persist_tabs(&self, cx: &App) {
+        self.persist_window(self.saved_window(cx), cx);
+    }
+
+    /// The first window: the tabs from last time.
+    fn restore_saved_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !Settings::get(cx).restore_tabs {
             return;
         }
@@ -1105,7 +1197,20 @@ impl HostwickApp {
         else {
             return;
         };
-        let saved = SavedSession::from_json(&json);
+        let saved = crate::layout::SavedSession::from_json(&json);
+        self.bounds = saved.bounds;
+        self.restore_tabs(saved.tabs, saved.active, HashMap::new(), window, cx);
+    }
+
+    /// Open saved tabs; `history` is the old scrollback by saved pane id.
+    fn restore_tabs(
+        &mut self,
+        saved: Vec<SavedTab>,
+        active: Option<usize>,
+        mut history: HashMap<u64, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let profiles = self.profiles.clone();
         let exists = |p: &SavedPane| match (&p.profile, &p.quick) {
             (Some(id), _) => profiles.iter().any(|x| x.id == *id),
@@ -1115,11 +1220,11 @@ impl HostwickApp {
         // Saved pane id → new pane id, to restore which file browser follows
         // which terminal.
         let mut ids = HashMap::new();
-        for t in saved.tabs {
+        for t in saved {
             let Some(root) = t.root.prune(&exists) else {
                 continue;
             };
-            let root = self.build_tree(root, &mut ids);
+            let root = self.build_tree(root, &mut ids, &mut history);
             let focused = root.leaves().first().map(|p| p.id).unwrap_or(0);
             let id = self.next_id();
             self.tabs.push(Tab {
@@ -1130,6 +1235,9 @@ impl HostwickApp {
                 },
                 root,
                 focused,
+                zoom: t
+                    .zoom
+                    .map_or(crate::zoom::DEFAULT_ZOOM, crate::zoom::clamp_zoom),
             });
         }
         for t in &mut self.tabs {
@@ -1138,13 +1246,19 @@ impl HostwickApp {
             }
         }
         if !self.tabs.is_empty() {
-            let ix = saved.active.unwrap_or(0).min(self.tabs.len() - 1);
+            let ix = active.unwrap_or(0).min(self.tabs.len() - 1);
             self.activate_tab(ix, window, cx);
         }
     }
 
-    /// Live panes from a saved tree; `ids` collects saved id → new id.
-    fn build_tree(&mut self, node: SavedNode, ids: &mut HashMap<u64, u64>) -> Node<Pane> {
+    /// Live panes from a saved tree; `ids` collects saved id → new id and
+    /// `history` hands out the scrollback of reopened terminals.
+    fn build_tree(
+        &mut self,
+        node: SavedNode,
+        ids: &mut HashMap<u64, u64>,
+        history: &mut HashMap<u64, String>,
+    ) -> Node<Pane> {
         match node {
             SavedNode::Pane(p) => {
                 let profile = match (&p.profile, &p.quick) {
@@ -1159,6 +1273,7 @@ impl HostwickApp {
                 pane.start_dir = p.dir;
                 if let Some(old) = p.id {
                     ids.insert(old, pane.id);
+                    pane.history = history.remove(&old);
                 }
                 Node::Leaf(pane)
             }
@@ -1168,8 +1283,8 @@ impl HostwickApp {
                 a,
                 b,
             } => {
-                let a = Box::new(self.build_tree(*a, ids));
-                let b = Box::new(self.build_tree(*b, ids));
+                let a = Box::new(self.build_tree(*a, ids, history));
+                let b = Box::new(self.build_tree(*b, ids, history));
                 Node::Split {
                     id: self.next_id(),
                     vertical,
@@ -1249,44 +1364,6 @@ impl HostwickApp {
 
     // ---- transfers ------------------------------------------------------------
 
-    fn on_transfer(&mut self, ev: TransferEvent, cx: &mut Context<Self>) {
-        match ev {
-            TransferEvent::Queued { id, label } => {
-                self.transfers.push(TransferRow {
-                    id,
-                    label,
-                    done: 0,
-                    total: 0,
-                    rate: 0.0,
-                    state: None,
-                });
-                // Keep the panel bounded.
-                if self.transfers.len() > 200 {
-                    self.transfers.retain(|t| t.state.is_none());
-                }
-            }
-            TransferEvent::Progress {
-                id,
-                done,
-                total,
-                bytes_per_sec,
-            } => {
-                if let Some(r) = self.transfers.iter_mut().find(|r| r.id == id) {
-                    (r.done, r.total, r.rate) = (done, total, bytes_per_sec);
-                }
-            }
-            TransferEvent::Finished { id, state } => {
-                if let Some(r) = self.transfers.iter_mut().find(|r| r.id == id) {
-                    if let TransferState::Done { .. } = state {
-                        r.done = r.total;
-                    }
-                    r.state = Some(state);
-                }
-            }
-        }
-        cx.notify();
-    }
-
     // ---- profiles ---------------------------------------------------------------
 
     /// New host (`None`) or edit an existing one.
@@ -1348,6 +1425,19 @@ impl HostwickApp {
         let m = ks.modifiers;
         if crate::a11y::is_menu_key(ks) {
             self.tab_anchor.open(window, cx);
+            cx.stop_propagation();
+            return;
+        }
+        // Ctrl+Shift+←/→ move the tab itself.
+        if m.control
+            && m.shift
+            && !m.alt
+            && !m.platform
+            && matches!(ks.key.as_str(), "left" | "right")
+        {
+            if let Some(id) = self.active.and_then(|i| self.tabs.get(i)).map(|t| t.id) {
+                self.nudge_tab(id, if ks.key == "left" { -1 } else { 1 }, cx);
+            }
             cx.stop_propagation();
             return;
         }
@@ -1485,6 +1575,34 @@ impl HostwickApp {
             cx.stop_propagation();
             return;
         }
+        // Ctrl/⌘+1…8 jump to that tab, 9 to the last: also from inside a
+        // terminal (those keys mean nothing to a shell).
+        if app_mod
+            && !m.alt
+            && !m.shift
+            && !(mac && m.control)
+            && let Some(n) = tabs::digit_key(key)
+            && tabs::tab_for_number(n, self.tabs.len()).is_some()
+        {
+            self.jump_to_tab(n, window, cx);
+            cx.stop_propagation();
+            return;
+        }
+        // Zoom: Ctrl/⌘ + = (or +), -, 0 for the active terminal tab.
+        if app_mod && !m.alt && !(mac && m.control) {
+            let dir = match key {
+                "=" | "+" | "plus" => Some(1),
+                "-" | "minus" if !m.shift => Some(-1),
+                "0" if !m.shift => Some(0),
+                _ => None,
+            };
+            if let Some(dir) = dir
+                && self.zoom_active(dir, cx)
+            {
+                cx.stop_propagation();
+                return;
+            }
+        }
         let multi_pane = self
             .active
             .and_then(|i| self.tabs.get(i))
@@ -1521,7 +1639,17 @@ impl HostwickApp {
                 }
                 true
             }
-            "t" if cmd => {
+            // Ctrl+Shift+T / ⌘⇧T: the tab closed last, back again.
+            "t" if cmd && m.shift => {
+                self.reopen_closed_tab(window, cx);
+                true
+            }
+            // Duplicate: Ctrl+Shift+U, ⌘T.
+            "t" if cmd && mac => {
+                self.duplicate_active(window, cx);
+                true
+            }
+            "u" if cmd && !mac => {
                 self.duplicate_active(window, cx);
                 true
             }

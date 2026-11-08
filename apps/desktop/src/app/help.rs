@@ -1,6 +1,7 @@
 //! The shortcut cheat sheet (F1, Ctrl+/, the ? button): every shortcut,
 //! grouped, searchable, written the way this platform writes keys.
 
+use crate::zoom::px;
 use gpui_kit::accesskit::Role;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};

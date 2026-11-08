@@ -10,6 +10,7 @@ mod i18n;
 mod a11y;
 mod app;
 mod backend;
+mod desknotify;
 mod editors;
 mod files;
 mod firstrun;
@@ -27,6 +28,7 @@ mod tools;
 mod util;
 mod vault;
 mod vaultui;
+mod zoom;
 
 use std::sync::Arc;
 
@@ -67,6 +69,20 @@ impl AssetSource for AppAssets {
     }
 }
 
+/// Where the first window was last time.
+fn layout_bounds(backend: &backend::Backend, cx: &App) -> Option<layout::SavedBounds> {
+    if !settings::Settings::get(cx).restore_tabs {
+        return None;
+    }
+    let json = backend
+        .store
+        .setting(layout::TABS_KEY)
+        .ok()
+        .flatten()
+        .filter(|j| !j.is_empty())?;
+    layout::SavedSession::from_json(&json).bounds
+}
+
 fn main() {
     let (prompts_tx, prompts_rx) = futures::channel::mpsc::unbounded();
     let backend = match backend::Backend::new(prompts_tx) {
@@ -79,6 +95,7 @@ fn main() {
     let settings = settings::Settings::load(&backend.store);
     logging::init(&backend.paths.logs, &settings.log_level);
     let lang = i18n::set_language(&settings.language);
+    zoom::set_ui_scale(settings.ui_scale);
     tracing::info!(version = env!("CARGO_PKG_VERSION"), data = %backend.paths.data_dir.display(), lang, "starting");
 
     gpui_kit::application()
@@ -93,24 +110,36 @@ fn main() {
                 }
             })
             .detach();
+            // Windows closing because the app quits keep their tabs in the
+            // saved layout.
+            cx.on_app_quit(|cx| {
+                app::mark_quitting(cx);
+                async {}
+            })
+            .detach();
+            // Prompts from the SSH layer (host keys, passwords) go to the
+            // window in front, one at a time.
+            cx.spawn(async move |cx| {
+                use futures::StreamExt as _;
+                let mut rx = prompts_rx;
+                while let Some(p) = rx.next().await {
+                    cx.update(|cx| app::route_prompt(p, cx));
+                }
+            })
+            .detach();
 
-            let options = WindowOptions {
-                window_bounds: Some(WindowBounds::centered(size(px(1280.0), px(800.0)), cx)),
-                // Matches StartupWMClass in hostwick.desktop (Linux taskbar icon).
-                app_id: Some("hostwick".into()),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Hostwick".into()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            };
-            let opened = gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| app::HostwickApp::new(backend, prompts_rx, window, cx))
+            let saved = layout_bounds(&backend, cx);
+            let extra = app::saved_extra(&backend, cx);
+            let options = app::options_for(saved, cx);
+            let first = backend.clone();
+            let opened = gpui_kit::open_window(options, cx, move |window, cx| {
+                cx.new(|cx| app::HostwickApp::new(first, window, cx, app::Init::First))
             });
             if let Err(e) = opened {
                 eprintln!("hostwick: cannot open window: {e:#}");
                 cx.quit();
             }
+            app::restore_extra_windows(&backend, extra, cx);
             cx.activate(true);
         });
 }

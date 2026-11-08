@@ -12,7 +12,8 @@
 //!   source, so a changed source is never spliced onto stale bytes.
 //! - Transient failures retry with exponential backoff + jitter, resuming.
 //! - Concurrency is bounded by a semaphore; bandwidth by a shared token bucket.
-//! - Every job is cancellable.
+//! - Every job is cancellable, and can be paused (the stream stops, the
+//!   partial file stays) and resumed, or retried after a failure.
 
 mod copy;
 mod engine;
@@ -43,6 +44,10 @@ pub enum TransferError {
     SizeMismatch { expected: u64, actual: u64 },
     #[error("cancelled")]
     Cancelled,
+    /// The transfer was paused: the partial file is kept and the copy
+    /// continues from it when resumed. Never reaches callers of the engine.
+    #[error("paused")]
+    Paused,
 }
 
 impl TransferError {

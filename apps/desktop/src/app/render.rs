@@ -2,15 +2,15 @@
 
 use gpui_kit::accesskit::Role;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use hostwick_transfer::TransferState;
 
-use super::{HostwickApp, Pane, PaneBody, TabKind};
+use super::tabbar::{DraggedTab, zone_overlay};
+use super::{HostwickApp, Pane, PaneBody};
 use crate::layout::Node;
-use crate::util::{human_size, keys};
+use crate::util::keys;
+use crate::zoom::px;
 
 /// Divider between split panes, in pixels (easy to grab).
 const DIVIDER: f32 = 5.0;
@@ -47,166 +47,12 @@ impl HostwickApp {
         }
     }
 
-    fn pane_alive(p: &Pane, cx: &App) -> bool {
+    pub(super) fn pane_alive(p: &Pane, cx: &App) -> bool {
         match &p.body {
             PaneBody::Terminal(v) => v.read(cx).is_alive(),
             PaneBody::Failed(_) => false,
             _ => true,
         }
-    }
-
-    pub(super) fn render_tabs(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let active = self.active;
-        let bar_focused = self.tabs_focus.is_focused(window);
-        let anchor = self.tab_anchor.clone();
-        anchor.clear();
-        let count = self.tabs.len();
-        div()
-            .h(px(36.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .bg(theme.tab_bar)
-            .border_b_1()
-            .border_color(theme.border)
-            .child(
-                div()
-                    .id("tabs")
-                    .track_focus(&self.tabs_focus)
-                    .role(Role::TabList)
-                    .aria_label(t!("tabs-label"))
-                    .aria_description(t!("tabs-keys"))
-                    .on_key_down(cx.listener(Self::on_tabs_key))
-                    .flex_1()
-                    .flex()
-                    .h_full()
-                    .overflow_x_scroll()
-                    .children(self.tabs.iter().enumerate().map(|(ix, t)| {
-                        let is_active = active == Some(ix);
-                        let panes = t.panes();
-                        let alive = panes.iter().all(|p| Self::pane_alive(p, cx));
-                        let base = t
-                            .focused_pane()
-                            .map(|p| Self::pane_title(p, cx))
-                            .unwrap_or_default();
-                        let title: SharedString = match (t.kind, panes.len()) {
-                            (TabKind::Files, _) => {
-                                let linked = panes.iter().any(|p| p.follows.is_some());
-                                let name = t.profile().map(|p| p.name.clone()).unwrap_or_default();
-                                let title = t!("tab-files-title", name = name);
-                                if linked {
-                                    format!("{title} ⇄").into()
-                                } else {
-                                    title
-                                }
-                            }
-                            (_, 1) => base,
-                            (_, n) => format!("{base} +{}", n - 1).into(),
-                        };
-                        let pending = panes.iter().all(|p| matches!(p.body, PaneBody::Pending));
-                        let tab_id = t.id;
-                        let state = if pending {
-                            t!("tab-state-not-connected")
-                        } else if alive {
-                            t!("tab-state-connected")
-                        } else {
-                            t!("tab-state-disconnected")
-                        };
-                        let close_label = t!("tab-close", title = title.clone());
-                        let spoken = t!(
-                            "tab-spoken",
-                            title = title.clone(),
-                            state = state,
-                            index = ix + 1,
-                            count = count
-                        );
-                        div()
-                            .id(("tab", t.id))
-                            .role(Role::Tab)
-                            .aria_label(spoken)
-                            .aria_selected(is_active)
-                            .when(is_active, |d| {
-                                d.aria_active_descendant().relative().child(anchor.track())
-                            })
-                            .when(is_active && bar_focused, |d| {
-                                d.border_2().border_color(theme.ring)
-                            })
-                            .h_full()
-                            .px(px(12.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .max_w(px(240.0))
-                            .text_size(px(13.0))
-                            .border_r_1()
-                            .border_color(theme.border)
-                            .when(is_active, |d| {
-                                d.bg(theme.tab_active)
-                                    .text_color(theme.tab_active_foreground)
-                            })
-                            .when(!is_active, |d| d.text_color(theme.muted_foreground))
-                            .on_click(cx.listener(move |app, _, window, cx| {
-                                if let Some(ix) = app.tabs.iter().position(|t| t.id == tab_id) {
-                                    app.activate_tab(ix, window, cx);
-                                }
-                            }))
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .size(px(7.0))
-                                    .rounded_full()
-                                    .bg(if pending {
-                                        theme.muted_foreground
-                                    } else if alive {
-                                        theme.success
-                                    } else {
-                                        theme.danger
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .child(title),
-                            )
-                            .context_menu(Self::tab_menu(cx.entity().downgrade(), t.id))
-                            .child(
-                                Button::new(("close", t.id))
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::Close)
-                                    .tab_stop(false)
-                                    .accessibility_label(close_label)
-                                    .on_click(cx.listener(move |app, _, _, cx| {
-                                        if let Some(ix) =
-                                            app.tabs.iter().position(|t| t.id == tab_id)
-                                        {
-                                            app.close_tab(ix, cx);
-                                        }
-                                    })),
-                            )
-                    })),
-            )
-            .child(
-                div().px(px(8.0)).child(
-                    Button::new("broadcast")
-                        .small()
-                        .label(if self.broadcast {
-                            t!("broadcast-on")
-                        } else {
-                            t!("broadcast")
-                        })
-                        .when(self.broadcast, |b| b.warning())
-                        .tooltip(t!("broadcast-tooltip", keys = keys("Ctrl+Shift+B", "⌘B")))
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            app.broadcast = !app.broadcast;
-                            cx.notify();
-                        })),
-                ),
-            )
-            .into_any_element()
     }
 
     fn render_empty(&self, cx: &App) -> AnyElement {
@@ -225,7 +71,9 @@ impl HostwickApp {
             ]),
             line(&[
                 (keys("Ctrl+Shift+N", "⌘N"), t!("shortcut-new-host")),
-                (keys("Ctrl+Shift+T", "⌘T"), t!("shortcut-duplicate-tab")),
+                (keys("Ctrl+Shift+U", "⌘T"), t!("shortcut-duplicate-tab")),
+                (keys("Ctrl+Shift+T", "⌘⇧T"), t!("shortcut-reopen-tab")),
+                (keys("Ctrl+1…9", "⌘1…9"), t!("shortcut-jump-tab")),
                 (keys("Ctrl+Shift+W", "⌘W"), t!("shortcut-close-pane")),
                 (keys("Ctrl+Shift+R", "⌘R"), t!("shortcut-reconnect")),
                 (keys("Ctrl+Tab", "⌃Tab"), t!("shortcut-next-tab")),
@@ -428,6 +276,14 @@ impl HostwickApp {
                         .on_click(cx.listener(move |app, _, w, cx| app.close_pane(pane_id, w, cx))),
                 )
         });
+        let zone_here = cx
+            .has_active_drag()
+            .then(|| {
+                self.drop_zone
+                    .filter(|(p, _)| *p == pane_id)
+                    .map(|(_, e)| e)
+            })
+            .flatten();
         div()
             .id(("pane", pane_id))
             .size_full()
@@ -436,10 +292,46 @@ impl HostwickApp {
             .capture_any_mouse_down(cx.listener(move |app, _, window, cx| {
                 app.focus_pane(pane_id, window, cx);
             }))
+            // A tab dragged over a side of this pane: drop to split here.
+            .on_drag_move(
+                cx.listener(move |app, ev: &DragMoveEvent<DraggedTab>, _, cx| {
+                    let src = ev.drag(cx).id;
+                    app.dragging_tab = Some(src);
+                    let b = ev.bounds;
+                    let edge = (b.contains(&ev.event.position)
+                        && b.size.width > px(1.0)
+                        && b.size.height > px(1.0)
+                        && app.can_merge_tab(src, pane_id))
+                    .then(|| {
+                        let fx = (ev.event.position.x - b.origin.x) / b.size.width;
+                        let fy = (ev.event.position.y - b.origin.y) / b.size.height;
+                        crate::layout::edge_at(fx, fy)
+                    })
+                    .flatten();
+                    let new = edge.map(|e| (pane_id, e));
+                    if new.is_some() {
+                        if app.drop_zone != new {
+                            app.drop_zone = new;
+                            cx.notify();
+                        }
+                    } else if app.drop_zone.is_some_and(|(p, _)| p == pane_id) {
+                        app.drop_zone = None;
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_drop(cx.listener(move |app, d: &DraggedTab, window, cx| {
+                if let Some((p, edge)) = app.drop_zone.take()
+                    && p == pane_id
+                {
+                    app.merge_tab_into(d.id, pane_id, edge, window, cx);
+                }
+            }))
             .flex()
             .flex_col()
             .children(header)
             .child(div().flex_1().min_h_0().relative().child(inner))
+            .when_some(zone_here, |d, edge| d.child(zone_overlay(edge)))
             .when(show_focus, |d| {
                 // Focus ring drawn over the pane (not affecting layout).
                 d.child(
@@ -582,142 +474,42 @@ impl HostwickApp {
         let multi = tab.root.count() > 1;
         self.render_node(&tab.root, tab.focused, multi, cx)
     }
-
-    pub(super) fn render_transfers(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.transfers.is_empty() {
-            return None;
-        }
-        let theme = cx.theme().clone();
-        let active = self.transfers.iter().filter(|t| t.state.is_none()).count();
-        let rows = self.transfers.iter().rev().take(6).map(|t| {
-            let pct = if t.total == 0 {
-                if t.state.is_some() { 1.0 } else { 0.0 }
-            } else {
-                t.done as f32 / t.total as f32
-            };
-            let (status, color) = match &t.state {
-                None => (
-                    t!(
-                        "transfer-progress",
-                        done = human_size(t.done),
-                        total = human_size(t.total),
-                        rate = human_size(t.rate as u64)
-                    )
-                    .to_string(),
-                    theme.primary,
-                ),
-                Some(TransferState::Done { .. }) => (
-                    t!("transfer-done", size = human_size(t.total)).to_string(),
-                    theme.success,
-                ),
-                Some(TransferState::Skipped) => {
-                    (t!("transfer-skipped").to_string(), theme.muted_foreground)
-                }
-                Some(TransferState::Cancelled) => {
-                    (t!("transfer-cancelled").to_string(), theme.muted_foreground)
-                }
-                Some(TransferState::Failed { error }) => (
-                    t!("transfer-failed", error = error.to_string()).to_string(),
-                    theme.danger,
-                ),
-                Some(_) => (String::new(), theme.muted_foreground),
-            };
-            let id = t.id;
-            let running = t.state.is_none();
-            div()
-                .id(SharedString::from(format!("transfer-row-{}", id.0)))
-                .flex()
-                .items_center()
-                .gap(px(10.0))
-                .text_size(px(12.0))
-                .child(
-                    div()
-                        .w(px(380.0))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .child(crate::a11y::text(t.label.clone())),
-                )
-                .child(
-                    div()
-                        .w(px(160.0))
-                        .h(px(6.0))
-                        .rounded(px(3.0))
-                        .bg(theme.muted)
-                        .child(
-                            div()
-                                .h_full()
-                                .rounded(px(3.0))
-                                .bg(color)
-                                .w(relative(pct.clamp(0.0, 1.0))),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .text_color(theme.muted_foreground)
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .child(crate::a11y::text(status)),
-                )
-                .when(running, |d| {
-                    d.child(
-                        Button::new(SharedString::from(format!("cancel-{}", id.0)))
-                            .xsmall()
-                            .ghost()
-                            .label(t!("transfer-cancel"))
-                            .on_click(
-                                cx.listener(move |app, _, _, _| app.backend.engine.cancel(id)),
-                            ),
-                    )
-                })
-        });
-        Some(
-            div()
-                .flex_none()
-                .border_t_1()
-                .border_color(theme.border)
-                .p(px(8.0))
-                .flex()
-                .flex_col()
-                .gap(px(4.0))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .text_size(px(12.0))
-                        .child(t!("transfers-title", count = active))
-                        .child(div().flex_1())
-                        .child(
-                            Button::new("clear-transfers")
-                                .xsmall()
-                                .ghost()
-                                .label(t!("transfers-clear"))
-                                .on_click(cx.listener(|app, _, _, cx| {
-                                    app.transfers.retain(|t| t.state.is_none());
-                                    app.backend.engine.prune_finished();
-                                    cx.notify();
-                                })),
-                        ),
-                )
-                .children(rows)
-                .into_any_element(),
-        )
-    }
 }
 
 impl Render for HostwickApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        // Component sizes follow the UI scale setting.
+        window.set_rem_size(gpui_kit::px(crate::zoom::rem_px()));
         self.flush_pending_error(window, cx);
         let toasts = crate::notify::layer(window, cx);
         let sidebar = self.render_sidebar(window, cx);
         let tabs = self.render_tabs(window, cx);
         let body = self.render_body(cx);
         let transfers = self.render_transfers(cx);
+        let hud = self.zoom_hud.map(|pct| {
+            let text = format!("{pct}%");
+            div()
+                .id("zoom-hud")
+                .role(Role::Status)
+                .aria_label(t!("zoom-level", percent = pct))
+                .absolute()
+                .top(px(52.0))
+                .right(px(20.0))
+                .px(px(14.0))
+                .py(px(6.0))
+                .rounded(px(8.0))
+                .bg(theme.popover)
+                .text_color(theme.popover_foreground)
+                .border_1()
+                .border_color(theme.border)
+                .text_size(px(18.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(text)
+        });
         div()
             .size_full()
+            .relative()
             .flex()
             .bg(theme.background)
             .text_color(theme.foreground)
@@ -736,6 +528,7 @@ impl Render for HostwickApp {
                     .child(div().flex_1().min_h_0().overflow_hidden().child(body))
                     .children(transfers),
             )
+            .children(hud)
             .children(toasts)
     }
 }

@@ -30,6 +30,50 @@ pub fn sort_entries(entries: &mut [Entry], key: SortKey, ascending: bool) {
     });
 }
 
+/// Does `name` match the text typed in a pane's filter? Case-insensitive;
+/// several words must all match; a word with `*` or `?` is a pattern for the
+/// whole name (`*.log`), any other word may appear anywhere in it.
+pub fn matches_filter(name: &str, filter: &str) -> bool {
+    let name = name.to_lowercase();
+    filter.split_whitespace().all(|term| {
+        if term.contains(['*', '?']) {
+            glob(&term.to_lowercase(), &name)
+        } else {
+            name.contains(&term.to_lowercase())
+        }
+    })
+}
+
+/// `*` (any run) and `?` (one character) against the whole of `text`.
+fn glob(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti) = (0, 0);
+    // Where the last `*` was, and the text position it currently covers to.
+    let mut star: Option<(usize, usize)> = None;
+    while ti < t.len() {
+        match p.get(pi) {
+            Some('*') => {
+                star = Some((pi, ti));
+                pi += 1;
+            }
+            Some(c) if *c == '?' || *c == t[ti] => {
+                pi += 1;
+                ti += 1;
+            }
+            _ => match star {
+                Some((sp, st)) => {
+                    pi = sp + 1;
+                    ti = st + 1;
+                    star = Some((sp, st + 1));
+                }
+                None => return false,
+            },
+        }
+    }
+    p[pi..].iter().all(|c| *c == '*')
+}
+
 /// Multi-selection over a list of names, with a cursor (the focused row)
 /// and an anchor for Shift ranges. Kept by name so it survives a refresh.
 #[derive(Debug, Default, Clone)]
@@ -313,6 +357,38 @@ mod tests {
         assert_eq!(t.cursor, Some(0));
         s.retain(&["a", "x"]);
         assert_eq!((s.names.len(), s.cursor), (1, Some(0)));
+    }
+
+    #[test]
+    fn filter_matching() {
+        // Empty filter shows everything.
+        assert!(matches_filter("anything", ""));
+        assert!(matches_filter("anything", "   "));
+        // Substring, any case.
+        assert!(matches_filter("Report-2024.PDF", "port"));
+        assert!(matches_filter("Report-2024.PDF", "PDF"));
+        assert!(!matches_filter("Report-2024.PDF", "xls"));
+        // Several words must all be present, in any order.
+        assert!(matches_filter("Report-2024.PDF", "2024 report"));
+        assert!(!matches_filter("Report-2024.PDF", "2024 draft"));
+        // Patterns cover the whole name.
+        assert!(matches_filter("server.log", "*.log"));
+        assert!(!matches_filter("server.log.1", "*.log"));
+        assert!(matches_filter("server.log.1", "*.log*"));
+        assert!(matches_filter("a1.txt", "a?.txt"));
+        assert!(!matches_filter("a12.txt", "a?.txt"));
+        assert!(matches_filter("anything", "*"));
+        assert!(matches_filter("x", "***"));
+        assert!(!matches_filter("", "?"));
+        assert!(matches_filter("abcabc", "a*c"));
+        assert!(matches_filter("abcab", "a*ab"));
+        // Non-ASCII names fold case too.
+        assert!(matches_filter("Übersicht.txt", "über"));
+        assert!(matches_filter("データ.csv", "*.csv"));
+        // Dots and brackets are plain characters, not regex.
+        assert!(matches_filter("a.b", "a.b"));
+        assert!(!matches_filter("axb", "a.b"));
+        assert!(matches_filter("[x].txt", "[x]"));
     }
 
     #[test]

@@ -3,6 +3,7 @@
 //! starts with the value all selected hosts share (empty when they differ);
 //! only fields the person changes are applied.
 
+use crate::zoom::px;
 use gpui_kit::accesskit::Role;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};

@@ -5,6 +5,7 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
+use crate::zoom::px;
 use gpui_kit::accesskit::Role;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
@@ -78,6 +79,7 @@ pub struct SettingsForm {
     base: Settings,
     font: Entity<InputState>,
     size: Entity<InputState>,
+    ui_scale: u32,
     scroll: Entity<InputState>,
     logdir: Entity<InputState>,
     editor: Entity<InputState>,
@@ -134,6 +136,7 @@ impl SettingsForm {
                 cx,
             ),
             size: mk(s.font_size.to_string(), "14".into(), window, cx),
+            ui_scale: s.ui_scale,
             scroll: mk(s.scrollback_lines.to_string(), "10000".into(), window, cx),
             logdir: mk(s.session_log_dir.clone(), default_dir.into(), window, cx),
             editor: mk(
@@ -302,6 +305,7 @@ impl SettingsForm {
         Ok(Settings {
             font_family: v(&self.font),
             font_size,
+            ui_scale: self.ui_scale,
             theme: self.theme,
             language: self.language.clone(),
             scrollback_lines: scrollback,
@@ -421,6 +425,9 @@ impl SettingsForm {
         }
         if new.theme != self.base.theme {
             apply_theme(new.theme, cx);
+        }
+        if new.ui_scale != self.base.ui_scale {
+            crate::zoom::set_ui_scale(new.ui_scale);
         }
         if new.language != self.base.language {
             crate::i18n::set_language(&new.language);
@@ -625,6 +632,20 @@ impl SettingsForm {
                         |f, v| f.theme = v,
                     ),
                 ))
+                .child(Self::row(
+                    t!("settings-ui-scale"),
+                    Self::choice(
+                        "ui-scale",
+                        self.ui_scale,
+                        &(crate::zoom::MIN_UI_SCALE..=crate::zoom::MAX_UI_SCALE)
+                            .step_by(crate::zoom::UI_SCALE_STEP as usize)
+                            .map(|p| (p, SharedString::from(format!("{p}%"))))
+                            .collect::<Vec<_>>(),
+                        cx,
+                        |f, v| f.ui_scale = v,
+                    ),
+                ))
+                .child(Self::hint(t!("settings-ui-scale-hint"), cx))
                 .child(Self::row(
                     t!("settings-terminal-font"),
                     Input::new(&self.font)

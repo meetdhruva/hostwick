@@ -14,9 +14,12 @@
 //! Every file operation runs on the Tokio runtime; the UI thread only
 //! awaits join handles.
 
+mod crumbs;
 mod edit;
+mod extras;
 mod ops;
 mod pane;
+mod preview;
 mod props;
 mod syncdlg;
 
@@ -24,6 +27,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::notify::{Toast, ToastExt as _};
+use crate::zoom::px;
 use futures::StreamExt as _;
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -43,6 +47,7 @@ use crate::backend::{Backend, FilesSession};
 use crate::settings::Settings;
 use crate::util::human_size;
 use edit::{ConflictChoice, EditEvent, EditSession, EditStatus};
+pub use extras::FilesEvent;
 use ops::{editor_command, parent_dir, remove_recursive};
 pub use pane::Side;
 use pane::{DragRows, Pane};
@@ -116,6 +121,15 @@ pub struct FilesView {
     /// follows its current folder.
     link: Option<String>,
     follow: bool,
+    /// Bookmarked folders of this computer and of the host.
+    marks_local: Vec<String>,
+    marks_remote: Vec<String>,
+    /// The quick preview (Space) and the text scroll position.
+    preview: Option<extras::Preview>,
+    preview_task: Option<Task<()>>,
+    preview_gen: u64,
+    preview_line: usize,
+    preview_scroll: UniformListScrollHandle,
     focus: FocusHandle,
     _tasks: Vec<Task<()>>,
     _subs: Vec<Subscription>,
@@ -167,8 +181,11 @@ impl FilesView {
     ) -> Self {
         bind_keys_once(cx);
         let local_fs: Arc<dyn RemoteFs> = Arc::new(LocalFs::system());
-        let (local, s1) = Pane::new(Side::Local, local_fs, window, cx);
-        let (remote, s2) = Pane::new(Side::Remote, session.fs, window, cx);
+        let (local, mut subs) = Pane::new(Side::Local, local_fs, window, cx);
+        let (remote, subs2) = Pane::new(Side::Remote, session.fs, window, cx);
+        subs.extend(subs2);
+        let marks_local = extras::load_marks(&backend, &profile, Side::Local);
+        let marks_remote = extras::load_marks(&backend, &profile, Side::Remote);
         let show_local = backend
             .store
             .setting(SHOW_LOCAL_KEY)
@@ -220,9 +237,16 @@ impl FilesView {
             link: None,
             menu_anchor: Default::default(),
             follow: false,
+            marks_local,
+            marks_remote,
+            preview: None,
+            preview_task: None,
+            preview_gen: 0,
+            preview_line: 0,
+            preview_scroll: UniformListScrollHandle::new(),
             focus: cx.focus_handle(),
             _tasks: vec![edit_task],
-            _subs: vec![s1, s2],
+            _subs: subs,
         };
         v.navigate(Side::Remote, ".".into(), cx);
         v.navigate(Side::Local, start_local, cx);
@@ -352,12 +376,26 @@ impl FilesView {
             Ok(Ok((abs, listing))) => {
                 let list = listing.entries;
                 let same = abs == pane.cwd;
+                // Another folder starts with no filter and the path bar
+                // back to crumbs.
+                if !same && !pane.filter.is_empty() {
+                    pane.filter.clear();
+                    pane.filter_dirty = true;
+                }
+                if !same {
+                    pane.editing_path = false;
+                }
                 let name_at = |ix: Option<usize>| {
                     ix.and_then(|i| pane.entries.get(i)).map(|e| e.name.clone())
                 };
                 let (cursor, anchor) = (name_at(pane.sel.cursor), name_at(pane.sel.anchor));
                 let old_ix = pane.sel.cursor;
-                pane.entries = list;
+                pane.entries = list
+                    .iter()
+                    .filter(|e| ops::matches_filter(&e.name, &pane.filter))
+                    .cloned()
+                    .collect();
+                pane.all = list;
                 pane.sel.cursor = None;
                 pane.sel.anchor = None;
                 pane.resort();
@@ -439,6 +477,11 @@ impl FilesView {
         let m = ev.keystroke.modifiers;
         let ctrl = m.control || m.platform;
         let key = ev.keystroke.key.as_str();
+        // The quick preview takes Esc/Space (close) and Page keys first.
+        if self.preview.is_some() && self.preview_key(key, m, cx) {
+            cx.stop_propagation();
+            return;
+        }
         let names: Vec<String> = self
             .pane(side)
             .entries
@@ -458,8 +501,31 @@ impl FilesView {
                 }
                 true
             }
+            // Typing narrows the list; Backspace takes a letter back, Esc all.
+            "escape" if !self.pane(side).filter.is_empty() => {
+                self.set_filter(side, String::new(), false, cx);
+                true
+            }
+            "backspace" if !self.pane(side).filter.is_empty() => {
+                let mut f = self.pane(side).filter.clone();
+                f.pop();
+                self.set_filter(side, f, false, cx);
+                true
+            }
             "backspace" => {
                 self.up(side, cx);
+                true
+            }
+            "l" if ctrl && !m.shift && !m.alt => {
+                self.edit_path(side, window, cx);
+                true
+            }
+            "d" if m.control && !m.shift && !m.alt && !m.platform => {
+                self.toggle_bookmark(side, cx);
+                true
+            }
+            "f" if ctrl && !m.shift && !m.alt => {
+                self.focus_filter(side, window, cx);
                 true
             }
             "up" | "down" | "pageup" | "pagedown" | "home" | "end" => {
@@ -484,10 +550,20 @@ impl FilesView {
                 true
             }
             // Pick rows one by one from the keyboard (like Ctrl+click).
-            "space" if !ctrl && !m.alt => {
+            "space" | "insert" if key == "insert" || (ctrl && !m.alt) => {
                 let pane = self.pane_mut(side);
                 if let Some(ix) = pane.sel.cursor {
                     pane.sel.click(ix, &refs, true, false);
+                }
+                true
+            }
+            // Space: look at the file (while filtering it types a space).
+            "space" if !ctrl && !m.alt => {
+                if self.pane(side).filter.is_empty() {
+                    self.open_preview(side, cx);
+                } else {
+                    let f = format!("{} ", self.pane(side).filter);
+                    self.set_filter(side, f, false, cx);
                 }
                 true
             }
@@ -521,9 +597,28 @@ impl FilesView {
                 self.confirm_delete(side, window, cx);
                 true
             }
+            // Any other plain character starts (or extends) the filter.
+            _ if !ctrl && !m.alt => {
+                let typed = ev
+                    .keystroke
+                    .key_char
+                    .as_deref()
+                    .filter(|s| s.chars().count() == 1)
+                    .filter(|s| s.chars().all(|c| !c.is_control()));
+                match typed {
+                    Some(ch) if !(ch.trim().is_empty() && self.pane(side).filter.is_empty()) => {
+                        let f = format!("{}{ch}", self.pane(side).filter);
+                        self.set_filter(side, f, false, cx);
+                        true
+                    }
+                    _ => false,
+                }
+            }
             _ => false,
         };
         if handled {
+            // The preview follows the cursor.
+            self.follow_preview(cx);
             cx.stop_propagation();
             cx.notify();
         }
@@ -1676,8 +1771,10 @@ impl Render for FilesView {
             .show_local
             .then(|| self.render_pane(Side::Local, window, cx));
         let remote = self.render_pane(Side::Remote, window, cx);
+        let preview = self.render_preview(cx);
         div()
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .track_focus(&self.focus)
@@ -1738,5 +1835,6 @@ impl Render for FilesView {
                         )),
                 )
             })
+            .children(preview)
     }
 }

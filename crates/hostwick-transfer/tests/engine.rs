@@ -453,3 +453,234 @@ async fn watch_keeps_destination_up_to_date() {
         .unwrap()
         .unwrap();
 }
+
+// ---- pause, resume and retry ---------------------------------------------
+
+/// Progress events seen so far, without blocking.
+fn drain(
+    events: &mut tokio::sync::broadcast::Receiver<hostwick_transfer::TransferEvent>,
+) -> Vec<u64> {
+    let mut seen = Vec::new();
+    while let Ok(ev) = events.try_recv() {
+        if let hostwick_transfer::TransferEvent::Progress { done, .. } = ev {
+            seen.push(done);
+        }
+    }
+    seen
+}
+
+#[tokio::test]
+async fn pause_stops_the_stream_and_resume_continues_from_the_partial() {
+    use hostwick_transfer::TransferEvent;
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let content = data(4_000_000, 11);
+    std::fs::write(a.path().join("f"), &content).unwrap();
+    let (src, dst) = (fs(a.path()), fs(b.path()));
+    // 2 MB/s: ~2 s in total, slow enough to pause in the middle.
+    let engine = TransferEngine::new(EngineConfig {
+        rate_limit: Some(2_000_000),
+        ..Default::default()
+    });
+    let mut events = engine.subscribe();
+    let id = engine.enqueue(job(&src, "/f", &dst, "/f", ExistingPolicy::Overwrite));
+    loop {
+        if let Ok(TransferEvent::Progress { done, .. }) = events.recv().await
+            && done > 500_000
+        {
+            break;
+        }
+    }
+    engine.pause(id);
+    // Let the in-flight chunk land, then nothing may move any more.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let _ = drain(&mut events);
+    let part = b.path().join(format!("f{PART_SUFFIX}"));
+    let size_at_pause = std::fs::metadata(&part).unwrap().len();
+    assert!(size_at_pause > 0 && size_at_pause < 4_000_000);
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert!(
+        drain(&mut events).is_empty(),
+        "progress continued while paused"
+    );
+    assert_eq!(std::fs::metadata(&part).unwrap().len(), size_at_pause);
+    assert!(!matches!(
+        engine.state(id),
+        Some(TransferState::Done { .. } | TransferState::Failed { .. })
+    ));
+    assert!(!b.path().join("f").exists());
+
+    engine.resume(id);
+    let state = tokio::time::timeout(Duration::from_secs(20), engine.wait(id))
+        .await
+        .unwrap();
+    let Some(TransferState::Done { resumed_from, .. }) = state else {
+        panic!("{state:?}")
+    };
+    assert_eq!(
+        resumed_from, size_at_pause,
+        "resume must continue, not restart"
+    );
+    assert_eq!(std::fs::read(b.path().join("f")).unwrap(), content);
+}
+
+#[tokio::test]
+async fn pause_all_holds_new_transfers_and_frees_slots() {
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    std::fs::write(a.path().join("big"), data(4_000_000, 1)).unwrap();
+    std::fs::write(a.path().join("small"), data(1_000, 2)).unwrap();
+    let (src, dst) = (fs(a.path()), fs(b.path()));
+    // One slot: a paused transfer must not keep the next one waiting.
+    let engine = TransferEngine::new(EngineConfig {
+        max_concurrent: 1,
+        rate_limit: Some(2_000_000),
+        ..Default::default()
+    });
+    let mut events = engine.subscribe();
+    let big = engine.enqueue(job(&src, "/big", &dst, "/big", ExistingPolicy::Overwrite));
+    loop {
+        if let Ok(hostwick_transfer::TransferEvent::Progress { done, .. }) = events.recv().await
+            && done > 300_000
+        {
+            break;
+        }
+    }
+    engine.pause(big);
+    let small = engine.enqueue(job(
+        &src,
+        "/small",
+        &dst,
+        "/small",
+        ExistingPolicy::Overwrite,
+    ));
+    let state = tokio::time::timeout(Duration::from_secs(5), engine.wait(small))
+        .await
+        .expect("the small file waited for the paused one");
+    assert!(matches!(state, Some(TransferState::Done { .. })));
+    assert!(!matches!(
+        engine.state(big),
+        Some(TransferState::Done { .. })
+    ));
+
+    // Everything paused: a new transfer does not start.
+    engine.pause_all();
+    assert!(engine.is_paused_all());
+    std::fs::write(a.path().join("later"), b"later").unwrap();
+    let later = engine.enqueue(job(
+        &src,
+        "/later",
+        &dst,
+        "/later",
+        ExistingPolicy::Overwrite,
+    ));
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(engine.state(later), Some(TransferState::Queued));
+    assert!(!b.path().join("later").exists());
+
+    // `big` stays paused on its own switch after "resume all".
+    engine.resume_all();
+    let state = tokio::time::timeout(Duration::from_secs(5), engine.wait(later))
+        .await
+        .unwrap();
+    assert!(matches!(state, Some(TransferState::Done { .. })));
+    assert!(!matches!(
+        engine.state(big),
+        Some(TransferState::Done { .. })
+    ));
+    engine.resume(big);
+    let state = tokio::time::timeout(Duration::from_secs(20), engine.wait(big))
+        .await
+        .unwrap();
+    assert!(matches!(state, Some(TransferState::Done { resumed_from, .. }) if resumed_from > 0));
+    assert_eq!(
+        std::fs::read(b.path().join("big")).unwrap(),
+        data(4_000_000, 1)
+    );
+}
+
+#[tokio::test]
+async fn cancel_works_on_a_paused_transfer() {
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    std::fs::write(a.path().join("f"), data(3_000_000, 4)).unwrap();
+    let (src, dst) = (fs(a.path()), fs(b.path()));
+    let engine = TransferEngine::new(EngineConfig {
+        rate_limit: Some(1_000_000),
+        ..Default::default()
+    });
+    engine.pause_all();
+    let id = engine.enqueue(job(&src, "/f", &dst, "/f", ExistingPolicy::Overwrite));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    engine.cancel(id);
+    let state = tokio::time::timeout(Duration::from_secs(2), engine.wait(id))
+        .await
+        .unwrap();
+    assert_eq!(state, Some(TransferState::Cancelled));
+}
+
+#[tokio::test]
+async fn retry_runs_a_failed_transfer_again() {
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (src, dst) = (fs(a.path()), fs(b.path()));
+    let engine = TransferEngine::new(EngineConfig::default());
+    let id = engine.enqueue(job(&src, "/f", &dst, "/f", ExistingPolicy::Overwrite));
+    let state = tokio::time::timeout(Duration::from_secs(2), engine.wait(id))
+        .await
+        .unwrap();
+    assert!(
+        matches!(state, Some(TransferState::Failed { .. })),
+        "{state:?}"
+    );
+
+    // Only failures and cancellations can be retried.
+    std::fs::write(a.path().join("ok"), b"ok").unwrap();
+    let ok = engine.enqueue(job(&src, "/ok", &dst, "/ok", ExistingPolicy::Overwrite));
+    engine.wait(ok).await;
+    assert!(engine.retry(ok).is_none());
+    assert!(
+        engine
+            .retry(hostwick_transfer::TransferId(uuid::Uuid::new_v4()))
+            .is_none()
+    );
+
+    std::fs::write(a.path().join("f"), b"now it exists").unwrap();
+    let again = engine.retry(id).expect("failed transfer is retryable");
+    assert_ne!(again, id);
+    assert!(engine.state(id).is_none(), "the old attempt is replaced");
+    let state = tokio::time::timeout(Duration::from_secs(5), engine.wait(again))
+        .await
+        .unwrap();
+    assert!(
+        matches!(state, Some(TransferState::Done { .. })),
+        "{state:?}"
+    );
+    assert_eq!(std::fs::read(b.path().join("f")).unwrap(), b"now it exists");
+}
+
+#[tokio::test]
+async fn queued_event_says_where_files_go() {
+    use hostwick_transfer::TransferEvent;
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    std::fs::write(a.path().join("f"), b"x").unwrap();
+    let engine = TransferEngine::new(EngineConfig::default());
+    let mut events = engine.subscribe();
+    let id = engine.enqueue(job(
+        &fs(a.path()),
+        "/f",
+        &fs(b.path()),
+        "/out/f",
+        ExistingPolicy::Overwrite,
+    ));
+    let Ok(TransferEvent::Queued {
+        id: got,
+        dst_path,
+        dst_local,
+        src_local,
+        ..
+    }) = events.recv().await
+    else {
+        panic!("first event is Queued")
+    };
+    assert_eq!(
+        (got, dst_path.as_str(), dst_local, src_local),
+        (id, "/out/f", true, true)
+    );
+}

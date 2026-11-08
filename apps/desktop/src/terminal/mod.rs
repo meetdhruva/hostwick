@@ -17,6 +17,7 @@
 pub mod colors;
 mod element;
 pub mod highlight;
+mod hooks;
 pub mod integration;
 pub mod keys;
 pub mod mouse;
@@ -170,6 +171,8 @@ pub enum TerminalEvent {
     /// Close this pane (the last pane closes the tab).
     Close,
     LoggingChanged,
+    /// Ctrl+wheel (or ⌘+wheel): a zoom step, positive = bigger.
+    Zoom(i32),
 }
 
 /// Geometry of the last paint, for mapping mouse positions to cells.
@@ -242,6 +245,8 @@ pub struct TerminalView {
     selecting: bool,
     pub(crate) font: Font,
     pub(crate) font_size: Pixels,
+    /// This tab's zoom in percent of the settings font size.
+    zoom: u32,
     cwd: Option<String>,
     /// The host's own snippets (the global ones come from Settings).
     host_snippets: Vec<Snippet>,
@@ -324,7 +329,7 @@ impl TerminalView {
         session: TerminalSession,
         initial: GridSize,
         rt: &tokio::runtime::Handle,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         bind_keys_once(cx);
@@ -347,7 +352,8 @@ impl TerminalView {
             watch: script::Watch::default(),
         });
 
-        let pump = cx.spawn_in(window, async move |this, cx| {
+        // Not tied to a window: the tab can move to another window.
+        let pump = cx.spawn(async move |this, cx| {
             let mut notes: UnboundedReceiver<Note> = notes_rx;
             while let Some(note) = notes.next().await {
                 let alive = this.update(cx, |view, cx| view.on_note(note, cx)).is_ok();
@@ -384,6 +390,7 @@ impl TerminalView {
                 ..Font::default()
             },
             font_size: px(settings.font_size),
+            zoom: crate::zoom::DEFAULT_ZOOM,
             cwd: None,
             host_snippets: Vec::new(),
             script: None,
@@ -744,7 +751,7 @@ impl TerminalView {
         } else {
             s.font_family.clone().into()
         };
-        self.font_size = px(s.font_size);
+        self.font_size = px(crate::zoom::zoomed_font(s.font_size, self.zoom));
         self.highlighter = highlight::shared(&s.highlight_rules);
         self.shared.term.lock().set_options(Config {
             scrolling_history: s.scrollback_lines,
@@ -1710,6 +1717,22 @@ impl TerminalView {
     }
 
     fn on_scroll(&mut self, ev: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // Ctrl+wheel (⌘+wheel on macOS) zooms the tab, like a browser.
+        let zoom_mod = if cfg!(target_os = "macos") {
+            ev.modifiers.platform
+        } else {
+            ev.modifiers.control
+        };
+        if zoom_mod && !ev.modifiers.alt {
+            let line_height = self.layout.map(|l| l.line_height).unwrap_or(px(17.0));
+            let dy = ev.delta.pixel_delta(line_height).y;
+            let dir = crate::zoom::wheel_direction(f32::from(dy));
+            if dir != 0 {
+                cx.emit(TerminalEvent::Zoom(dir));
+            }
+            cx.stop_propagation();
+            return;
+        }
         let line_height = self.layout.map(|l| l.line_height).unwrap_or(px(17.0));
         let delta = ev.delta.pixel_delta(line_height);
         let lines = (delta.y / line_height).round() as i32;

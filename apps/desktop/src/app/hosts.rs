@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 
+use crate::zoom::px;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -287,6 +288,7 @@ impl HostwickApp {
                         kind,
                         root: crate::layout::Node::Leaf(pane),
                         focused: pane_id,
+                        zoom: crate::zoom::DEFAULT_ZOOM,
                     });
                     self.connect_pane(pane_id, window, cx);
                 }
@@ -298,20 +300,16 @@ impl HostwickApp {
                     .map(|p| self.new_pane(p, None))
                     .collect();
                 let ids: Vec<u64> = panes.iter().map(|p| p.id).collect();
-                let mut next = self.next_id;
-                let Some(root) = crate::layout::grid_tree(panes, &mut || {
-                    next += 1;
-                    next
-                }) else {
+                let Some(root) = crate::layout::grid_tree(panes, &mut super::tabs::fresh_id) else {
                     return;
                 };
-                self.next_id = next + 1;
                 let id = self.next_id();
                 self.tabs.push(Tab {
                     id,
                     kind: TabKind::Terminal,
                     root,
                     focused: ids[0],
+                    zoom: crate::zoom::DEFAULT_ZOOM,
                 });
                 self.active = Some(self.tabs.len() - 1);
                 for pane in &ids {
@@ -596,6 +594,12 @@ impl HostwickApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Bookmarks are changed in the file browser, not in this editor: an
+        // editor opened before a new bookmark must not undo it.
+        let mut p = p;
+        if let Ok(current) = self.backend.store.get(p.id) {
+            p.bookmarks = current.bookmarks;
+        }
         match self.backend.store.upsert(&p) {
             Ok(()) => {
                 self.reload_profiles();
@@ -611,7 +615,7 @@ impl HostwickApp {
         cx.notify();
     }
 
-    /// Ctrl+Shift+T: the active tab's host again, in a new tab.
+    /// Ctrl+Shift+U (⌘T): the active tab's host again, in a new tab.
     pub(crate) fn duplicate_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(t) = self.active.and_then(|i| self.tabs.get(i))
             && let Some(p) = t.focused_pane()

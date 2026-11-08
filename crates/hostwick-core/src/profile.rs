@@ -263,6 +263,10 @@ pub struct HostProfile {
     pub shell_integration: bool,
     #[serde(default)]
     pub snippets: Vec<crate::Snippet>,
+    /// Remote folders starred in the file browser (absolute paths); they
+    /// travel with the host through settings sync.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bookmarks: Vec<String>,
     /// Last change, Unix milliseconds; set by the store, used to merge
     /// settings sync.
     #[serde(default)]
@@ -314,6 +318,7 @@ impl HostProfile {
             login_script: String::new(),
             shell_integration: false,
             snippets: Vec::new(),
+            bookmarks: Vec::new(),
             updated_ms: 0,
         }
     }
@@ -362,6 +367,23 @@ pub trait ProfileStore: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bookmarks_are_optional_and_round_trip() {
+        let mut p = HostProfile::new("web", "10.0.0.1");
+        // Profiles saved before bookmarks existed still load.
+        let old = serde_json::to_string(&p).unwrap_or_default();
+        assert!(
+            !old.contains("bookmarks"),
+            "empty bookmarks are not written"
+        );
+        let back: HostProfile = serde_json::from_str(&old).unwrap_or_else(|e| panic!("{e}"));
+        assert!(back.bookmarks.is_empty());
+        p.bookmarks = vec!["/var/www".into(), "/etc/nginx".into()];
+        let json = serde_json::to_string(&p).unwrap_or_default();
+        let back: HostProfile = serde_json::from_str(&json).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(back.bookmarks, p.bookmarks);
+    }
 
     #[test]
     fn forward_specs_parse_like_openssh() {

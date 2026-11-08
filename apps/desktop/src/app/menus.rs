@@ -3,6 +3,7 @@
 use std::rc::Rc;
 
 use crate::notify::{Toast, ToastExt as _};
+use crate::zoom::px;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, WindowExt as _};
@@ -547,7 +548,7 @@ impl HostwickApp {
         app: WeakEntity<Self>,
         tab_id: u64,
     ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
-        move |menu, _, cx| {
+        move |menu, window, cx| {
             let act = |f: fn(&mut Self, usize, &mut Window, &mut Context<Self>)| {
                 let app = app.clone();
                 move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
@@ -574,6 +575,14 @@ impl HostwickApp {
                     Some((t.kind, can_break, linked, following))
                 })
                 .unwrap_or((TabKind::Terminal, false, false, false));
+            // Windows this tab could move to.
+            let (tab_count, windows) = app
+                .upgrade()
+                .map(|a| {
+                    let a = a.read(cx);
+                    (a.tabs.len(), a.other_windows(cx))
+                })
+                .unwrap_or_default();
             let mut menu = menu.item(
                 menu_item(t!("menu-reconnect"), Some(Sc::Reconnect))
                     .on_click(act(|a, ix, w, cx| a.reconnect_focused(ix, w, cx))),
@@ -653,12 +662,45 @@ impl HostwickApp {
                 )
                 .separator()
                 .item(
+                    PopupMenuItem::new(t!("menu-move-new-window"))
+                        .disabled(tab_count < 2)
+                        .on_click({
+                            let app = app.clone();
+                            move |_, window, cx| {
+                                let _ = app.update(cx, |a, cx| {
+                                    a.move_to_new_window(tab_id, None, window, cx)
+                                });
+                            }
+                        }),
+                )
+                .when(!windows.is_empty(), |menu| {
+                    let app = app.clone();
+                    let windows = windows.clone();
+                    menu.submenu(t!("menu-move-to-window"), window, cx, move |sub, _, _| {
+                        windows.iter().fold(sub, |sub, (key, name)| {
+                            let (app, key) = (app.clone(), *key);
+                            sub.item(PopupMenuItem::new(name.clone()).on_click(
+                                move |_, window, cx| {
+                                    let _ = app.update(cx, |a, cx| {
+                                        a.move_to_window(tab_id, key, window, cx)
+                                    });
+                                },
+                            ))
+                        })
+                    })
+                })
+                .separator()
+                .item(
                     menu_item(t!("menu-close"), Some(Sc::ClosePane))
                         .on_click(act(|a, ix, _, cx| a.close_tab(ix, cx))),
                 )
                 .item(
                     PopupMenuItem::new(t!("menu-close-others")).on_click(act(|a, ix, _, cx| {
                         let keep = a.tabs.remove(ix);
+                        let closed = std::mem::take(&mut a.tabs);
+                        for t in &closed {
+                            a.remember_closed(t, cx);
+                        }
                         a.tabs = vec![keep];
                         a.active = Some(0);
                         a.unlink_dead_follows();
@@ -668,7 +710,10 @@ impl HostwickApp {
                 )
                 .item(
                     PopupMenuItem::new(t!("menu-close-all")).on_click(act(|a, _, _, cx| {
-                        a.tabs.clear();
+                        let closed = std::mem::take(&mut a.tabs);
+                        for t in &closed {
+                            a.remember_closed(t, cx);
+                        }
                         a.active = None;
                         a.persist_tabs(cx);
                         cx.notify();

@@ -9,6 +9,7 @@
 
 use std::time::Duration;
 
+use crate::zoom::px;
 use gpui_kit::accesskit::{Live, Role};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _};

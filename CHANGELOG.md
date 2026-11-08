@@ -14,6 +14,16 @@
 - Palette action to switch between dark and light theme.
 - Host list keys changed to match the palette: Enter terminal, Ctrl/⌘+Enter files (was Shift+Enter), Shift+Enter new split, Alt+Enter edit, F2 rename (was edit).
 
+**Desktop: tabs, windows, files, transfers**
+- Tabs: Ctrl/⌘+1…8 jump to a tab and Ctrl/⌘+9 to the last (also with the terminal focused); middle-click closes; drag to reorder (drop marker) or Ctrl+Shift+←/→; double-click the empty tab bar for the palette; the bar scrolls when crowded and a ⌄ button lists all tabs; drag a tab onto a pane edge to move its panes into a split.
+- Reopen closed tab (last ten, with layout, host and scrollback and a "— reconnected —" marker), including tabs closed by *Close others/all* or with a window.
+- Windows: *Move to new window* / *Move to window ▸* in the tab menu, or drag a tab out of the tab bar. Windows share the vault, settings, connections and transfers; closing the last window quits; positions, sizes and tab assignment are restored.
+- Zoom: Ctrl/⌘+= / + / - / 0 and Ctrl+wheel change the terminal font per tab (with a brief HUD, restored with the tab). Settings → Appearance → *Interface size* (90–150 %) scales the whole UI.
+- File browser: clickable breadcrumb path bar (click the empty part or Ctrl+L to type; POSIX, Windows and UNC); bookmarks per host, also for the local side (star / Ctrl+D, dropdown; saved with the host so they sync); type-to-filter with a header filter box; Space quick preview of text (encoding fallback), images and file details, read in ranges from remote hosts.
+- Transfers: pause/resume per transfer and *Pause all* (resumes from `.filepart`, SCP restarts), retry one or all failed, cancel all, *Show in folder*, speed and ETA, a collapsible summary line, and a notification when a batch finishes while Hostwick is in the background or took over 10 s.
+- **Changed shortcuts**: *Reopen closed tab* is Ctrl+Shift+T (⌘⇧T); *Duplicate tab* moved to Ctrl+Shift+U (⌘T); marking a file row is Ctrl+Space / Insert (plain Space is now the preview); typing in a file pane filters instead of jumping.
+- Transfer engine: `TransferEngine::pause/resume/pause_all/resume_all/retry`, `TransferEvent::{Paused, PausedAll}` and `Queued.replaces`; `HostProfile.bookmarks`.
+
 **SSH**
 - `hostwick_ssh::agent_key_names()` lists the running agent's keys (with a timeout).
 
