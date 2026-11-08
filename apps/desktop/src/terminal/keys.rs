@@ -62,7 +62,10 @@ pub fn encode(key: &str, mods: Mods, app_cursor: bool) -> Option<Vec<u8>> {
 
     let out = match key {
         "enter" => meta(b"\r"),
-        "tab" if mods.shift => b"\x1b[Z".to_vec(),
+        "tab" if mods.shift && !mods.ctrl => b"\x1b[Z".to_vec(),
+        // Ctrl+Tab and Ctrl+Shift+Tab switch tabs; a terminal cannot tell
+        // them from Tab, so nothing is sent.
+        "tab" if mods.ctrl => return None,
         "tab" => meta(b"\t"),
         "escape" => meta(b"\x1b"),
         "backspace" if mods.ctrl => meta(b"\x08"),
@@ -100,6 +103,18 @@ pub fn encode(key: &str, mods: Mods, app_cursor: bool) -> Option<Vec<u8>> {
         "f10" => tilde(21),
         "f11" => tilde(23),
         "f12" => tilde(24),
+        // Reserved for the app, never sent. Ctrl+Shift+letter and
+        // Ctrl+Shift+?: the legacy encoding cannot tell them from Ctrl+letter,
+        // so the plain Ctrl keys stay the shell's and the Shift ones belong
+        // to Hostwick. Ctrl+Alt+digit and Ctrl+Alt+-: tab jump and zoom out
+        // (ESC plus a control character no program binds).
+        k if mods.ctrl
+            && k.chars().count() == 1
+            && ((mods.shift && k.chars().all(|c| c.is_ascii_alphabetic() || c == '?'))
+                || (mods.alt && k.chars().all(|c| c.is_ascii_digit() || c == '-'))) =>
+        {
+            return None;
+        }
         k if mods.ctrl && k.chars().count() == 1 => {
             let c = k.chars().next()?.to_ascii_lowercase();
             let byte = match c {
@@ -202,6 +217,37 @@ mod tests {
         assert_eq!(encode("[", ctrl, false), Some(vec![0x1b]));
         assert_eq!(encode("space", ctrl, false), Some(vec![0]));
         assert_eq!(encode("1", ctrl, false), None);
+        // The control characters behind Ctrl+2…8 and Ctrl+- (the app must
+        // not take these in a terminal; see `shortcuts::classify`).
+        for (k, b) in [
+            ("2", 0u8),
+            ("3", 0x1b),
+            ("4", 0x1c),
+            ("5", 0x1d),
+            ("6", 0x1e),
+            ("7", 0x1f),
+            ("8", 0x7f),
+            ("-", 0x1f),
+        ] {
+            assert_eq!(encode(k, ctrl, false), Some(vec![b]), "Ctrl+{k}");
+        }
+    }
+
+    #[test]
+    fn keys_reserved_for_the_app_are_not_sent() {
+        let ctrl_shift = m(true, false, true);
+        assert_eq!(encode("p", ctrl_shift, false), None);
+        assert_eq!(encode("t", ctrl_shift, false), None);
+        // Plain Ctrl+letter is still the shell's.
+        assert_eq!(encode("p", m(true, false, false), false), Some(vec![0x10]));
+        for k in ["1", "2", "7", "9", "-"] {
+            assert_eq!(encode(k, m(true, true, false), false), None, "Ctrl+Alt+{k}");
+        }
+        // Ctrl+Tab and Ctrl+Shift+Tab switch tabs.
+        assert_eq!(encode("tab", m(true, false, false), false), None);
+        assert_eq!(encode("tab", m(true, false, true), false), None);
+        assert_eq!(enc("tab", m(false, false, false)).as_deref(), Some("\t"));
+        assert_eq!(enc("tab", m(false, false, true)).as_deref(), Some("\x1b[Z"));
     }
 
     #[test]
@@ -219,6 +265,17 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn alt_digits_reach_readline() {
+        for d in '0'..='9' {
+            assert_eq!(
+                encode(&d.to_string(), m(false, true, false), false),
+                Some(vec![0x1b, d as u8])
+            );
+        }
     }
 
     #[test]

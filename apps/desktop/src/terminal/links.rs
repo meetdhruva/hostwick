@@ -266,13 +266,139 @@ pub fn at(line: &str, col: usize) -> Option<Found> {
     detect(line).into_iter().find(|f| f.range.contains(&col))
 }
 
-/// `https://…` for a `www.` link.
-pub fn url_to_open(text: &str) -> String {
+/// What a clicked URL may do. Terminal output is not trusted: the operating
+/// system's opener runs programs for some schemes (`file:` on Windows opens
+/// `.bat`/`.exe`, `ssh:`/`sftp:` start whatever client is registered, with
+/// the host as an argument), so only web and FTP addresses go there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UrlAction {
+    /// Hand to the operating system (http, https, ftp, ftps).
+    Open(String),
+    /// A `file:` URL on this computer: show it in the file manager after a
+    /// confirmation. Never opened, so nothing runs.
+    Reveal(String),
+    /// `ssh:`/`sftp:`: fill in quick connect with this `user@host:port`
+    /// (checked, so it cannot carry an option or a password).
+    Connect(String),
+    /// Anything else: only copying is offered.
+    CopyOnly,
+}
+
+/// Decide what the URL `text` (as detected) does.
+pub fn classify_url(text: &str) -> UrlAction {
     if text.to_ascii_lowercase().starts_with("www.") {
-        format!("https://{text}")
-    } else {
-        text.to_owned()
+        let url = format!("https://{text}");
+        return if web_ok(&url) {
+            UrlAction::Open(url)
+        } else {
+            UrlAction::CopyOnly
+        };
     }
+    let Some((scheme, rest)) = text.split_once("://") else {
+        return UrlAction::CopyOnly;
+    };
+    match scheme.to_ascii_lowercase().as_str() {
+        "http" | "https" | "ftp" | "ftps" if web_ok(text) => UrlAction::Open(text.to_owned()),
+        "file" => file_url_path(rest).map_or(UrlAction::CopyOnly, UrlAction::Reveal),
+        "ssh" | "sftp" => connect_target(rest).map_or(UrlAction::CopyOnly, UrlAction::Connect),
+        _ => UrlAction::CopyOnly,
+    }
+}
+
+/// A web address with a host and no control characters.
+fn web_ok(url: &str) -> bool {
+    let Some((_, rest)) = url.split_once("://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    !authority.is_empty()
+        && !authority.starts_with(['.', '-'])
+        && !url
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace() || c == '\\')
+}
+
+/// The local path of a `file:` URL (after `file://`): the host must be empty
+/// or `localhost` (anything else is a network share), and the path absolute.
+fn file_url_path(rest: &str) -> Option<String> {
+    let slash = rest.find('/')?;
+    let host = &rest[..slash];
+    if !(host.is_empty() || host.eq_ignore_ascii_case("localhost")) {
+        return None;
+    }
+    let path = rest[slash..].split(['?', '#']).next().unwrap_or("");
+    let path = crate::terminal::osc7::percent_decode_str(path)?;
+    if path.chars().any(char::is_control) || path.split('/').any(|p| p == "..") {
+        return None;
+    }
+    // `/C:/dir` is a Windows drive path.
+    let b = path.as_bytes();
+    if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' {
+        return Some(path[1..].to_owned());
+    }
+    Some(path)
+}
+
+/// `user@host:port` from the authority of an `ssh:`/`sftp:` URL, or `None`
+/// when anything about it is odd: a password, a user or host that could be
+/// read as a command-line option, characters outside the usual ones, a bad
+/// port. The path part of the URL is ignored.
+fn connect_target(rest: &str) -> Option<String> {
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let (user, hostport) = match authority.rsplit_once('@') {
+        Some((u, h)) => (Some(u), h),
+        None => (None, authority),
+    };
+    if let Some(u) = user {
+        let ok = !u.is_empty()
+            && u.len() <= 64
+            && !u.starts_with('-')
+            && u.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+        if !ok {
+            return None;
+        }
+    }
+    let (host, port) = if let Some(v6) = hostport.strip_prefix('[') {
+        let (h, after) = v6.split_once(']')?;
+        h.parse::<Ipv6Addr>().ok()?;
+        let port = match after.strip_prefix(':') {
+            Some(p) => Some(p),
+            None if after.is_empty() => None,
+            None => return None,
+        };
+        (format!("[{h}]"), port)
+    } else {
+        let (h, port) = match hostport.rsplit_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (hostport, None),
+        };
+        let ok = !h.is_empty()
+            && h.len() <= 253
+            && h.starts_with(|c: char| c.is_ascii_alphanumeric())
+            && !h.ends_with('-')
+            && h.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'));
+        if !ok {
+            return None;
+        }
+        (h.to_owned(), port)
+    };
+    let port = match port {
+        Some(p) => Some(p.parse::<u16>().ok().filter(|p| *p != 0)?),
+        None => None,
+    };
+    let mut out = String::new();
+    if let Some(u) = user {
+        out.push_str(u);
+        out.push('@');
+    }
+    out.push_str(&host);
+    if let Some(p) = port {
+        out.push(':');
+        out.push_str(&p.to_string());
+    }
+    Some(out)
 }
 
 /// An absolute path for a detected path: `./x` and `../x` against the
@@ -366,10 +492,112 @@ mod tests {
             )]
         );
         assert_eq!(kinds("www.example.com")[0].0, LinkKind::Url);
-        assert_eq!(url_to_open("www.example.com"), "https://www.example.com");
-        assert_eq!(url_to_open("ftp://x.org/f"), "ftp://x.org/f");
         // A URL swallows the path and host inside it.
         assert_eq!(detect("http://10.0.0.1:8080/var/log/x").len(), 1);
+    }
+
+    #[test]
+    fn only_web_and_ftp_urls_go_to_the_operating_system() {
+        use UrlAction::*;
+        assert_eq!(
+            classify_url("https://example.com/a?b=1"),
+            Open("https://example.com/a?b=1".into())
+        );
+        assert_eq!(
+            classify_url("HTTP://example.com"),
+            Open("HTTP://example.com".into())
+        );
+        assert_eq!(
+            classify_url("ftp://files.example.org/pub"),
+            Open("ftp://files.example.org/pub".into())
+        );
+        assert_eq!(
+            classify_url("ftps://files.example.org"),
+            Open("ftps://files.example.org".into())
+        );
+        assert_eq!(
+            classify_url("www.example.com"),
+            Open("https://www.example.com".into())
+        );
+        // Everything else is never opened by the OS.
+        for bad in [
+            "javascript://x/%0aalert(1)",
+            "data://text/html,x",
+            "vscode://file/etc/passwd",
+            "smb://server/share",
+            "ms-msdt://x",
+            "mailto://a@b.c",
+            "tel://123",
+            "x-man-page://ls",
+            "file2://x",
+            "https:///nohost",
+            "http://",
+            "https://exa\\mple.com",
+            "no scheme",
+            "https:/missing-slash.com",
+        ] {
+            assert!(
+                !matches!(classify_url(bad), Open(_)),
+                "{bad} must not reach the OS opener"
+            );
+        }
+    }
+
+    #[test]
+    fn file_urls_are_revealed_never_opened() {
+        use UrlAction::*;
+        assert_eq!(
+            classify_url("file:///etc/hosts"),
+            Reveal("/etc/hosts".into())
+        );
+        assert_eq!(
+            classify_url("file://localhost/var/log/a%20b"),
+            Reveal("/var/log/a b".into())
+        );
+        assert_eq!(
+            classify_url("file:///C:/Users/me/x.bat"),
+            Reveal("C:/Users/me/x.bat".into())
+        );
+        // A network share, or a path that climbs out: copy only.
+        assert_eq!(classify_url("file://evil.example/share/x"), CopyOnly);
+        assert_eq!(classify_url("file://10.0.0.5/c$/x"), CopyOnly);
+        assert_eq!(classify_url("file:///a/../../etc/passwd"), CopyOnly);
+        assert_eq!(classify_url("file:///a%00b"), CopyOnly);
+        assert_eq!(classify_url("file://nopath"), CopyOnly);
+    }
+
+    #[test]
+    fn ssh_urls_become_a_safe_quick_connect_text() {
+        use UrlAction::*;
+        assert_eq!(
+            classify_url("ssh://alice@web1.example.com:2222/home"),
+            Connect("alice@web1.example.com:2222".into())
+        );
+        assert_eq!(classify_url("sftp://web1"), Connect("web1".into()));
+        assert_eq!(classify_url("ssh://[::1]:22"), Connect("[::1]:22".into()));
+        assert_eq!(
+            classify_url("ssh://bob@[2001:db8::1]"),
+            Connect("bob@[2001:db8::1]".into())
+        );
+        // Options, passwords, odd characters, bad ports.
+        for bad in [
+            "ssh://-oProxyCommand=evil/x",
+            "ssh://-oProxyCommand=curl%20x|sh@host",
+            "ssh://-evil@host",
+            "ssh://user:secret@host",
+            "ssh://host:0",
+            "ssh://host:70000",
+            "ssh://host:ab",
+            "ssh://ho$st",
+            "ssh://host;rm",
+            "ssh://",
+            "ssh://@host",
+            "ssh://[notv6]",
+            "ssh://[::1]x",
+            "ssh://-host",
+        ] {
+            assert_eq!(classify_url(bad), CopyOnly, "{bad}");
+        }
     }
 
     #[test]

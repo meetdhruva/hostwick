@@ -15,6 +15,7 @@ mod tabbar;
 mod tabs;
 mod termx;
 mod transfers;
+mod upload;
 mod welcome;
 mod windows;
 
@@ -40,6 +41,7 @@ use crate::layout::{
     Dir, Edge, Node, PaneId, SavedBounds, SavedKind, SavedNode, SavedPane, SavedTab, SavedWindow,
 };
 use crate::settings::Settings;
+use crate::shortcuts;
 use crate::terminal::{GridSize, TerminalEvent, TerminalView};
 
 pub(crate) enum PaneBody {
@@ -107,7 +109,7 @@ pub(crate) struct Tab {
     kind: TabKind,
     root: Node<Pane>,
     focused: u64,
-    /// Terminal text size in percent (Ctrl+= / Ctrl+-).
+    /// Terminal text size in percent (Ctrl+= / Ctrl+Alt+-).
     zoom: u32,
 }
 
@@ -1546,106 +1548,76 @@ impl HostwickApp {
             .any(|t| t.read(cx).focus_handle(cx).contains_focused(window, cx))
     }
 
-    /// App-wide shortcuts, handled before the terminal sees the key. They
-    /// all use Shift (or Cmd on macOS) so plain Ctrl+letter keys still reach
-    /// the shell (Ctrl+W, Ctrl+T, Ctrl+N mean things there).
+    /// App-wide shortcuts, handled before the terminal sees the key. Which
+    /// keys they use is decided by [`shortcuts::classify`], whose one rule
+    /// is that with a terminal focused none of them is a key the terminal
+    /// sends to the shell (a test walks every key and modifier). Shortcuts
+    /// with Ctrl use Shift or Alt too, so plain Ctrl+letter reaches the
+    /// shell (Ctrl+W, Ctrl+T, Ctrl+N mean things there).
     fn on_shortcut(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let m = ev.keystroke.modifiers;
         let key = ev.keystroke.key.as_str();
         let mac = cfg!(target_os = "macos");
-        if key == "f6" && m.control && !m.alt && !m.platform {
-            self.cycle_region(!m.shift, window, cx);
-            cx.stop_propagation();
-            return;
-        }
-        let cmd = if mac {
-            m.platform
-        } else {
-            m.control && m.shift
+        let mods = crate::terminal::keys::Mods {
+            ctrl: m.control,
+            alt: m.alt,
+            shift: m.shift,
+            platform: m.platform,
         };
-        // Command palette: Ctrl+Shift+P / Ctrl+Shift+K; ⌘K / ⌘⇧P.
-        let palette = if mac {
-            m.platform && !m.alt && !m.control && (key == "k" || (key == "p" && m.shift))
-        } else {
-            m.control && m.shift && !m.alt && (key == "p" || key == "k")
+        // Whether a terminal has the keys only changes what Ctrl/Cmd keys
+        // and F1 mean; plain typing never needs the lookup.
+        let in_terminal =
+            (m.control || m.platform || key == "f1") && self.terminal_has_focus(window, cx);
+        let Some(chord) = shortcuts::classify(
+            key,
+            mods,
+            mac,
+            ev.keystroke.key_char.as_deref(),
+            in_terminal,
+        ) else {
+            return;
         };
-        if palette {
-            self.open_palette(window, cx);
-            cx.stop_propagation();
-            return;
-        }
-        // Shortcut cheat sheet: Ctrl+Shift+/ (⌘⇧/) anywhere; F1 and
-        // Ctrl+/ (⌘/) unless a terminal has the keys (programs use them).
-        let slash = key == "/" || key == "?";
-        let app_mod = if mac { m.platform } else { m.control };
-        let help_anywhere = slash && app_mod && m.shift && !m.alt;
-        let help_outside =
-            (key == "f1" && !m.modified()) || (slash && app_mod && !m.shift && !m.alt);
-        if help_anywhere || (help_outside && !self.terminal_has_focus(window, cx)) {
-            self.open_shortcuts(window, cx);
-            cx.stop_propagation();
-            return;
-        }
-        // Split right: Ctrl+Shift+D / ⌘D. Split down: Ctrl+Shift+E / ⌘⇧D.
-        let split = if mac {
-            (m.platform && key == "d").then_some(m.shift)
-        } else {
-            (m.control && m.shift && !m.alt)
-                .then_some(())
-                .and(match key {
-                    "d" => Some(false),
-                    "e" => Some(true),
-                    _ => None,
-                })
-        };
-        if let Some(vertical) = split {
-            self.split_focused(vertical, window, cx);
-            cx.stop_propagation();
-            return;
-        }
-        // Ctrl/⌘+1…8 jump to that tab, 9 to the last: also from inside a
-        // terminal (those keys mean nothing to a shell).
-        if app_mod
-            && !m.alt
-            && !m.shift
-            && !(mac && m.control)
-            && let Some(n) = tabs::digit_key(key)
-            && tabs::tab_for_number(n, self.tabs.len()).is_some()
-        {
-            self.jump_to_tab(n, window, cx);
-            cx.stop_propagation();
-            return;
-        }
-        // Zoom: Ctrl/⌘ + = (or +), -, 0 for the active terminal tab.
-        if app_mod && !m.alt && !(mac && m.control) {
-            let dir = match key {
-                "=" | "+" | "plus" => Some(1),
-                "-" | "minus" if !m.shift => Some(-1),
-                "0" if !m.shift => Some(0),
-                _ => None,
-            };
-            if let Some(dir) = dir
-                && self.zoom_active(dir, cx)
-            {
-                cx.stop_propagation();
-                return;
+        use shortcuts::Chord;
+        let handled = match chord {
+            Chord::CycleRegion { forward } => {
+                self.cycle_region(forward, window, cx);
+                true
             }
-        }
-        let multi_pane = self
-            .active
-            .and_then(|i| self.tabs.get(i))
-            .is_some_and(|t| t.root.count() > 1);
-        let handled = match key {
-            "left" | "right" | "up" | "down"
-                if m.alt && !m.control && !m.platform && multi_pane =>
-            {
+            Chord::Palette => {
+                self.open_palette(window, cx);
+                true
+            }
+            Chord::Help => {
+                self.open_shortcuts(window, cx);
+                true
+            }
+            Chord::SplitRight | Chord::SplitDown => {
+                self.split_focused(chord == Chord::SplitDown, window, cx);
+                true
+            }
+            Chord::TabNumber(n) => {
+                if tabs::tab_for_number(n, self.tabs.len()).is_some() {
+                    self.jump_to_tab(n, window, cx);
+                    true
+                } else {
+                    false
+                }
+            }
+            Chord::Zoom(dir) => self.zoom_active(dir, cx),
+            Chord::Pane { resize } => {
+                let multi_pane = self
+                    .active
+                    .and_then(|i| self.tabs.get(i))
+                    .is_some_and(|t| t.root.count() > 1);
                 let dir = match key {
                     "left" => Dir::Left,
                     "right" => Dir::Right,
                     "up" => Dir::Up,
                     _ => Dir::Down,
                 };
-                if m.shift {
+                if !multi_pane {
+                    false
+                } else if resize {
                     self.resize_focused(dir, cx);
                     true
                 } else {
@@ -1654,11 +1626,11 @@ impl HostwickApp {
                     self.move_focus(dir, window, cx)
                 }
             }
-            "tab" if m.control => {
+            Chord::CycleTab { back } => {
                 if !self.tabs.is_empty() {
                     let n = self.tabs.len();
                     let cur = self.active.unwrap_or(0);
-                    let next = if m.shift {
+                    let next = if back {
                         (cur + n - 1) % n
                     } else {
                         (cur + 1) % n
@@ -1668,43 +1640,38 @@ impl HostwickApp {
                 true
             }
             // Ctrl+Shift+T / ⌘⇧T: the tab closed last, back again.
-            "t" if cmd && m.shift => {
+            Chord::ReopenTab => {
                 self.reopen_closed_tab(window, cx);
                 true
             }
             // Duplicate: Ctrl+Shift+U, ⌘T.
-            "t" if cmd && mac => {
+            Chord::DuplicateTab => {
                 self.duplicate_active(window, cx);
                 true
             }
-            "u" if cmd && !mac => {
-                self.duplicate_active(window, cx);
-                true
-            }
-            "w" if cmd => {
+            Chord::ClosePane => {
                 self.close_focused_pane(window, cx);
                 true
             }
-            "r" if cmd => {
+            Chord::Reconnect => {
                 if let Some(ix) = self.active {
                     self.reconnect_focused(ix, window, cx);
                 }
                 true
             }
-            "n" if cmd => {
+            Chord::NewHost => {
                 self.host_dialog(None, window, cx);
                 true
             }
-            "," if m.control || m.platform => {
+            Chord::Settings => {
                 self.open_settings(None, window, cx);
                 true
             }
-            "b" if cmd => {
+            Chord::Broadcast => {
                 self.broadcast = !self.broadcast;
                 cx.notify();
                 true
             }
-            _ => false,
         };
         if handled {
             cx.stop_propagation();

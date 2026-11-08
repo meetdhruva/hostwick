@@ -488,6 +488,7 @@ impl FilesView {
             Ok(Ok(Loaded::Image(bytes, kind))) => {
                 Body::Image(Arc::new(Image::from_bytes(image_format(kind), bytes)))
             }
+            Ok(Ok(Loaded::ImageRefused(size))) => Body::ImageRefused(size),
             Ok(Ok(Loaded::Binary)) => Body::Binary,
             Ok(Ok(Loaded::TooLarge)) => Body::TooLarge,
             Ok(Err(e)) => Body::Error(e.to_string()),
@@ -588,6 +589,10 @@ impl FilesView {
                 limit = human_size(preview::IMAGE_LIMIT)
             ))
             .into_any_element(),
+            Body::ImageRefused(Some((w, h))) => {
+                note(t!("preview-image-too-big", width = *w, height = *h)).into_any_element()
+            }
+            Body::ImageRefused(None) => note(t!("preview-image-unknown")).into_any_element(),
             Body::Error(err) => note(t!("preview-error", error = err.clone()))
                 .text_color(theme.danger)
                 .into_any_element(),
@@ -795,6 +800,9 @@ enum Body {
         cut: bool,
     },
     Image(Arc<Image>),
+    /// An image whose declared size (or kind of content) is not decoded:
+    /// its size when known.
+    ImageRefused(Option<(u64, u64)>),
     Binary,
     TooLarge,
     Error(String),
@@ -809,8 +817,19 @@ enum Loaded {
         cut: bool,
     },
     Image(Vec<u8>, ImageKind),
+    ImageRefused(Option<(u64, u64)>),
     Binary,
     TooLarge,
+}
+
+/// Hand the bytes to the decoder only when the size they declare is
+/// reasonable.
+fn checked_image(bytes: Vec<u8>, kind: ImageKind) -> Loaded {
+    match preview::check_image(&bytes, kind) {
+        preview::ImageCheck::Ok => Loaded::Image(bytes, kind),
+        preview::ImageCheck::TooBig(w, h) => Loaded::ImageRefused(Some((w, h))),
+        preview::ImageCheck::Unknown => Loaded::ImageRefused(None),
+    }
 }
 
 fn image_format(kind: ImageKind) -> ImageFormat {
@@ -844,10 +863,15 @@ async fn load_preview(
             if size > preview::IMAGE_LIMIT {
                 Loaded::TooLarge
             } else if (head.len() as u64) >= size {
-                Loaded::Image(head, kind)
+                checked_image(head, kind)
             } else {
+                // The declared size is in the first bytes: look before
+                // reading (and decoding) the rest.
+                if let preview::ImageCheck::TooBig(w, h) = preview::check_image(&head, kind) {
+                    return Ok(Loaded::ImageRefused(Some((w, h))));
+                }
                 let whole = usize::try_from(size).unwrap_or(0);
-                Loaded::Image(fs.read_range(&path, 0, whole).await?, kind)
+                checked_image(fs.read_range(&path, 0, whole).await?, kind)
             }
         }
         Kind::Text => {

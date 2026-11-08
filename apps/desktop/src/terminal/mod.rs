@@ -91,7 +91,7 @@ pub use sessionlog::SessionLogger;
 pub use element::TerminalElement;
 pub use ext::TermExt;
 pub use metrics::format_bytes;
-pub use osc133::format_duration;
+pub use osc133::{display_command, format_duration};
 
 /// Grid size handed to Alacritty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,7 +122,7 @@ enum Note {
     /// Tick for the reconnect countdown.
     Tick,
     /// OSC 7 from the shell.
-    Cwd(String),
+    Cwd(osc7::Cwd),
     /// Something to show briefly at the bottom of the terminal.
     Notice(String),
     ScriptDone,
@@ -132,7 +132,8 @@ enum Note {
     Marks(Vec<osc133::Mark>),
     /// A ZMODEM or trzsz transfer started (generation, details).
     Xfer(u64, Box<transfer::XferStart>),
-    XferProgress(hostwick_term::xfer::Progress),
+    /// Progress of the transfer of attach generation `.0`.
+    XferProgress(u64, hostwick_term::xfer::Progress),
     XferEnded(transfer::Ended),
     /// Latency measured, in milliseconds (`true`: by keepalive ping).
     Latency(Option<u32>, bool),
@@ -276,6 +277,11 @@ pub struct TerminalView {
     /// This tab's zoom in percent of the settings font size.
     zoom: u32,
     cwd: Option<String>,
+    /// The reported folder came from this session's own host (OSC 7 host
+    /// part matches), not just from something that was printed.
+    cwd_trusted: bool,
+    /// Which OSC 7 host names are believed in this session.
+    host_check: osc7::HostCheck,
     /// The host's own snippets (the global ones come from Settings).
     host_snippets: Vec<Snippet>,
     script: Option<tokio::task::JoinHandle<()>>,
@@ -419,6 +425,8 @@ impl TerminalView {
             font_size: px(settings.font_size),
             zoom: crate::zoom::DEFAULT_ZOOM,
             cwd: None,
+            cwd_trusted: false,
+            host_check: osc7::HostCheck::default(),
             host_snippets: Vec::new(),
             script: None,
             notice: None,
@@ -601,6 +609,11 @@ impl TerminalView {
         }
         self.shared.watch.reset();
         self.x.tracker = Default::default();
+        self.abandon_transfer(cx);
+        // The old folder belongs to the old session.
+        self.cwd = None;
+        self.cwd_trusted = false;
+        self.host_check.reset();
         self.reset_status();
         self.start(session);
         self.exited = None;
@@ -750,11 +763,25 @@ impl TerminalView {
                 self.exited = reason;
                 self.dropped = dropped;
                 self.mouse = MouseReport::default();
+                // A transfer offer (or a running transfer) belongs to the
+                // connection that just ended; it must not swallow the keys
+                // (Enter reconnects).
+                self.abandon_transfer(cx);
                 cx.emit(TerminalEvent::Exited);
                 cx.notify();
             }
             Note::Tick => cx.notify(),
-            Note::Cwd(dir) => {
+            Note::Cwd(reported) => {
+                let trust = self
+                    .host_check
+                    .check(reported.host.as_deref(), &self.x.info.host);
+                // A folder "on another host" is printed text trying to steer
+                // the file browser or an upload: dropped.
+                if trust == osc7::Trust::Mismatch {
+                    return;
+                }
+                self.cwd_trusted = trust == osc7::Trust::Verified;
+                let dir = reported.path;
                 if self.cwd.as_deref() != Some(dir.as_str()) {
                     self.cwd = Some(dir.clone());
                     cx.emit(TerminalEvent::CwdChanged(dir));
@@ -771,7 +798,7 @@ impl TerminalView {
                     self.begin_transfer(*start, cx);
                 }
             }
-            Note::XferProgress(p) => self.on_xfer_progress(p, cx),
+            Note::XferProgress(generation, p) => self.on_xfer_progress(generation, p, cx),
             Note::XferEnded(e) => self.on_xfer_ended(e, cx),
             Note::Latency(ms, ping) => self.on_latency(ms, ping, cx),
             Note::Metrics(m) => self.on_metrics(m, cx),
@@ -805,6 +832,12 @@ impl TerminalView {
     /// `HostProfile::shell_integration`).
     pub fn cwd(&self) -> Option<String> {
         self.cwd.clone()
+    }
+
+    /// Whether [`Self::cwd`] came with this session's own host name. When
+    /// it did not, anything that acts on it (an upload) shows it first.
+    pub fn cwd_trusted(&self) -> bool {
+        self.cwd_trusted
     }
 
     /// Whether "Send Break" does anything (telnet, serial).
@@ -1096,8 +1129,14 @@ impl TerminalView {
     }
 
     /// Send bytes without emitting (used when replaying broadcast input).
+    /// Whether keystrokes sent now would reach the remote program (not
+    /// ended, no file transfer running).
+    pub fn accepts_input(&self) -> bool {
+        self.exited.is_none() && self.x.xfer.is_none()
+    }
+
     pub fn write_raw(&self, bytes: &[u8]) {
-        if self.exited.is_none() && self.x.xfer.is_none() {
+        if self.accepts_input() {
             let _ = self
                 .input
                 .unbounded_send(ShellCommand::Data(Bytes::copy_from_slice(bytes)));
@@ -1135,15 +1174,12 @@ impl TerminalView {
     }
 
     fn paste(&mut self, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) {
-            let mode = Settings::get(cx).term.confirm_paste;
-            if paste::needs_confirm(&text, mode, self.x.info.env.is_prod()) {
-                // The app shows the confirmation (it knows about broadcast).
-                cx.emit(TerminalEvent::Ext(TermExt::ConfirmPaste { text }));
-                return;
-            }
-            let bracketed = self.mode().contains(TermMode::BRACKETED_PASTE);
-            self.send_user(keys::paste_bytes(&text, bracketed), cx);
+        if let Some(text) = cx.read_from_clipboard().and_then(|i| i.text())
+            && !text.is_empty()
+        {
+            // The app decides whether to ask first: with broadcast on the
+            // text also reaches other terminals, whose environments count.
+            cx.emit(TerminalEvent::Ext(TermExt::Paste { text }));
         }
     }
 
@@ -1481,7 +1517,7 @@ impl TerminalView {
             cx.propagate();
             return;
         }
-        if self.x.xfer.is_some() {
+        if self.x.xfer.is_some() && self.exited.is_none() {
             // Ctrl+C cancels a running transfer.
             if key == "c" && ctrl {
                 self.cancel_transfer(cx);
@@ -1551,7 +1587,7 @@ impl TerminalView {
             cx.stop_propagation();
             return;
         }
-        if self.x.xfer.is_some() {
+        if self.x.xfer.is_some() && self.exited.is_none() {
             if key == "escape" || (m.control && key == "c") {
                 self.cancel_transfer(cx);
                 cx.stop_propagation();

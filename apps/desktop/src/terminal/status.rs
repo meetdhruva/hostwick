@@ -30,6 +30,35 @@ const EXEC_LATENCY_EVERY: Duration = Duration::from_secs(30);
 /// The view counts as visible when it was drawn this recently.
 const VISIBLE_FOR: Duration = Duration::from_millis(2500);
 
+/// Longest a latency or metrics probe may take, connection lookup included.
+/// A server that stops answering must not leave the poller "busy" for good:
+/// that would freeze the figures until the tab is reopened.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Clears a "busy" flag when dropped, however the task ends (finished,
+/// timed out, panicked or aborted).
+struct Busy(Arc<AtomicBool>);
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+/// How long `probe` took, or `None` when it failed or did not finish within
+/// `limit`.
+async fn timed<F, T, E>(limit: Duration, probe: F) -> Option<Duration>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+{
+    let t = Instant::now();
+    tokio::time::timeout(limit, probe)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .map(|_| t.elapsed())
+}
+
 /// Poller state that lives outside the UI thread.
 #[derive(Default)]
 pub struct Poll {
@@ -98,13 +127,22 @@ impl TerminalView {
             let notes = self.notes.clone();
             let ping_backend = backend.clone();
             self.rt.spawn(async move {
-                if !skip && let Some(conn) = ping_backend.pool.get(id).await {
+                let _busy = Busy(busy);
+                let conn = if skip {
+                    None
+                } else {
+                    tokio::time::timeout(PROBE_TIMEOUT, ping_backend.pool.get(id))
+                        .await
+                        .ok()
+                        .flatten()
+                };
+                if let Some(conn) = conn {
                     let ms = if use_exec {
-                        let t = Instant::now();
-                        conn.exec(&hostwick_sftp::shell::portable("true"))
-                            .await
-                            .ok()
-                            .map(|_| t.elapsed())
+                        timed(
+                            PROBE_TIMEOUT,
+                            conn.exec(&hostwick_sftp::shell::portable("true")),
+                        )
+                        .await
                     } else {
                         tokio::time::timeout(Duration::from_secs(8), conn.ping())
                             .await
@@ -116,7 +154,6 @@ impl TerminalView {
                         !use_exec,
                     ));
                 }
-                busy.store(false, Ordering::Release);
             });
         }
         // Server metrics.
@@ -132,16 +169,20 @@ impl TerminalView {
             let busy = poll.metrics_busy.clone();
             let notes = self.notes.clone();
             self.rt.spawn(async move {
-                if let Some(conn) = backend.pool.get(id).await {
+                let _busy = Busy(busy);
+                let conn = tokio::time::timeout(PROBE_TIMEOUT, backend.pool.get(id))
+                    .await
+                    .ok()
+                    .flatten();
+                if let Some(conn) = conn {
                     let cmd = hostwick_sftp::shell::portable(metrics::SCRIPT);
-                    let out = tokio::time::timeout(Duration::from_secs(10), conn.exec(&cmd)).await;
+                    let out = tokio::time::timeout(PROBE_TIMEOUT, conn.exec(&cmd)).await;
                     if let Ok(Ok(o)) = out {
                         let _ = notes.unbounded_send(Note::Metrics(
                             String::from_utf8_lossy(&o.stdout).into_owned(),
                         ));
                     }
                 }
-                busy.store(false, Ordering::Release);
             });
         }
     }
@@ -342,12 +383,61 @@ pub fn format_age(d: Duration) -> String {
 mod tests {
     use std::time::Duration;
 
-    use super::format_age;
+    use super::{Busy, format_age, timed};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
     fn ages() {
         assert_eq!(format_age(Duration::from_secs(5)), "5s");
         assert_eq!(format_age(Duration::from_secs(125)), "2m");
         assert_eq!(format_age(Duration::from_secs(3 * 3600 + 5 * 60)), "3h 05m");
+    }
+
+    #[tokio::test]
+    async fn a_probe_that_never_answers_times_out() {
+        let r = timed(
+            Duration::from_millis(60),
+            std::future::pending::<Result<(), ()>>(),
+        )
+        .await;
+        assert_eq!(r, None);
+        // A failed probe is not a measurement either.
+        assert_eq!(
+            timed(Duration::from_secs(1), async { Err::<(), _>("no") }).await,
+            None
+        );
+        let ok = timed(Duration::from_secs(1), async { Ok::<_, ()>(()) }).await;
+        assert!(ok.is_some());
+    }
+
+    #[tokio::test]
+    async fn the_busy_flag_clears_whatever_happens_to_the_task() {
+        let flag = Arc::new(AtomicBool::new(true));
+        // A task that hangs and is aborted.
+        let f = flag.clone();
+        let job = tokio::spawn(async move {
+            let _busy = Busy(f);
+            std::future::pending::<()>().await;
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(flag.load(Ordering::Acquire));
+        job.abort();
+        let _ = job.await;
+        assert!(!flag.load(Ordering::Acquire));
+        // One that times out.
+        flag.store(true, Ordering::Release);
+        let f = flag.clone();
+        tokio::spawn(async move {
+            let _busy = Busy(f);
+            let _ = timed(
+                Duration::from_millis(30),
+                std::future::pending::<Result<(), ()>>(),
+            )
+            .await;
+        })
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert!(!flag.load(Ordering::Acquire));
     }
 }

@@ -169,7 +169,17 @@ impl TerminalView {
             return false;
         };
         match h.found.kind {
-            LinkKind::Url => cx.open_url(&links::url_to_open(&h.found.text)),
+            LinkKind::Url => match links::classify_url(&h.found.text) {
+                links::UrlAction::Open(url) => cx.open_url(&url),
+                links::UrlAction::Reveal(path) => {
+                    cx.emit(TerminalEvent::Ext(TermExt::RevealFile(path)));
+                }
+                links::UrlAction::Connect(target) => {
+                    cx.emit(TerminalEvent::Ext(TermExt::Connect(target)));
+                }
+                // Nothing a click may do: the menu offers Copy.
+                links::UrlAction::CopyOnly => return false,
+            },
             LinkKind::Path => {
                 let Some(path) = self.resolve_link_path(&h.found.text) else {
                     return false;
@@ -211,14 +221,22 @@ pub(super) fn link_menu(
     };
     match found.kind {
         LinkKind::Url => {
-            let url = links::url_to_open(&text);
-            menu.item(
-                PopupMenuItem::new(t!("tx-link-open")).on_click(
-                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| cx.open_url(&url),
-                ),
-            )
-            .item(copy(t!("tx-link-copy"), text))
-            .separator()
+            let menu = match links::classify_url(&text) {
+                links::UrlAction::Open(url) => {
+                    menu.item(PopupMenuItem::new(t!("tx-link-open")).on_click(
+                        move |_: &ClickEvent, _: &mut Window, cx: &mut App| cx.open_url(&url),
+                    ))
+                }
+                links::UrlAction::Reveal(path) => {
+                    menu.item(ask(t!("tx-link-show-file"), TermExt::RevealFile(path)))
+                }
+                links::UrlAction::Connect(target) => menu.item(ask(
+                    t!("tx-link-connect", target = target.clone()),
+                    TermExt::Connect(target),
+                )),
+                links::UrlAction::CopyOnly => menu,
+            };
+            menu.item(copy(t!("tx-link-copy"), text)).separator()
         }
         LinkKind::Path => {
             let mut menu = menu;

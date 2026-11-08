@@ -1148,11 +1148,6 @@ tx-drop-started = { $count ->
     [one] { $folder } में 1 आइटम अपलोड हो रहा है
    *[other] { $folder } में { $count } आइटम अपलोड हो रहे हैं
 }
-tx-drop-title = { $count ->
-    [one] 1 आइटम अपलोड करें
-   *[other] { $count } आइटम अपलोड करें
-}
-tx-drop-to = यहाँ अपलोड करें:
 tx-drop-hint = इस टर्मिनल ने अपना वर्तमान फ़ोल्डर नहीं बताया। जहाँ आप हैं वहीं सीधे अपलोड करने के लिए शेल इंटीग्रेशन चालू करें।
 tx-drop-upload = अपलोड करें
 tx-drop-label = { $folder } में अपलोड करने के लिए यहाँ छोड़ें
@@ -1260,3 +1255,26 @@ window-gone = वह विंडो बंद हो चुकी है।
 window-name = विंडो { $n }
 window-name-with-tab = विंडो { $n } — { $tab }
 zoom-level = ज़ूम { $percent } %
+
+# v0.4.0 security review
+tx-paste-title-control = नियंत्रण वर्णों वाला टेक्स्ट { $host } में पेस्ट करें?
+tx-paste-prod-peers = प्रोडक्शन को भी यह पेस्ट मिलेगा: { $hosts }
+tx-finished-os = { $host } पर कमांड पूरा हुआ (निकास { $exit }, { $time })
+tx-up-title = { $count ->
+    [one] 1 आइटम ({ $size }) को { $target } पर अपलोड करें
+   *[other] { $count } आइटम ({ $size }) को { $target } पर अपलोड करें
+}
+tx-up-folder = { $target } पर फ़ोल्डर:
+tx-up-existing = यदि उसी नाम की फ़ाइल पहले से मौजूद हो:
+tx-up-skip = छोड़ दें
+tx-up-rename = दोनों रखें
+tx-up-overwrite = अधिलेखित करें
+tx-up-overwrite-warn = सर्वर पर उसी नाम की फ़ाइलें बदल दी जाएँगी।
+tx-up-unverified = यह फ़ोल्डर टर्मिनल के आउटपुट ने बताया है, और इसे { $target } से जोड़ने वाला कुछ नहीं है। अपलोड से पहले जाँच लें।
+tx-link-show-file = फ़ाइल प्रबंधक में दिखाएँ…
+tx-link-file-title = इसे फ़ाइल प्रबंधक में दिखाएँ?
+tx-link-file-body = टर्मिनल आउटपुट का एक लिंक आपके कंप्यूटर की इस फ़ाइल या फ़ोल्डर की ओर इशारा करता है। इसे दिखाया जाएगा, कभी खोला नहीं जाएगा।
+tx-link-file-go = दिखाएँ
+tx-link-file-missing = यह फ़ाइल या फ़ोल्डर इस कंप्यूटर पर मौजूद नहीं है।
+preview-image-too-big = पूर्वावलोकन नहीं: यह चित्र { $width } × { $height } पिक्सेल का है, जो सुरक्षित डिकोड सीमा से अधिक है।
+preview-image-unknown = पूर्वावलोकन नहीं: इस चित्र का आकार सुरक्षित रूप से नहीं पढ़ा जा सका।

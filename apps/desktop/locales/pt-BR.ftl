@@ -1151,11 +1151,6 @@ tx-drop-started = { $count ->
     [one] Enviando 1 item para { $folder }
    *[other] Enviando { $count } itens para { $folder }
 }
-tx-drop-title = { $count ->
-    [one] Enviar 1 item
-   *[other] Enviar { $count } itens
-}
-tx-drop-to = Enviar para:
 tx-drop-hint = Este terminal não informou a pasta atual. Ative a integração com o shell para enviar direto para onde você está.
 tx-drop-upload = Enviar
 tx-drop-label = Solte para enviar para { $folder }
@@ -1266,3 +1261,26 @@ window-gone = Essa janela foi fechada.
 window-name = Janela { $n }
 window-name-with-tab = Janela { $n } — { $tab }
 zoom-level = Zoom { $percent } %
+
+# v0.4.0 security review
+tx-paste-title-control = Colar texto com caracteres de controle em { $host }?
+tx-paste-prod-peers = PRODUÇÃO também recebe esta colagem: { $hosts }
+tx-finished-os = Comando terminou em { $host } (saída { $exit }, { $time })
+tx-up-title = { $count ->
+    [one] Enviar 1 item ({ $size }) para { $target }
+   *[other] Enviar { $count } itens ({ $size }) para { $target }
+}
+tx-up-folder = Pasta em { $target }:
+tx-up-existing = Se já existir um arquivo com o mesmo nome:
+tx-up-skip = Ignorar
+tx-up-rename = Manter os dois
+tx-up-overwrite = Substituir
+tx-up-overwrite-warn = Arquivos com o mesmo nome no servidor serão substituídos.
+tx-up-unverified = Esta pasta foi informada pela saída do terminal e nada a liga a { $target }. Confira antes de enviar.
+tx-link-show-file = Mostrar no gerenciador de arquivos…
+tx-link-file-title = Mostrar no gerenciador de arquivos?
+tx-link-file-body = Um link na saída do terminal aponta para este arquivo ou pasta no seu computador. Ele é mostrado, nunca aberto.
+tx-link-file-go = Mostrar
+tx-link-file-missing = Esse arquivo ou pasta não existe neste computador.
+preview-image-too-big = Sem pré-visualização: a imagem tem { $width } × { $height } pixels, mais do que pode ser decodificado com segurança.
+preview-image-unknown = Sem pré-visualização: não foi possível ler com segurança o tamanho desta imagem.

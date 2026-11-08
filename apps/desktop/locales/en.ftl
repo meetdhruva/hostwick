@@ -1149,11 +1149,6 @@ tx-drop-started = { $count ->
     [one] Uploading 1 item to { $folder }
    *[other] Uploading { $count } items to { $folder }
 }
-tx-drop-title = { $count ->
-    [one] Upload 1 item
-   *[other] Upload { $count } items
-}
-tx-drop-to = Upload to:
 tx-drop-hint = This terminal has not reported its current folder. Enable shell integration to upload straight to where you are.
 tx-drop-upload = Upload
 tx-drop-label = Drop to upload to { $folder }
@@ -1264,3 +1259,26 @@ window-gone = That window has been closed.
 window-name = Window { $n }
 window-name-with-tab = Window { $n } — { $tab }
 zoom-level = Zoom { $percent } %
+
+# v0.4.0 security review
+tx-paste-title-control = Paste text with control characters into { $host }?
+tx-paste-prod-peers = PRODUCTION also receives this paste: { $hosts }
+tx-finished-os = Command finished on { $host } (exit { $exit }, { $time })
+tx-up-title = { $count ->
+    [one] Upload 1 item ({ $size }) to { $target }
+   *[other] Upload { $count } items ({ $size }) to { $target }
+}
+tx-up-folder = Folder on { $target }:
+tx-up-existing = If a file with the same name already exists:
+tx-up-skip = Skip it
+tx-up-rename = Keep both
+tx-up-overwrite = Overwrite
+tx-up-overwrite-warn = Files with the same names on the server will be replaced.
+tx-up-unverified = This folder was reported by the terminal output, and nothing ties it to { $target }. Check it before uploading.
+tx-link-show-file = Show in file manager…
+tx-link-file-title = Show this in your file manager?
+tx-link-file-body = A link in the terminal output points to this file or folder on your computer. It is shown, never opened.
+tx-link-file-go = Show
+tx-link-file-missing = That file or folder does not exist on this computer.
+preview-image-too-big = Not previewed: this image is { $width } × { $height } pixels, more than can be decoded safely.
+preview-image-unknown = Not previewed: the size of this image could not be read safely.

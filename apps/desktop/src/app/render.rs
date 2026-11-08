@@ -73,7 +73,7 @@ impl HostwickApp {
                 (keys("Ctrl+Shift+N", "⌘N"), t!("shortcut-new-host")),
                 (keys("Ctrl+Shift+U", "⌘T"), t!("shortcut-duplicate-tab")),
                 (keys("Ctrl+Shift+T", "⌘⇧T"), t!("shortcut-reopen-tab")),
-                (keys("Ctrl+1…9", "⌘1…9"), t!("shortcut-jump-tab")),
+                (keys("Ctrl+Alt+1…9", "⌘1…9"), t!("shortcut-jump-tab")),
                 (keys("Ctrl+Shift+W", "⌘W"), t!("shortcut-close-pane")),
                 (keys("Ctrl+Shift+R", "⌘R"), t!("shortcut-reconnect")),
                 (keys("Ctrl+Tab", "⌃Tab"), t!("shortcut-next-tab")),

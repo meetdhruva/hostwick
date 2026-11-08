@@ -72,6 +72,8 @@ impl Proto {
 
 /// How a transfer ended, for the view.
 pub struct Ended {
+    /// The session it ran in; a result from an older session is dropped.
+    pub generation: u64,
     pub proto: Proto,
     pub dir: Dir,
     pub result: Result<Outcome, XferError>,
@@ -91,11 +93,28 @@ enum Phase {
 
 /// The transfer in progress (at most one per terminal).
 pub struct XferUi {
+    /// The session this belongs to.
+    generation: u64,
     proto: Proto,
     dir: Dir,
     start: Option<XferStart>,
     dest: PathBuf,
     phase: Phase,
+}
+
+impl XferUi {
+    /// The session ended or is being replaced: an offer nobody answered is
+    /// void (its channels close, which lets the old parser finish) and a
+    /// running transfer is cancelled. True when something was running.
+    pub fn abandon(self) -> bool {
+        match self.phase {
+            Phase::Running { cancel, .. } => {
+                cancel.cancel();
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 /// A finished download, shown for a while with a button to open the folder.
@@ -165,6 +184,7 @@ impl TerminalView {
             Dir::Upload => Phase::Picking,
         };
         self.x.xfer = Some(XferUi {
+            generation: self.generation,
             proto,
             dir,
             start: Some(start),
@@ -268,7 +288,7 @@ impl TerminalView {
             cancel: cancel.clone(),
             since: Instant::now(),
         };
-        let (proto, dir, dest) = (x.proto, x.dir, x.dest.clone());
+        let (proto, dir, dest, generation) = (x.proto, x.dir, x.dest.clone(), x.generation);
         let notes = self.notes.clone();
         self.rt.spawn(async move {
             let XferStart {
@@ -284,7 +304,7 @@ impl TerminalView {
             let mut report = |p: &Progress| {
                 if last.elapsed() >= Duration::from_millis(100) || p.done >= p.total {
                     last = Instant::now();
-                    let _ = n2.unbounded_send(Note::XferProgress(p.clone()));
+                    let _ = n2.unbounded_send(Note::XferProgress(generation, p.clone()));
                 }
             };
             let result = match (&detected, files) {
@@ -329,7 +349,12 @@ impl TerminalView {
                 Err(_) => link.leftover(),
             };
             let _ = done.send(Done { rx: link.rx, spare });
-            let _ = notes.unbounded_send(Note::XferEnded(Ended { proto, dir, result }));
+            let _ = notes.unbounded_send(Note::XferEnded(Ended {
+                generation,
+                proto,
+                dir,
+                result,
+            }));
         });
         cx.notify();
     }
@@ -378,7 +403,25 @@ impl TerminalView {
         });
     }
 
-    pub(super) fn on_xfer_progress(&mut self, p: Progress, cx: &mut Context<Self>) {
+    /// The session ended or is being replaced (reconnect): drop the offer or
+    /// cancel the transfer, so keys are not swallowed by a dialog about a
+    /// connection that is gone.
+    pub(super) fn abandon_transfer(&mut self, cx: &mut Context<Self>) {
+        if let Some(x) = self.x.xfer.take() {
+            x.abandon();
+            cx.notify();
+        }
+    }
+
+    pub(super) fn on_xfer_progress(
+        &mut self,
+        generation: u64,
+        p: Progress,
+        cx: &mut Context<Self>,
+    ) {
+        if generation != self.generation {
+            return;
+        }
         if let Some(XferUi {
             phase: Phase::Running { progress, .. },
             ..
@@ -390,6 +433,9 @@ impl TerminalView {
     }
 
     pub(super) fn on_xfer_ended(&mut self, e: Ended, cx: &mut Context<Self>) {
+        if e.generation != self.generation {
+            return;
+        }
         self.x.xfer = None;
         let name = e.proto.label();
         let text = match &e.result {
@@ -664,5 +710,61 @@ impl TerminalView {
                 ),
         );
         Some(wrap(el.into_any_element()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::time::Instant;
+
+    use bytes::Bytes;
+    use hostwick_term::ShellCommand;
+    use hostwick_term::xfer::Detected;
+    use hostwick_term::zmodem::Start;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    use super::{Dir, Phase, Proto, XferStart, XferUi};
+
+    fn offer(phase: Phase) -> XferUi {
+        let (_tx, rx) = mpsc::channel::<Bytes>(1);
+        let (done, _done_rx) = mpsc::unbounded_channel();
+        let (input, _input_rx) = mpsc::channel::<ShellCommand>(1);
+        XferUi {
+            generation: 3,
+            proto: Proto::Zmodem,
+            dir: Dir::Download,
+            start: Some(XferStart {
+                detected: Detected::Zmodem(Start::Download),
+                initial: Vec::new(),
+                rx,
+                done,
+                input,
+            }),
+            dest: PathBuf::from("."),
+            phase,
+        }
+    }
+
+    #[test]
+    fn an_unanswered_offer_is_void_when_the_session_ends() {
+        for phase in [Phase::AskSave, Phase::Picking] {
+            let x = offer(phase);
+            assert!(!x.abandon(), "nothing was running");
+        }
+    }
+
+    #[test]
+    fn a_running_transfer_is_cancelled_when_the_session_ends() {
+        let cancel = CancellationToken::new();
+        let x = offer(Phase::Running {
+            progress: None,
+            cancel: cancel.clone(),
+            since: Instant::now(),
+        });
+        assert!(!cancel.is_cancelled());
+        assert!(x.abandon());
+        assert!(cancel.is_cancelled());
     }
 }

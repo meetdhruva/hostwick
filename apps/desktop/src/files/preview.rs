@@ -10,6 +10,11 @@
 pub const TEXT_LIMIT: usize = 256 * 1024;
 /// Images larger than this are not loaded (their details are shown).
 pub const IMAGE_LIMIT: u64 = 20 * 1024 * 1024;
+/// Widest or tallest image that is decoded. A few KB of PNG can claim to be
+/// 60000 x 60000 pixels, which is 14 GB of memory once decoded.
+pub const MAX_IMAGE_SIDE: u64 = 16_384;
+/// Most pixels decoded (RGBA: 4 bytes each, so 256 MB at the limit).
+pub const MAX_IMAGE_PIXELS: u64 = 64_000_000;
 /// Most lines kept for display, so a huge one-line file stays cheap.
 pub const MAX_LINES: usize = 6000;
 
@@ -45,6 +50,202 @@ pub fn sniff_image(head: &[u8]) -> Option<ImageKind> {
         let t = text.trim_start_matches('\u{feff}').trim_start();
         (t.starts_with("<svg") || (t.starts_with("<?xml") && t.contains("<svg")))
             .then_some(ImageKind::Svg)
+    }
+}
+
+/// The pixel size an image file says it has, from its header (all of the
+/// formats put it in the first bytes). SVG: its `width`/`height`, else its
+/// `viewBox`; an SVG that names neither has the default size.
+pub fn image_size(head: &[u8], kind: ImageKind) -> Option<(u64, u64)> {
+    let be16 = |i: usize| {
+        head.get(i..i + 2)
+            .map(|b| u64::from(u16::from_be_bytes([b[0], b[1]])))
+    };
+    let le16 = |i: usize| {
+        head.get(i..i + 2)
+            .map(|b| u64::from(u16::from_le_bytes([b[0], b[1]])))
+    };
+    let be32 = |i: usize| {
+        head.get(i..i + 4)
+            .map(|b| u64::from(u32::from_be_bytes([b[0], b[1], b[2], b[3]])))
+    };
+    match kind {
+        ImageKind::Png => {
+            // Signature, then the IHDR chunk: length, "IHDR", width, height.
+            (head.get(12..16)? == b"IHDR").then_some(())?;
+            Some((be32(16)?, be32(20)?))
+        }
+        ImageKind::Gif => Some((le16(6)?, le16(8)?)),
+        ImageKind::Jpeg => {
+            let mut i = 2;
+            while i + 4 <= head.len() {
+                if head[i] != 0xFF {
+                    return None;
+                }
+                let marker = head[i + 1];
+                match marker {
+                    0xFF => {
+                        i += 1;
+                        continue;
+                    }
+                    0x01 | 0xD0..=0xD8 => {
+                        i += 2;
+                        continue;
+                    }
+                    0xC0..=0xCF if !matches!(marker, 0xC4 | 0xC8 | 0xCC) => {
+                        return Some((be16(i + 7)?, be16(i + 5)?));
+                    }
+                    _ => {}
+                }
+                i += 2 + usize::from(u16::from_be_bytes([*head.get(i + 2)?, *head.get(i + 3)?]));
+            }
+            None
+        }
+        ImageKind::Webp => match head.get(12..16)? {
+            b"VP8 " => {
+                (head.get(23..26)? == [0x9d, 0x01, 0x2a]).then_some(())?;
+                Some((le16(26)? & 0x3fff, le16(28)? & 0x3fff))
+            }
+            b"VP8L" => {
+                let b = head.get(21..25)?;
+                let (b0, b1, b2, b3) = (
+                    u64::from(b[0]),
+                    u64::from(b[1]),
+                    u64::from(b[2]),
+                    u64::from(b[3]),
+                );
+                Some((
+                    ((b1 & 0x3f) << 8 | b0) + 1,
+                    ((b3 & 0x0f) << 10 | b2 << 2 | b1 >> 6) + 1,
+                ))
+            }
+            b"VP8X" => {
+                let w = head.get(24..27)?;
+                let h = head.get(27..30)?;
+                let n = |b: &[u8]| u64::from(b[0]) | u64::from(b[1]) << 8 | u64::from(b[2]) << 16;
+                Some((n(w) + 1, n(h) + 1))
+            }
+            _ => None,
+        },
+        ImageKind::Svg => svg_size(head),
+    }
+}
+
+/// Size of an SVG from the attributes of its root element.
+fn svg_size(head: &[u8]) -> Option<(u64, u64)> {
+    let text = String::from_utf8_lossy(&head[..head.len().min(64 * 1024)]);
+    let start = text.find("<svg")?;
+    let tag = &text[start..];
+    let end = tag.find('>').unwrap_or(tag.len());
+    let tag = &tag[..end];
+    let attr = |name: &str| -> Option<String> {
+        let mut from = 0;
+        while let Some(i) = tag[from..].find(name) {
+            let at = from + i;
+            from = at + name.len();
+            let before_ok = at == 0 || tag.as_bytes()[at - 1].is_ascii_whitespace();
+            let rest = tag[from..].trim_start();
+            if before_ok && let Some(rest) = rest.strip_prefix('=') {
+                let rest = rest.trim_start();
+                let q = rest.chars().next().filter(|c| matches!(c, '"' | '\''))?;
+                let body = &rest[1..];
+                return body.find(q).map(|e| body[..e].to_owned());
+            }
+        }
+        None
+    };
+    // Absolute lengths only; `100%` has no pixel size of its own.
+    let len = |v: &str| -> Option<f64> {
+        let v = v.trim();
+        if let Ok(n) = v.parse::<f64>() {
+            return (n.is_finite() && n >= 0.0).then_some(n);
+        }
+        let (num, unit) = v.split_at(
+            v.find(|c: char| c.is_ascii_alphabetic() || c == '%')
+                .unwrap_or(v.len()),
+        );
+        let n: f64 = num.trim().parse().ok()?;
+        let k = match unit {
+            "" | "px" => 1.0,
+            "pt" => 4.0 / 3.0,
+            "pc" => 16.0,
+            "mm" => 96.0 / 25.4,
+            "cm" => 96.0 / 2.54,
+            "in" => 96.0,
+            _ => return None,
+        };
+        (n.is_finite() && n >= 0.0).then_some(n * k)
+    };
+    // A length that is there but makes no sense is not guessed at.
+    let side = |name: &str| -> Result<Option<f64>, ()> {
+        match attr(name) {
+            None => Ok(None),
+            Some(v) if v.trim().ends_with('%') => Ok(None),
+            Some(v) => len(&v).map(Some).ok_or(()),
+        }
+    };
+    let mut w = side("width").ok()?;
+    let mut h = side("height").ok()?;
+    if let Some(vb) = attr("viewBox") {
+        let nums: Vec<f64> = vb
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .filter(|p| !p.is_empty())
+            .filter_map(|p| p.parse().ok())
+            .collect();
+        if let [_, _, vw, vh] = nums[..] {
+            if w.is_none() && h.is_none() {
+                (w, h) = (Some(vw.abs()), Some(vh.abs()));
+            } else {
+                // One side given: the other follows the aspect ratio.
+                if w.is_none() {
+                    w = h.map(|h| if vh > 0.0 { h * vw / vh } else { 0.0 });
+                }
+                if h.is_none() {
+                    h = w.map(|w| if vw > 0.0 { w * vh / vw } else { 0.0 });
+                }
+            }
+        }
+    }
+    // Neither: the default size (300 x 150).
+    let clamp = |v: f64| {
+        if v >= u64::MAX as f64 {
+            u64::MAX
+        } else {
+            v.ceil() as u64
+        }
+    };
+    Some((clamp(w.unwrap_or(300.0)), clamp(h.unwrap_or(150.0))))
+}
+
+/// Whether an image may be handed to the decoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageCheck {
+    Ok,
+    /// Too many pixels (or a side too long) for the size the header gives.
+    TooBig(u64, u64),
+    /// The size could not be read, or the file is something the decoder is
+    /// not to be given (an SVG with entity declarations).
+    Unknown,
+}
+
+/// Look at an image's declared size before decoding it.
+pub fn check_image(bytes: &[u8], kind: ImageKind) -> ImageCheck {
+    if kind == ImageKind::Svg {
+        let head = &bytes[..bytes.len().min(64 * 1024)];
+        if head.windows(8).any(|w| w.eq_ignore_ascii_case(b"<!ENTITY")) {
+            return ImageCheck::Unknown;
+        }
+    }
+    let Some((w, h)) = image_size(bytes, kind) else {
+        return ImageCheck::Unknown;
+    };
+    if w == 0 || h == 0 {
+        return ImageCheck::Unknown;
+    }
+    if w > MAX_IMAGE_SIDE || h > MAX_IMAGE_SIDE || w.saturating_mul(h) > MAX_IMAGE_PIXELS {
+        ImageCheck::TooBig(w, h)
+    } else {
+        ImageCheck::Ok
     }
 }
 
@@ -208,6 +409,148 @@ mod tests {
     use super::*;
 
     const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+
+    fn png(w: u32, h: u32) -> Vec<u8> {
+        let mut v = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        v.extend(w.to_be_bytes());
+        v.extend(h.to_be_bytes());
+        v.extend([8, 6, 0, 0, 0]);
+        v
+    }
+
+    fn jpeg(w: u16, h: u16) -> Vec<u8> {
+        // SOI, an APP0 segment, then SOF0.
+        let mut v = vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 6, b'J', b'F', b'I', b'F'];
+        v.extend([0xFF, 0xC0, 0, 17, 8]);
+        v.extend(h.to_be_bytes());
+        v.extend(w.to_be_bytes());
+        v.extend([3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1]);
+        v
+    }
+
+    #[test]
+    fn image_sizes_come_from_the_headers() {
+        assert_eq!(image_size(&png(640, 480), ImageKind::Png), Some((640, 480)));
+        assert_eq!(
+            image_size(&jpeg(1920, 1080), ImageKind::Jpeg),
+            Some((1920, 1080))
+        );
+        let gif = [b"GIF89a".as_slice(), &[0x40, 0x01, 0xC8, 0x00]].concat();
+        assert_eq!(image_size(&gif, ImageKind::Gif), Some((320, 200)));
+        // WebP: lossy, lossless and extended.
+        let mut vp8 = b"RIFF\0\0\0\0WEBPVP8 \0\0\0\0\0\0\0".to_vec();
+        vp8.extend([0x9d, 0x01, 0x2a, 0x00, 0x04, 0x00, 0x03]);
+        assert_eq!(image_size(&vp8, ImageKind::Webp), Some((1024, 768)));
+        let mut vp8l = b"RIFF\0\0\0\0WEBPVP8L\0\0\0\0".to_vec();
+        // width 100, height 50 (stored minus one)
+        let (w, h) = (99u32, 49u32);
+        vp8l.push(0x2f);
+        vp8l.extend((w | h << 14).to_le_bytes());
+        assert_eq!(image_size(&vp8l, ImageKind::Webp), Some((100, 50)));
+        let mut vp8x = b"RIFF\0\0\0\0WEBPVP8X\x0a\0\0\0\0\0\0\0".to_vec();
+        vp8x.extend([0xff, 0x0f, 0x00, 0xff, 0x07, 0x00]);
+        assert_eq!(image_size(&vp8x, ImageKind::Webp), Some((4096, 2048)));
+        // Truncated headers say nothing.
+        assert_eq!(image_size(&png(1, 1)[..15], ImageKind::Png), None);
+        assert_eq!(image_size(b"GIF89a", ImageKind::Gif), None);
+    }
+
+    #[test]
+    fn svg_size_is_width_height_or_view_box() {
+        let size = |s: &str| image_size(s.as_bytes(), ImageKind::Svg);
+        assert_eq!(
+            size(r#"<svg width="200" height="100" xmlns="x"/>"#),
+            Some((200, 100))
+        );
+        assert_eq!(
+            size(r#"<svg viewBox="0 0 24 24" xmlns="x"/>"#),
+            Some((24, 24))
+        );
+        assert_eq!(size(r#"<svg viewBox="0,0,400.5,10"/>"#), Some((401, 10)));
+        assert_eq!(size(r#"<svg width='2in' height='1in'/>"#), Some((192, 96)));
+        // Percentages have no size of their own: the viewBox decides.
+        assert_eq!(
+            size(r#"<svg width="100%" height="100%" viewBox="0 0 50 40"/>"#),
+            Some((50, 40))
+        );
+        // One side: the other follows the aspect ratio.
+        assert_eq!(
+            size(r#"<svg width="100" viewBox="0 0 50 25"/>"#),
+            Some((100, 50))
+        );
+        // Nothing at all: the default size.
+        assert_eq!(size("<svg/>"), Some((300, 150)));
+        // stroke-width is not width.
+        assert_eq!(
+            size(r#"<svg stroke-width="999999" viewBox="0 0 10 10"/>"#),
+            Some((10, 10))
+        );
+    }
+
+    #[test]
+    fn huge_images_are_refused_before_decoding() {
+        // A 70-byte PNG that claims 60000 x 60000.
+        assert_eq!(
+            check_image(&png(60_000, 60_000), ImageKind::Png),
+            ImageCheck::TooBig(60_000, 60_000)
+        );
+        // Within a side limit but over the pixel budget.
+        assert_eq!(
+            check_image(&png(10_000, 10_000), ImageKind::Png),
+            ImageCheck::TooBig(10_000, 10_000)
+        );
+        // One very long side.
+        assert_eq!(
+            check_image(&png(100_000, 2), ImageKind::Png),
+            ImageCheck::TooBig(100_000, 2)
+        );
+        assert_eq!(
+            check_image(&jpeg(40_000, 40_000), ImageKind::Jpeg),
+            ImageCheck::TooBig(40_000, 40_000)
+        );
+        // Ordinary sizes pass, up to the limits.
+        assert_eq!(
+            check_image(&png(4000, 3000), ImageKind::Png),
+            ImageCheck::Ok
+        );
+        assert_eq!(
+            check_image(&png(8000, 8000), ImageKind::Png),
+            ImageCheck::Ok
+        );
+        assert_eq!(check_image(&png(16_384, 1), ImageKind::Png), ImageCheck::Ok);
+        // Unreadable or empty sizes are not decoded either.
+        assert_eq!(check_image(&png(0, 5), ImageKind::Png), ImageCheck::Unknown);
+        assert_eq!(
+            check_image(b"\x89PNG\r\n\x1a\nxx", ImageKind::Png),
+            ImageCheck::Unknown
+        );
+    }
+
+    #[test]
+    fn huge_svgs_and_entity_bombs_are_refused() {
+        let svg = |s: &str| check_image(s.as_bytes(), ImageKind::Svg);
+        assert_eq!(svg(r#"<svg viewBox="0 0 24 24"/>"#), ImageCheck::Ok);
+        assert_eq!(
+            svg(r#"<svg width="1000000" height="1000000"/>"#),
+            ImageCheck::TooBig(1_000_000, 1_000_000)
+        );
+        assert_eq!(
+            svg(r#"<svg viewBox="0 0 99999 99999"/>"#),
+            ImageCheck::TooBig(99_999, 99_999)
+        );
+        assert_eq!(
+            svg(r#"<svg width="1e308" height="1e308"/>"#),
+            ImageCheck::TooBig(u64::MAX, u64::MAX)
+        );
+        // A length that makes no sense is not guessed at.
+        assert_eq!(
+            svg(r#"<svg width="wide" height="10"/>"#),
+            ImageCheck::Unknown
+        );
+        assert_eq!(svg(r#"<svg width="-5" height="10"/>"#), ImageCheck::Unknown);
+        let bomb = r#"<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY a "aaaa"><!ENTITY b "&a;&a;&a;">]><svg viewBox="0 0 1 1"/>"#;
+        assert_eq!(svg(bomb), ImageCheck::Unknown);
+    }
 
     #[test]
     fn images_are_recognised_by_content() {

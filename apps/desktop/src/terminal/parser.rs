@@ -33,7 +33,7 @@ pub(super) struct Parser {
     done: mpsc::UnboundedSender<Done>,
     input: mpsc::Sender<ShellCommand>,
     /// Results since the caller last took them.
-    pub cwd: Option<String>,
+    pub cwd: Option<osc7::Cwd>,
     pub marks: Vec<osc133::Mark>,
     pub started: Option<XferStart>,
 }

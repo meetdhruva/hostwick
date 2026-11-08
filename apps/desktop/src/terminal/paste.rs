@@ -39,7 +39,17 @@ impl PasteConfirm {
 
 /// Whether `text` is risky to paste without a look.
 pub fn is_risky(text: &str) -> bool {
-    text.len() > LARGE || has_newline(text)
+    text.len() > LARGE || has_newline(text) || has_control(text)
+}
+
+/// A control character other than tab and the line breaks (those have their
+/// own rule): Ctrl+C, Ctrl+D, an escape sequence, a backspace that hides
+/// what is typed. Bracketed paste only protects shells that ask for it, and
+/// we drop ESC from it, but a program that does not use it receives these as
+/// keystrokes.
+pub fn has_control(text: &str) -> bool {
+    text.chars()
+        .any(|c| c.is_control() && !matches!(c, '\t' | '\n' | '\r'))
 }
 
 /// A newline anywhere counts, a trailing one too: it runs the command.
@@ -53,6 +63,42 @@ pub fn needs_confirm(text: &str, mode: PasteConfirm, prod: bool) -> bool {
         return false;
     }
     prod || mode == PasteConfirm::Always
+}
+
+/// A terminal the paste would reach: the one pasted into, or (broadcast on)
+/// another one that receives the same keystrokes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Receiver {
+    pub name: String,
+    pub prod: bool,
+}
+
+/// The answer for one paste.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Verdict {
+    /// Ask first.
+    pub confirm: bool,
+    /// Some receiver is a production host (the source or a peer).
+    pub prod: bool,
+    /// Names of the production peers (not the source), for the dialog.
+    pub prod_peers: Vec<String>,
+}
+
+/// Decide for a paste into `source_prod`'s terminal that, with broadcast
+/// on, also reaches `peers` (empty with broadcast off). Production anywhere
+/// among the receivers makes a risky paste ask, whatever the setting.
+pub fn verdict(text: &str, mode: PasteConfirm, source_prod: bool, peers: &[Receiver]) -> Verdict {
+    let prod_peers: Vec<String> = peers
+        .iter()
+        .filter(|p| p.prod)
+        .map(|p| p.name.clone())
+        .collect();
+    let prod = source_prod || !prod_peers.is_empty();
+    Verdict {
+        confirm: needs_confirm(text, mode, prod),
+        prod,
+        prod_peers,
+    }
 }
 
 /// The text as one line: line breaks become single spaces, a trailing
@@ -139,6 +185,76 @@ mod tests {
         assert!(!needs_confirm(&big, Never, false));
         assert!(needs_confirm(&big, Never, true));
         assert!(!needs_confirm(&"x".repeat(LARGE), Always, false));
+    }
+
+    #[test]
+    fn control_characters_are_risky() {
+        for bad in [
+            "a\u{3}b",
+            "a\u{4}",
+            "\u{1b}[2Jx",
+            "x\u{8}\u{8}y",
+            "a\u{0}b",
+            "a\u{7f}",
+            "a\u{85}b",
+            "\u{9b}31m",
+        ] {
+            assert!(has_control(bad), "{bad:?}");
+            assert!(is_risky(bad), "{bad:?}");
+            assert!(needs_confirm(bad, PasteConfirm::Always, false), "{bad:?}");
+            assert!(needs_confirm(bad, PasteConfirm::Never, true), "{bad:?}");
+        }
+        for fine in [
+            "tab\tseparated",
+            "ls -la",
+            "héllo ✓ 日本語",
+            "a\nb",
+            "",
+            "emoji 🎉",
+        ] {
+            assert!(!has_control(fine), "{fine:?}");
+        }
+        assert!(!is_risky("tab\tseparated"));
+        // Line breaks keep their own rule.
+        assert!(is_risky("a\nb"));
+    }
+
+    fn peer(name: &str, prod: bool) -> Receiver {
+        Receiver {
+            name: name.to_owned(),
+            prod,
+        }
+    }
+
+    #[test]
+    fn broadcast_to_a_production_peer_asks_even_from_a_dev_host() {
+        use PasteConfirm::*;
+        let multi = "rm -rf /tmp/x\nreboot";
+        let peers = [
+            peer("dev-2", false),
+            peer("db-prod", true),
+            peer("web-prod", true),
+        ];
+        for mode in PasteConfirm::ALL {
+            let v = verdict(multi, mode, false, &peers);
+            assert!(v.confirm, "{mode:?}");
+            assert!(v.prod);
+            assert_eq!(v.prod_peers, ["db-prod", "web-prod"]);
+        }
+        // Without broadcast there are no peers: the source decides alone.
+        assert!(!verdict(multi, ProdOnly, false, &[]).confirm);
+        assert!(!verdict(multi, Never, false, &[]).confirm);
+        assert!(verdict(multi, Always, false, &[]).confirm);
+        // Peers that are not production follow the setting.
+        let dev = [peer("a", false), peer("b", false)];
+        assert!(!verdict(multi, ProdOnly, false, &dev).confirm);
+        assert!(!verdict(multi, Never, false, &dev).confirm);
+        assert!(verdict(multi, Always, false, &dev).confirm);
+        // A production source asks whatever the peers are.
+        let v = verdict(multi, Never, true, &dev);
+        assert!(v.confirm && v.prod && v.prod_peers.is_empty());
+        // Safe text never asks, even with production peers.
+        assert!(!verdict("ls", Always, true, &peers).confirm);
     }
 
     #[test]

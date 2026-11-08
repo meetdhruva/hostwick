@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use crate::zoom::px;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -21,9 +20,10 @@ use hostwick_sftp::{LocalFs, RemoteFs, path_to_slash};
 use hostwick_term::TransportKind;
 use hostwick_transfer::{ExistingPolicy, Job};
 
-use super::{HostwickApp, PaneBody, Tab, TabKind};
+use super::{HostwickApp, PaneBody, Tab, TabKind, upload};
 use crate::notify::{Toast, ToastExt as _};
-use crate::terminal::{TermExt, TerminalView, links, paste};
+use crate::settings::Settings;
+use crate::terminal::{TermExt, TerminalView, paste};
 
 /// Per-app state of this feature.
 #[derive(Default)]
@@ -34,6 +34,46 @@ pub(crate) struct State {
 
 /// Marker types for notification ids.
 struct FinishedNote;
+
+/// What to say when a command finishes: the in-app text, which may name the
+/// command (short and cleaned), and the operating-system notification, which
+/// never does: the OS keeps notifications in its history and shows them on
+/// the lock screen, and commands often hold secrets (`mysql -pSECRET`,
+/// `export TOKEN=…`).
+pub(crate) fn finished_texts(
+    host: &str,
+    command: Option<&str>,
+    exit: Option<i32>,
+    took: Duration,
+) -> (SharedString, SharedString) {
+    let time = crate::terminal::format_duration(took);
+    let code = exit.map_or_else(|| "?".to_owned(), |c| c.to_string());
+    let shown = command
+        .map(|c| crate::terminal::display_command(c, 80))
+        .filter(|c| !c.is_empty());
+    let text = match shown {
+        Some(c) => t!(
+            "tx-finished",
+            host = host.to_owned(),
+            command = c,
+            exit = code.clone(),
+            time = time.clone()
+        ),
+        None => t!(
+            "tx-finished-nocmd",
+            host = host.to_owned(),
+            exit = code.clone(),
+            time = time.clone()
+        ),
+    };
+    let os = t!(
+        "tx-finished-os",
+        host = host.to_owned(),
+        exit = code,
+        time = time
+    );
+    (text, os)
+}
 
 /// The most telling environment among a tab's panes (production wins).
 pub(crate) fn tab_env(tab: &Tab) -> Environment {
@@ -111,7 +151,7 @@ impl HostwickApp {
                 exit,
                 took,
             } => self.command_finished(source, pane_id, command.clone(), *exit, *took, window, cx),
-            TermExt::ConfirmPaste { text } => self.confirm_paste(source, text.clone(), window, cx),
+            TermExt::Paste { text } => self.paste_request(source, text.clone(), window, cx),
             TermExt::DropFiles(paths) => {
                 self.drop_upload(source, pane_id, paths.clone(), window, cx)
             }
@@ -119,6 +159,7 @@ impl HostwickApp {
                 self.open_remote_path(source, pane_id, path.clone(), *download, window, cx)
             }
             TermExt::Connect(text) => self.connect_from_terminal(text.clone(), window, cx),
+            TermExt::RevealFile(path) => self.confirm_reveal(source, path.clone(), window, cx),
             TermExt::EnableIntegration => self.enable_integration(source, pane_id, window, cx),
         }
     }
@@ -148,23 +189,7 @@ impl HostwickApp {
             self.termx.bells.insert(tab);
         }
         let host = source.read(cx).host_info().name.clone();
-        let time = crate::terminal::format_duration(took);
-        let code = exit.map_or_else(|| "?".to_owned(), |c| c.to_string());
-        let text: SharedString = match &command {
-            Some(c) => t!(
-                "tx-finished",
-                host = host.clone(),
-                command = c.clone(),
-                exit = code,
-                time = time
-            ),
-            None => t!(
-                "tx-finished-nocmd",
-                host = host.clone(),
-                exit = code,
-                time = time
-            ),
-        };
+        let (text, os_text) = finished_texts(&host, command.as_deref(), exit, took);
         let me = cx.entity().downgrade();
         let show = move |window: &mut Window, cx: &mut App| {
             let _ = me.update(cx, |app, cx| app.show_pane(pane_id, window, cx));
@@ -176,8 +201,8 @@ impl HostwickApp {
         };
         window.toast(toast.action(t!("tx-finished-show"), show.clone()), cx);
         if !window.is_window_active() {
-            let note = Notification::info(text)
-                .title(host)
+            let note = Notification::info(os_text)
+                .title("Hostwick")
                 .system()
                 .id1::<FinishedNote>(pane_id)
                 .on_click(move |_, window, cx| show(window, cx));
@@ -196,23 +221,65 @@ impl HostwickApp {
 
     // ---- paste -------------------------------------------------------------------
 
-    fn confirm_paste(
+    /// The terminals a paste into `source` would reach besides it: with
+    /// broadcast on, every other terminal that takes input.
+    fn paste_peers(&self, source: &Entity<TerminalView>, cx: &App) -> Vec<paste::Receiver> {
+        if !self.broadcast {
+            return Vec::new();
+        }
+        self.all_terminals()
+            .into_iter()
+            .filter(|v| v.entity_id() != source.entity_id())
+            .filter_map(|v| {
+                let v = v.read(cx);
+                v.accepts_input().then(|| paste::Receiver {
+                    name: v.host_info().name.clone(),
+                    prod: v.host_info().env.is_prod(),
+                })
+            })
+            .collect()
+    }
+
+    /// Text is being pasted into `source`: ask first when the paste rules
+    /// say so for it or, with broadcast on, for any terminal that receives
+    /// it too.
+    fn paste_request(
         &mut self,
         source: &Entity<TerminalView>,
         text: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let info = source.read(cx).host_info().clone();
-        let peers = if self.broadcast {
-            self.all_terminals().len().saturating_sub(1)
+        let mode = Settings::get(cx).term.confirm_paste;
+        let peers = self.paste_peers(source, cx);
+        let source_prod = source.read(cx).host_info().env.is_prod();
+        let verdict = paste::verdict(&text, mode, source_prod, &peers);
+        if verdict.confirm {
+            self.confirm_paste(source, text, peers.len(), verdict, window, cx);
         } else {
-            0
-        };
+            source.update(cx, |v, cx| v.paste_confirmed(text, false, cx));
+        }
+    }
+
+    fn confirm_paste(
+        &mut self,
+        source: &Entity<TerminalView>,
+        text: String,
+        peers: usize,
+        verdict: paste::Verdict,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let info = source.read(cx).host_info().clone();
         let view = source.clone();
         let pv = paste::preview(&text, 8, 110);
-        let prod = info.env.is_prod();
-        let title: SharedString = if text.len() > paste::LARGE && pv.total_lines <= 1 {
+        let prod = verdict.prod;
+        let source_prod = info.env.is_prod();
+        let prod_peers: SharedString = verdict.prod_peers.join(", ").into();
+        let has_control = paste::has_control(&text);
+        let title: SharedString = if has_control {
+            t!("tx-paste-title-control", host = info.name.clone())
+        } else if text.len() > paste::LARGE && pv.total_lines <= 1 {
             t!(
                 "tx-paste-title-large",
                 size = crate::terminal::format_bytes(text.len() as u64),
@@ -242,6 +309,11 @@ impl HostwickApp {
                         .gap(px(8.0))
                         .text_size(px(13.0))
                         .when(prod, |d| {
+                            let banner = if source_prod {
+                                t!("tx-paste-prod", host = info.name.clone())
+                            } else {
+                                t!("tx-paste-prod-peers", hosts = prod_peers.clone())
+                            };
                             d.child(
                                 div()
                                     .px(px(8.0))
@@ -249,11 +321,14 @@ impl HostwickApp {
                                     .rounded(px(4.0))
                                     .bg(hsla(0.0, 0.65, 0.40, 1.0))
                                     .text_color(hsla(0.0, 0.0, 1.0, 1.0))
-                                    .child(crate::a11y::text(t!(
-                                        "tx-paste-prod",
-                                        host = info.name.clone()
-                                    ))),
+                                    .child(crate::a11y::text(banner)),
                             )
+                        })
+                        .when(prod && source_prod && !prod_peers.is_empty(), |d| {
+                            d.child(div().text_color(theme.danger).child(crate::a11y::text(t!(
+                                "tx-paste-prod-peers",
+                                hosts = prod_peers.clone()
+                            ))))
                         })
                         .child(crate::a11y::text(t!(
                             "tx-paste-target",
@@ -360,19 +435,24 @@ impl HostwickApp {
         if paths.is_empty() {
             return;
         }
-        match source.read(cx).cwd() {
-            Some(dir) => self.start_upload(profile, paths, dir, window, cx),
-            None => self.ask_upload_dir(source, profile, paths, window, cx),
-        }
+        // Never straight away: the folder may have been named by text that
+        // was printed to the terminal, and the files replace what is there.
+        let (cwd, trusted) = {
+            let v = source.read(cx);
+            (v.cwd(), v.cwd_trusted())
+        };
+        self.confirm_upload(source, profile, paths, cwd, trusted, window, cx);
     }
 
     /// Queue `paths` for upload into `dir` (folders recursively); the
-    /// transfer panel shows the progress.
-    fn start_upload(
+    /// transfer panel shows the progress. `existing` says what happens to
+    /// files already there.
+    pub(super) fn start_upload(
         &mut self,
         profile: HostProfile,
         paths: Vec<PathBuf>,
         dir: String,
+        existing: upload::Existing,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -390,13 +470,30 @@ impl HostwickApp {
                     let Some(name) = p.file_name().map(|n| n.to_string_lossy().into_owned()) else {
                         continue;
                     };
-                    let target = match hostwick_sftp::join_checked(&dir, &name) {
+                    let mut target = match hostwick_sftp::join_checked(&dir, &name) {
                         Ok(t) => t,
                         Err(e) => {
                             errors.push(format!("{name}: {e}"));
                             continue;
                         }
                     };
+                    if existing == upload::Existing::Rename {
+                        // Keep both: the new item gets `name (1).ext`.
+                        match upload::free_remote_name(&session.fs, &dir, &name).await {
+                            Ok(n) => match hostwick_sftp::join_checked(&dir, &n) {
+                                Ok(t) => target = t,
+                                Err(e) => {
+                                    errors.push(format!("{name}: {e}"));
+                                    continue;
+                                }
+                            },
+                            Err(e) => {
+                                errors.push(format!("{name}: {e}"));
+                                continue;
+                            }
+                        }
+                    }
+                    let policy = existing.policy();
                     let src_path = path_to_slash(&p);
                     if p.is_dir() {
                         if let Err(e) = engine
@@ -405,7 +502,7 @@ impl HostwickApp {
                                 &src_path,
                                 session.fs.clone(),
                                 &target,
-                                ExistingPolicy::Overwrite,
+                                policy,
                             )
                             .await
                         {
@@ -417,7 +514,7 @@ impl HostwickApp {
                             src_path,
                             dst: session.fs.clone(),
                             dst_path: target,
-                            policy: ExistingPolicy::Overwrite,
+                            policy,
                         });
                     }
                 }
@@ -438,137 +535,6 @@ impl HostwickApp {
             });
         })
         .detach();
-    }
-
-    /// The shell has not reported its folder: ask where to put the files,
-    /// and offer to turn on shell integration so it will next time.
-    fn ask_upload_dir(
-        &mut self,
-        source: &Entity<TerminalView>,
-        profile: HostProfile,
-        paths: Vec<PathBuf>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let guess = links::resolve_path("~/x", None, Some(&profile.user_or_local()))
-            .map(|p| p.trim_end_matches("/x").to_owned())
-            .unwrap_or_else(|| "/".to_owned());
-        let input = cx.new(|cx| InputState::new(window, cx).default_value(guess.clone()));
-        input.update(cx, |i, cx| i.focus(window, cx));
-        // The real home folder, when the server tells.
-        {
-            let backend = self.backend.clone();
-            let p = profile.clone();
-            let job = backend.rt.spawn({
-                let backend = backend.clone();
-                async move {
-                    let s = backend.open_remote(p, false).await.ok()?;
-                    s.fs.canonicalize(".").await.ok()
-                }
-            });
-            let (input, guess) = (input.clone(), guess.clone());
-            cx.spawn_in(window, async move |_, cx| {
-                if let Ok(Some(home)) = job.await {
-                    let _ = cx.update(|window, cx| {
-                        input.update(cx, |i, cx| {
-                            if i.value().as_ref() == guess {
-                                i.set_value(home, window, cx);
-                            }
-                        });
-                    });
-                }
-            })
-            .detach();
-        }
-        let integration_on = profile.shell_integration;
-        let me = cx.entity().downgrade();
-        let source = source.clone();
-        let paths = Arc::new(paths);
-        let count = paths.len();
-        let back = source.read(cx).focus_handle(cx);
-        window.open_dialog(cx, move |dialog, _, cx| {
-            let muted = cx.theme().muted_foreground;
-            let (me1, me2) = (me.clone(), me.clone());
-            let (input1, input2) = (input.clone(), input.clone());
-            let (paths1, paths2) = (paths.clone(), paths.clone());
-            let (profile1, profile2) = (profile.clone(), profile.clone());
-            let source2 = source.clone();
-            let back = back.clone();
-            let go = move |window: &mut Window,
-                           cx: &mut App,
-                           me: &WeakEntity<HostwickApp>,
-                           input: &Entity<InputState>,
-                           paths: &Arc<Vec<PathBuf>>,
-                           profile: &HostProfile| {
-                let dir = input.read(cx).value().trim().to_owned();
-                if dir.is_empty() {
-                    return;
-                }
-                window.close_dialog(cx);
-                let (paths, profile) = ((**paths).clone(), profile.clone());
-                let _ = me.update(cx, |app, cx| {
-                    app.start_upload(profile, paths, dir, window, cx)
-                });
-            };
-            let go2 = go;
-            dialog
-                .title(crate::a11y::text(t!("tx-drop-title", count = count)))
-                .w(px(560.0))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(8.0))
-                        .text_size(px(13.0))
-                        .child(crate::a11y::text(t!("tx-drop-to")))
-                        .child(Input::new(&input))
-                        .child(
-                            div()
-                                .text_color(muted)
-                                .whitespace_normal()
-                                .child(crate::a11y::text(t!("tx-drop-hint"))),
-                        )
-                        .when(!integration_on, |d| {
-                            let src = source2.clone();
-                            d.child(
-                                div().flex().child(
-                                    Button::new("enable-integration")
-                                        .label(t!("tx-enable-now"))
-                                        .on_click(move |_, _, cx| {
-                                            src.update(cx, |_, cx| {
-                                                cx.emit(crate::terminal::TerminalEvent::Ext(
-                                                    TermExt::EnableIntegration,
-                                                ))
-                                            });
-                                        }),
-                                ),
-                            )
-                        }),
-                )
-                .on_ok(move |_, window, cx| {
-                    go(window, cx, &me1, &input1, &paths1, &profile1);
-                    false
-                })
-                .on_close(move |_, window, cx| back.focus(window, cx))
-                .footer(
-                    div()
-                        .flex()
-                        .gap(px(8.0))
-                        .child(
-                            Button::new("cancel")
-                                .label(t!("button-cancel"))
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                        )
-                        .child(
-                            Button::new("upload")
-                                .primary()
-                                .label(t!("tx-drop-upload"))
-                                .on_click(move |_, window, cx| {
-                                    go2(window, cx, &me2, &input2, &paths2, &profile2);
-                                }),
-                        ),
-                )
-        });
     }
 
     // ---- paths and hosts found in the output --------------------------------------
@@ -710,6 +676,78 @@ impl HostwickApp {
         cx.notify();
     }
 
+    /// A `file:` link was clicked in the output: ask, then show it in the
+    /// operating system's file manager (never open it: that could run it).
+    fn confirm_reveal(
+        &mut self,
+        source: &Entity<TerminalView>,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let back = source.read(cx).focus_handle(cx);
+        let shown: SharedString = path.clone().into();
+        let go_path = PathBuf::from(&path);
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let theme = cx.theme().clone();
+            let (go_path, back) = (go_path.clone(), back.clone());
+            let go = {
+                let p = go_path.clone();
+                move |window: &mut Window, cx: &mut App| {
+                    window.close_dialog(cx);
+                    if p.exists() {
+                        cx.reveal_path(&p);
+                    } else {
+                        window.toast(Toast::info(t!("tx-link-file-missing")), cx);
+                    }
+                }
+            };
+            let go_ok = go.clone();
+            dialog
+                .title(crate::a11y::text(t!("tx-link-file-title")))
+                .w(px(520.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.0))
+                        .text_size(px(13.0))
+                        .child(crate::a11y::text(t!("tx-link-file-body")))
+                        .child(
+                            div()
+                                .p(px(8.0))
+                                .rounded(px(4.0))
+                                .border_1()
+                                .border_color(theme.border)
+                                .font_family(crate::terminal::monospace_family())
+                                .whitespace_normal()
+                                .child(shown.clone()),
+                        ),
+                )
+                .on_ok(move |_, window, cx| {
+                    go_ok(window, cx);
+                    false
+                })
+                .on_close(move |_, window, cx| back.focus(window, cx))
+                .footer(
+                    div()
+                        .flex()
+                        .gap(px(8.0))
+                        .child(
+                            Button::new("cancel")
+                                .label(t!("button-cancel"))
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("show")
+                                .primary()
+                                .label(t!("tx-link-file-go"))
+                                .on_click(move |_, window, cx| go(window, cx)),
+                        ),
+                )
+        });
+    }
+
     // ---- shell integration: "Enable now" -----------------------------------------------
 
     /// Turn shell integration on for the host (saved hosts keep it) and
@@ -741,5 +779,46 @@ impl HostwickApp {
             window.toast(Toast::info(t!("tx-integration-later")), cx);
         }
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::finished_texts;
+
+    #[test]
+    fn os_notifications_never_carry_the_command() {
+        let secret = "mysql -u root -pHUNTER2 -e 'drop table x'";
+        let (app, os) = finished_texts("db1", Some(secret), Some(1), Duration::from_secs(42));
+        assert!(app.contains("mysql"), "{app}");
+        assert!(
+            os.contains("db1") && os.contains('1') && os.contains("42"),
+            "{os}"
+        );
+        for banned in ["mysql", "HUNTER2", "drop table"] {
+            assert!(!os.contains(banned), "{banned} leaked into: {os}");
+        }
+        // Without a command both read sensibly.
+        let (app, os) = finished_texts("web", None, None, Duration::from_secs(3));
+        assert!(app.contains("web") && os.contains("web"));
+    }
+
+    #[test]
+    fn the_in_app_text_is_short_and_clean() {
+        let long = format!("echo {}", "x".repeat(500));
+        let (app, _) = finished_texts("h", Some(&long), Some(0), Duration::from_secs(1));
+        assert!(app.chars().count() < 160, "{}", app.chars().count());
+        let (app, _) = finished_texts(
+            "h",
+            Some("a\u{1b}[2Jb\u{202e}c"),
+            Some(0),
+            Duration::from_secs(1),
+        );
+        assert!(
+            !app.contains('\u{1b}') && !app.contains('\u{202e}'),
+            "{app}"
+        );
     }
 }

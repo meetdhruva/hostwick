@@ -45,27 +45,11 @@ pub(super) fn push_closed(stack: &mut Vec<ClosedTab>, tab: ClosedTab) {
     stack.drain(..extra);
 }
 
-/// Where a Ctrl+N shortcut goes: 1..=8 are tabs 1 to 8, 9 is the last one.
+/// Where a tab-number shortcut (Ctrl+Alt+N, ⌘N) goes: 1..=8 are tabs 1 to 8, 9 is the last one.
 pub(super) fn tab_for_number(n: usize, count: usize) -> Option<usize> {
     match n {
         1..=8 if n <= count => Some(n - 1),
         9 => count.checked_sub(1),
-        _ => None,
-    }
-}
-
-/// The digit of a Ctrl/⌘+digit shortcut.
-pub(super) fn digit_key(key: &str) -> Option<usize> {
-    match key {
-        "1" => Some(1),
-        "2" => Some(2),
-        "3" => Some(3),
-        "4" => Some(4),
-        "5" => Some(5),
-        "6" => Some(6),
-        "7" => Some(7),
-        "8" => Some(8),
-        "9" => Some(9),
         _ => None,
     }
 }
@@ -94,7 +78,7 @@ impl HostwickApp {
         }
     }
 
-    /// Ctrl/⌘+1…8 go to that tab, 9 to the last one.
+    /// Ctrl+Alt/⌘+1…8 go to that tab, 9 to the last one.
     pub(super) fn jump_to_tab(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(ix) = tab_for_number(n, self.tabs.len()) {
             self.activate_tab(ix, window, cx);
@@ -252,7 +236,7 @@ impl HostwickApp {
 
     // ---- zoom ---------------------------------------------------------------------
 
-    /// Ctrl+= / Ctrl+- / Ctrl+0 (`dir` 0): the active terminal tab's text
+    /// Zoom shortcuts (`dir` 0 resets): the active terminal tab's text
     /// size. Returns whether a terminal tab took it.
     pub(super) fn zoom_active(&mut self, dir: i32, cx: &mut Context<Self>) -> bool {
         let Some(ix) = self.active else {
@@ -337,7 +321,7 @@ impl Tab {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{ClosedTab, KEEP_CLOSED, digit_key, push_closed, tab_for_number};
+    use super::{ClosedTab, KEEP_CLOSED, push_closed, tab_for_number};
     use crate::app::TabKind;
     use crate::layout::{SavedNode, SavedPane};
 
@@ -380,7 +364,7 @@ mod tests {
 
     #[test]
     fn numbered_shortcuts_pick_tabs() {
-        // Ctrl+1..8 are tabs 1..8; Ctrl+9 is always the last one.
+        // 1..8 are tabs 1..8; 9 is always the last one.
         assert_eq!(tab_for_number(1, 5), Some(0));
         assert_eq!(tab_for_number(5, 5), Some(4));
         assert_eq!(tab_for_number(6, 5), None);
@@ -389,8 +373,9 @@ mod tests {
         assert_eq!(tab_for_number(9, 0), None);
         assert_eq!(tab_for_number(8, 12), Some(7));
         assert_eq!(tab_for_number(0, 3), None);
-        assert_eq!(digit_key("3"), Some(3));
-        assert_eq!(digit_key("a"), None);
-        assert_eq!(digit_key("10"), None);
+        assert_eq!(crate::shortcuts::digit("3"), Some(3));
+        assert_eq!(crate::shortcuts::digit("a"), None);
+        assert_eq!(crate::shortcuts::digit("10"), None);
+        assert_eq!(crate::shortcuts::digit("0"), None);
     }
 }

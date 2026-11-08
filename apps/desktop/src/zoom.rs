@@ -1,4 +1,4 @@
-//! Zoom: the terminal font size of a tab (Ctrl+= / Ctrl+- / Ctrl+0 and
+//! Zoom: the terminal font size of a tab (Ctrl+= / Ctrl+Alt+- / Ctrl+0 and
 //! Ctrl+wheel) and the UI scale of the whole app (Settings → Appearance).
 //!
 //! Pure arithmetic, so the limits are easy to test. A tab's zoom is a

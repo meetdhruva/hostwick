@@ -1148,11 +1148,6 @@ tx-drop-started = { $count ->
     [one] 1 Element wird nach { $folder } hochgeladen
    *[other] { $count } Elemente werden nach { $folder } hochgeladen
 }
-tx-drop-title = { $count ->
-    [one] 1 Element hochladen
-   *[other] { $count } Elemente hochladen
-}
-tx-drop-to = Hochladen nach:
 tx-drop-hint = Dieses Terminal hat seinen aktuellen Ordner nicht gemeldet. Mit der Shell-Integration landen Uploads direkt dort, wo Sie sind.
 tx-drop-upload = Hochladen
 tx-drop-label = Zum Hochladen nach { $folder } ablegen
@@ -1263,3 +1258,26 @@ window-gone = Dieses Fenster wurde geschlossen.
 window-name = Fenster { $n }
 window-name-with-tab = Fenster { $n } — { $tab }
 zoom-level = Zoom { $percent } %
+
+# v0.4.0 security review
+tx-paste-title-control = Text mit Steuerzeichen in { $host } einfügen?
+tx-paste-prod-peers = PRODUKTION erhält diese Eingabe ebenfalls: { $hosts }
+tx-finished-os = Befehl auf { $host } beendet (Exit { $exit }, { $time })
+tx-up-title = { $count ->
+    [one] 1 Element ({ $size }) nach { $target } hochladen
+   *[other] { $count } Elemente ({ $size }) nach { $target } hochladen
+}
+tx-up-folder = Ordner auf { $target }:
+tx-up-existing = Falls eine Datei mit demselben Namen schon existiert:
+tx-up-skip = Überspringen
+tx-up-rename = Beide behalten
+tx-up-overwrite = Überschreiben
+tx-up-overwrite-warn = Dateien mit gleichem Namen auf dem Server werden ersetzt.
+tx-up-unverified = Dieser Ordner wurde von der Terminalausgabe gemeldet, und nichts verbindet ihn mit { $target }. Bitte vor dem Hochladen prüfen.
+tx-link-show-file = Im Dateimanager anzeigen…
+tx-link-file-title = Im Dateimanager anzeigen?
+tx-link-file-body = Ein Link in der Terminalausgabe verweist auf diese Datei oder diesen Ordner auf Ihrem Computer. Sie wird angezeigt, nie geöffnet.
+tx-link-file-go = Anzeigen
+tx-link-file-missing = Diese Datei oder dieser Ordner existiert auf diesem Computer nicht.
+preview-image-too-big = Keine Vorschau: Das Bild hat { $width } × { $height } Pixel – mehr, als sicher dekodiert werden kann.
+preview-image-unknown = Keine Vorschau: Die Größe dieses Bildes ließ sich nicht sicher lesen.

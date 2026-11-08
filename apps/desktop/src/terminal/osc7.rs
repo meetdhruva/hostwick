@@ -31,7 +31,7 @@ pub struct Osc7Scanner {
 
 impl Osc7Scanner {
     /// Scan a chunk of output; returns the last folder reported in it.
-    pub fn feed(&mut self, mut bytes: &[u8]) -> Option<String> {
+    pub fn feed(&mut self, mut bytes: &[u8]) -> Option<Cwd> {
         let mut found = None;
         while !bytes.is_empty() {
             if self.st == St::Ground {
@@ -54,14 +54,14 @@ impl Osc7Scanner {
                     St::Payload
                 }
                 (St::Payload, 0x07) => {
-                    if let Some(p) = parse_url(&self.buf) {
+                    if let Some(p) = parse_cwd(&self.buf) {
                         found = Some(p);
                     }
                     St::Ground
                 }
                 (St::Payload, 0x1b) => St::PayloadEsc,
                 (St::PayloadEsc, b'\\') => {
-                    if let Some(p) = parse_url(&self.buf) {
+                    if let Some(p) = parse_cwd(&self.buf) {
                         found = Some(p);
                     }
                     St::Ground
@@ -79,28 +79,112 @@ impl Osc7Scanner {
     }
 }
 
-/// `file://host/some%20dir` → `/some dir`. Also accepts a bare path and
-/// `kitty-shell-cwd://host/path`. Windows drive paths (`/C:/x`) lose the
-/// leading slash.
-pub fn parse_url(raw: &[u8]) -> Option<String> {
+/// A folder the shell reported: where it says it is, and on which host.
+/// Anything that prints to the terminal can send this, so the host decides
+/// whether it is believed (see [`HostCheck`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cwd {
+    /// The host part of the URL; `None` for a bare path or `file:///path`.
+    pub host: Option<String>,
+    pub path: String,
+}
+
+/// `file://host/some%20dir` → host `host`, path `/some dir`. Also accepts a
+/// bare path and `kitty-shell-cwd://host/path`. Windows drive paths
+/// (`/C:/x`) lose the leading slash.
+pub fn parse_cwd(raw: &[u8]) -> Option<Cwd> {
     let s = std::str::from_utf8(raw).ok()?.trim();
-    let rest = if let Some(r) = s
+    let (host, rest) = if let Some(r) = s
         .strip_prefix("file://")
         .or_else(|| s.strip_prefix("kitty-shell-cwd://"))
     {
-        // Skip the host part.
-        &r[r.find('/')?..]
+        let slash = r.find('/')?;
+        let host = percent_decode(&r[..slash]).filter(|h| !h.is_empty());
+        (host, &r[slash..])
     } else if s.starts_with('/') {
-        s
+        (None, s)
     } else {
         return None;
     };
     let path = percent_decode(rest)?;
     let b = path.as_bytes();
-    if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' {
-        return Some(path[1..].to_owned());
+    let path = if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' {
+        path[1..].to_owned()
+    } else {
+        path
+    };
+    Some(Cwd { host, path })
+}
+
+/// How far a reported folder can be believed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trust {
+    /// The host in the report is the host this session is connected to.
+    Verified,
+    /// Usable, but nothing ties it to this host: no host in the report, or
+    /// a host name that is only known because the shell said so first.
+    Unverified,
+    /// Names another host than this session's: ignored. (Output from a file
+    /// or another program that wants the file browser or an upload to go
+    /// somewhere else.)
+    Mismatch,
+}
+
+/// Decides which OSC 7 reports are believed for one session. The session's
+/// own host name is known from the profile; a server often calls itself
+/// something else (an IP address in the profile, `ip-10-0-0-5` on the
+/// machine), so the first host the shell reports is remembered and later
+/// reports must agree with it. That stops later output from redirecting
+/// anything; it cannot tell the first report from a forgery, which is why
+/// the report is only [`Trust::Unverified`] then and uploads always ask.
+#[derive(Debug, Default, Clone)]
+pub struct HostCheck {
+    reported: Option<String>,
+}
+
+fn same_host(a: &str, b: &str) -> bool {
+    let (a, b) = (a.trim_end_matches('.'), b.trim_end_matches('.'));
+    if a.eq_ignore_ascii_case(b) {
+        return true;
     }
-    Some(path)
+    // `web1` and `web1.example.com`: the short name of a machine. Not for
+    // IP addresses (10.0.0.5 vs 10.0.0.6 share a first "label" otherwise).
+    let ip = |h: &str| h.parse::<std::net::IpAddr>().is_ok() || h.starts_with('[');
+    if ip(a) || ip(b) {
+        return false;
+    }
+    let first = |h: &str| h.split('.').next().unwrap_or(h).to_ascii_lowercase();
+    (!a.contains('.') || !b.contains('.')) && first(a) == first(b)
+}
+
+impl HostCheck {
+    /// A new session starts: forget what the last one said.
+    pub fn reset(&mut self) {
+        self.reported = None;
+    }
+
+    /// Judge a report from a session connected to `session_host`.
+    pub fn check(&mut self, reported: Option<&str>, session_host: &str) -> Trust {
+        let Some(h) = reported.filter(|h| !h.is_empty()) else {
+            return Trust::Unverified;
+        };
+        if same_host(h, session_host) {
+            return Trust::Verified;
+        }
+        match &self.reported {
+            None => {
+                self.reported = Some(h.to_owned());
+                Trust::Unverified
+            }
+            Some(first) if same_host(first, h) => Trust::Unverified,
+            Some(_) => Trust::Mismatch,
+        }
+    }
+}
+
+/// `%XX` escapes decoded; `None` when the result is not UTF-8.
+pub fn percent_decode_str(s: &str) -> Option<String> {
+    percent_decode(s)
 }
 
 fn percent_decode(s: &str) -> Option<String> {
@@ -135,18 +219,22 @@ fn hex(c: u8) -> Option<u8> {
 mod tests {
     use super::*;
 
+    fn parse_path(raw: &[u8]) -> Option<String> {
+        parse_cwd(raw).map(|c| c.path)
+    }
+
     #[test]
     fn finds_osc7_with_either_terminator() {
         let mut s = Osc7Scanner::default();
         assert_eq!(
-            s.feed(b"prompt\x1b]7;file://web/home/me\x07$ ").as_deref(),
+            s.feed(b"prompt\x1b]7;file://web/home/me\x07$ ")
+                .map(|c| c.path)
+                .as_deref(),
             Some("/home/me")
         );
-        assert_eq!(
-            s.feed(b"\x1b[1m\x1b]7;file://web/srv/my%20site\x1b\\")
-                .as_deref(),
-            Some("/srv/my site")
-        );
+        let c = s.feed(b"\x1b[1m\x1b]7;file://web/srv/my%20site\x1b\\");
+        assert_eq!(c.as_ref().map(|c| c.path.as_str()), Some("/srv/my site"));
+        assert_eq!(c.and_then(|c| c.host).as_deref(), Some("web"));
         assert_eq!(s.feed(b"plain text, no escapes"), None);
         // Other OSCs (titles) are not mistaken for OSC 7.
         assert_eq!(s.feed(b"\x1b]0;title\x07\x1b]777;x\x07"), None);
@@ -159,7 +247,11 @@ mod tests {
             let mut s = Osc7Scanner::default();
             let a = s.feed(&msg[..cut]);
             let b = s.feed(&msg[cut..]);
-            assert_eq!(a.or(b).as_deref(), Some("/tmp/été"), "cut at {cut}");
+            assert_eq!(
+                a.or(b).map(|c| c.path).as_deref(),
+                Some("/tmp/été"),
+                "cut at {cut}"
+            );
         }
     }
 
@@ -168,6 +260,7 @@ mod tests {
         let mut s = Osc7Scanner::default();
         assert_eq!(
             s.feed(b"\x1b]7;file://h/a\x07\x1b]7;file://h/b\x07")
+                .map(|c| c.path)
                 .as_deref(),
             Some("/b")
         );
@@ -177,21 +270,81 @@ mod tests {
         let mut long = b"\x1b]7;file://h/".to_vec();
         long.extend(std::iter::repeat_n(b'a', MAX * 2));
         assert_eq!(s.feed(&long), None);
-        assert_eq!(s.feed(b"\x1b]7;file://h/ok\x07").as_deref(), Some("/ok"));
+        assert_eq!(
+            s.feed(b"\x1b]7;file://h/ok\x07").map(|c| c.path).as_deref(),
+            Some("/ok")
+        );
     }
 
     #[test]
     fn url_forms() {
         assert_eq!(
-            parse_url(b"file:///C:/Users/me").as_deref(),
+            parse_path(b"file:///C:/Users/me").as_deref(),
             Some("C:/Users/me")
         );
-        assert_eq!(parse_url(b"/plain/path").as_deref(), Some("/plain/path"));
-        assert_eq!(parse_url(b"file://host").as_deref(), None);
-        assert_eq!(parse_url(b"file://h/100%").as_deref(), Some("/100%"));
+        assert_eq!(parse_path(b"/plain/path").as_deref(), Some("/plain/path"));
+        assert_eq!(parse_path(b"file://host").as_deref(), None);
+        assert_eq!(parse_path(b"file://h/100%").as_deref(), Some("/100%"));
         assert_eq!(
-            parse_url(b"kitty-shell-cwd://h/x%25y").as_deref(),
+            parse_path(b"kitty-shell-cwd://h/x%25y").as_deref(),
             Some("/x%y")
+        );
+    }
+
+    #[test]
+    fn the_host_part_is_kept() {
+        let c = parse_cwd(b"file://Web1.Example.com/srv").unwrap_or_else(|| panic!("c"));
+        assert_eq!(c.host.as_deref(), Some("Web1.Example.com"));
+        assert_eq!(c.path, "/srv");
+        assert_eq!(parse_cwd(b"file:///srv").map(|c| c.host), Some(None));
+        assert_eq!(parse_cwd(b"/srv").map(|c| c.host), Some(None));
+        assert_eq!(
+            parse_cwd(b"file://h%61/x").and_then(|c| c.host).as_deref(),
+            Some("ha")
+        );
+    }
+
+    #[test]
+    fn reports_for_another_host_are_ignored() {
+        let mut c = HostCheck::default();
+        // Matches what the profile says (case, trailing dot, short name).
+        assert_eq!(c.check(Some("web1"), "web1"), Trust::Verified);
+        assert_eq!(c.check(Some("WEB1"), "web1"), Trust::Verified);
+        assert_eq!(c.check(Some("web1.example.com"), "web1"), Trust::Verified);
+        assert_eq!(c.check(Some("web1"), "web1.example.com."), Trust::Verified);
+        // A different host while the profile names this one, and nothing was
+        // reported before: believed once (remembered), as unverified.
+        let mut c = HostCheck::default();
+        assert_eq!(c.check(Some("ip-10-0-0-5"), "10.0.0.5"), Trust::Unverified);
+        assert_eq!(c.check(Some("ip-10-0-0-5"), "10.0.0.5"), Trust::Unverified);
+        // After that another host name is ignored.
+        assert_eq!(c.check(Some("attacker"), "10.0.0.5"), Trust::Mismatch);
+        assert_eq!(c.check(Some("db1"), "10.0.0.5"), Trust::Mismatch);
+        // The remembered one still works; the profile's own name too.
+        assert_eq!(c.check(Some("ip-10-0-0-5"), "10.0.0.5"), Trust::Unverified);
+        assert_eq!(c.check(Some("10.0.0.5"), "10.0.0.5"), Trust::Verified);
+        // No host in the report: usable, unverified.
+        assert_eq!(c.check(None, "10.0.0.5"), Trust::Unverified);
+        assert_eq!(c.check(Some(""), "10.0.0.5"), Trust::Unverified);
+        // A new session forgets the remembered name.
+        c.reset();
+        assert_eq!(c.check(Some("db1"), "10.0.0.5"), Trust::Unverified);
+    }
+
+    #[test]
+    fn ip_addresses_are_compared_whole() {
+        let mut c = HostCheck::default();
+        assert_eq!(c.check(Some("10.0.0.6"), "10.0.0.5"), Trust::Unverified);
+        assert_eq!(c.check(Some("10.0.0.7"), "10.0.0.5"), Trust::Mismatch);
+        // Two different FQDNs sharing a first label are different hosts.
+        let mut c = HostCheck::default();
+        assert_eq!(
+            c.check(Some("web1.evil.com"), "web1.example.com"),
+            Trust::Unverified
+        );
+        assert_eq!(
+            c.check(Some("web1.other.org"), "web1.example.com"),
+            Trust::Mismatch
         );
     }
 }

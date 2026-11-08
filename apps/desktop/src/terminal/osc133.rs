@@ -213,6 +213,34 @@ impl CommandTracker {
     }
 }
 
+/// A command line as shown in the app (the in-app toast), never in an
+/// operating-system notification: control and invisible formatting
+/// characters become spaces, runs of spaces one, and it is cut at `max`
+/// characters. Commands often hold secrets (`mysql -pSECRET`,
+/// `export TOKEN=…`), and notifications show on lock screens and in
+/// notification history.
+pub fn display_command(command: &str, max: usize) -> String {
+    let mut out = String::new();
+    let mut gap = false;
+    for c in command.trim().chars() {
+        if c.is_control() || c.is_whitespace() || hostwick_term::xfer::is_invisible_format(c) {
+            gap = !out.is_empty();
+            continue;
+        }
+        if gap {
+            out.push(' ');
+            gap = false;
+        }
+        out.push(c);
+    }
+    if out.chars().count() > max {
+        let mut cut: String = out.chars().take(max.saturating_sub(1)).collect();
+        cut.push('…');
+        return cut;
+    }
+    out
+}
+
 /// `2m 13s`, `45s`, `1h 02m`, `0.4s`.
 pub fn format_duration(d: Duration) -> String {
     let secs = d.as_secs();
@@ -231,6 +259,19 @@ pub fn format_duration(d: Duration) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn commands_are_shown_short_and_clean() {
+        use super::display_command as d;
+        assert_eq!(d("ls -la", 80), "ls -la");
+        assert_eq!(
+            d("  echo\t\u{1b}[31mhi \u{202e}there\n", 80),
+            "echo [31mhi there"
+        );
+        assert_eq!(d(&"x".repeat(200), 10), "xxxxxxxxx…");
+        assert_eq!(d("", 10), "");
+        assert_eq!(d("\u{7}\u{7}", 10), "");
+    }
+
     use super::*;
 
     fn scan(chunks: &[&[u8]]) -> Vec<Mark> {

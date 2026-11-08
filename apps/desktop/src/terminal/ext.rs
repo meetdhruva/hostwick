@@ -70,14 +70,18 @@ pub enum TermExt {
         exit: Option<i32>,
         took: Duration,
     },
-    /// A paste that deserves a look first.
-    ConfirmPaste { text: String },
+    /// Text to paste. The app decides whether it needs a look first: it
+    /// knows about broadcast and about the other terminals' environments.
+    Paste { text: String },
     /// Files dropped on the terminal.
     DropFiles(Vec<PathBuf>),
     /// Show a remote path in the file browser, or download it.
     OpenPath { path: String, download: bool },
     /// Quick connect to a host or address found in the output.
     Connect(String),
+    /// A `file:` link on this computer: show it in the file manager (after
+    /// asking).
+    RevealFile(String),
     /// "Enable now" for shell integration was pressed.
     EnableIntegration,
 }

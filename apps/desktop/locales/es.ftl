@@ -1151,11 +1151,6 @@ tx-drop-started = { $count ->
     [one] Subiendo 1 elemento a { $folder }
    *[other] Subiendo { $count } elementos a { $folder }
 }
-tx-drop-title = { $count ->
-    [one] Subir 1 elemento
-   *[other] Subir { $count } elementos
-}
-tx-drop-to = Subir a:
 tx-drop-hint = Este terminal no ha informado de su carpeta actual. Activa la integración con el shell para subir directamente a donde estás.
 tx-drop-upload = Subir
 tx-drop-label = Suelta para subir a { $folder }
@@ -1266,3 +1261,26 @@ window-gone = Esa ventana se ha cerrado.
 window-name = Ventana { $n }
 window-name-with-tab = Ventana { $n } — { $tab }
 zoom-level = Zoom { $percent } %
+
+# v0.4.0 security review
+tx-paste-title-control = ¿Pegar texto con caracteres de control en { $host }?
+tx-paste-prod-peers = PRODUCCIÓN también recibe este pegado: { $hosts }
+tx-finished-os = Comando terminado en { $host } (salida { $exit }, { $time })
+tx-up-title = { $count ->
+    [one] Subir 1 elemento ({ $size }) a { $target }
+   *[other] Subir { $count } elementos ({ $size }) a { $target }
+}
+tx-up-folder = Carpeta en { $target }:
+tx-up-existing = Si ya existe un archivo con el mismo nombre:
+tx-up-skip = Omitirlo
+tx-up-rename = Conservar ambos
+tx-up-overwrite = Sobrescribir
+tx-up-overwrite-warn = Se reemplazarán los archivos con el mismo nombre en el servidor.
+tx-up-unverified = Esta carpeta la indicó la salida del terminal y nada la vincula con { $target }. Compruébala antes de subir.
+tx-link-show-file = Mostrar en el administrador de archivos…
+tx-link-file-title = ¿Mostrarlo en el administrador de archivos?
+tx-link-file-body = Un enlace en la salida del terminal apunta a este archivo o carpeta de tu equipo. Se muestra, nunca se abre.
+tx-link-file-go = Mostrar
+tx-link-file-missing = Ese archivo o carpeta no existe en este equipo.
+preview-image-too-big = Sin vista previa: la imagen mide { $width } × { $height } píxeles, más de lo que se puede decodificar con seguridad.
+preview-image-unknown = Sin vista previa: no se pudo leer el tamaño de esta imagen de forma segura.

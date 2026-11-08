@@ -1151,11 +1151,6 @@ tx-drop-started = { $count ->
     [one] Envoi de 1 élément vers { $folder }
    *[other] Envoi de { $count } éléments vers { $folder }
 }
-tx-drop-title = { $count ->
-    [one] Envoyer 1 élément
-   *[other] Envoyer { $count } éléments
-}
-tx-drop-to = Envoyer vers :
 tx-drop-hint = Ce terminal n’a pas signalé son dossier actuel. Activez l’intégration du shell pour envoyer directement là où vous êtes.
 tx-drop-upload = Envoyer
 tx-drop-label = Déposez pour envoyer vers { $folder }
@@ -1266,3 +1261,26 @@ window-gone = Cette fenêtre a été fermée.
 window-name = Fenêtre { $n }
 window-name-with-tab = Fenêtre { $n } — { $tab }
 zoom-level = Zoom { $percent } %
+
+# v0.4.0 security review
+tx-paste-title-control = Coller du texte avec des caractères de contrôle dans { $host } ?
+tx-paste-prod-peers = La PRODUCTION reçoit aussi ce collage : { $hosts }
+tx-finished-os = Commande terminée sur { $host } (code { $exit }, { $time })
+tx-up-title = { $count ->
+    [one] Envoyer 1 élément ({ $size }) vers { $target }
+   *[other] Envoyer { $count } éléments ({ $size }) vers { $target }
+}
+tx-up-folder = Dossier sur { $target } :
+tx-up-existing = Si un fichier du même nom existe déjà :
+tx-up-skip = L’ignorer
+tx-up-rename = Garder les deux
+tx-up-overwrite = Écraser
+tx-up-overwrite-warn = Les fichiers du même nom sur le serveur seront remplacés.
+tx-up-unverified = Ce dossier a été annoncé par la sortie du terminal et rien ne le relie à { $target }. Vérifiez-le avant l’envoi.
+tx-link-show-file = Afficher dans le gestionnaire de fichiers…
+tx-link-file-title = L’afficher dans le gestionnaire de fichiers ?
+tx-link-file-body = Un lien dans la sortie du terminal désigne ce fichier ou dossier sur votre ordinateur. Il est affiché, jamais ouvert.
+tx-link-file-go = Afficher
+tx-link-file-missing = Ce fichier ou dossier n’existe pas sur cet ordinateur.
+preview-image-too-big = Pas d’aperçu : cette image fait { $width } × { $height } pixels, plus que ce qui peut être décodé en toute sécurité.
+preview-image-unknown = Pas d’aperçu : la taille de cette image n’a pas pu être lue en toute sécurité.
