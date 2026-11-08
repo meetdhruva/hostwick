@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 **Desktop: think less, click less**
 - Command palette (Ctrl+Shift+P / Ctrl+Shift+K, ⌘K / ⌘⇧P, or the magnifier in the sidebar): fuzzy search over saved hosts, recent connections, unsaved `~/.ssh/config` hosts, a typed `user@host:port` (connect or save), every app action with its shortcut, snippets and open tabs; matched letters highlighted, ranking boosted by how often and how recently things were used (stored in the settings database); Enter terminal, Ctrl/⌘+Enter files, Shift+Enter new split, Alt+Enter edit; grouped results, at most 50, instant with thousands of hosts.
@@ -27,10 +27,10 @@
 - The shell-integration hint in the host editor now lists what it enables.
 
 **Desktop: tabs, windows, files, transfers**
-- Tabs: Ctrl/⌘+1…8 jump to a tab and Ctrl/⌘+9 to the last (also with the terminal focused); middle-click closes; drag to reorder (drop marker) or Ctrl+Shift+←/→; double-click the empty tab bar for the palette; the bar scrolls when crowded and a ⌄ button lists all tabs; drag a tab onto a pane edge to move its panes into a split.
+- Tabs: Ctrl+Alt/⌘+1…8 jump to a tab and Ctrl+Alt/⌘+9 to the last (also with the terminal focused; see *Security and reliability* for why not plain Ctrl+digit); middle-click closes; drag to reorder (drop marker) or Ctrl+Shift+←/→; double-click the empty tab bar for the palette; the bar scrolls when crowded and a ⌄ button lists all tabs; drag a tab onto a pane edge to move its panes into a split.
 - Reopen closed tab (last ten, with layout, host and scrollback and a "— reconnected —" marker), including tabs closed by *Close others/all* or with a window.
 - Windows: *Move to new window* / *Move to window ▸* in the tab menu, or drag a tab out of the tab bar. Windows share the vault, settings, connections and transfers; closing the last window quits; positions, sizes and tab assignment are restored.
-- Zoom: Ctrl/⌘+= / + / - / 0 and Ctrl+wheel change the terminal font per tab (with a brief HUD, restored with the tab). Settings → Appearance → *Interface size* (90–150 %) scales the whole UI.
+- Zoom: Ctrl/⌘+= / + / 0, Ctrl+Alt+- (⌘-) and Ctrl+wheel change the terminal font per tab (with a brief HUD, restored with the tab). Settings → Appearance → *Interface size* (90–150 %) scales the whole UI.
 - File browser: clickable breadcrumb path bar (click the empty part or Ctrl+L to type; POSIX, Windows and UNC); bookmarks per host, also for the local side (star / Ctrl+D, dropdown; saved with the host so they sync); type-to-filter with a header filter box; Space quick preview of text (encoding fallback), images and file details, read in ranges from remote hosts.
 - Transfers: pause/resume per transfer and *Pause all* (resumes from `.filepart`, SCP restarts), retry one or all failed, cancel all, *Show in folder*, speed and ETA, a collapsible summary line, and a notification when a batch finishes while Hostwick is in the background or took over 10 s.
 - **Changed shortcuts**: *Reopen closed tab* is Ctrl+Shift+T (⌘⇧T); *Duplicate tab* moved to Ctrl+Shift+U (⌘T); marking a file row is Ctrl+Space / Insert (plain Space is now the preview); typing in a file pane filters instead of jumping.
@@ -39,6 +39,21 @@
 **SSH**
 - `Connection::ping()` measures the SSH keepalive round trip.
 - `hostwick_ssh::agent_key_names()` lists the running agent's keys (with a timeout).
+
+**Security and reliability**
+- ZMODEM: a data subpacket without a terminator is capped at 16 KiB; longer is answered with a resync (ZRPOS) instead of buffering without limit (a peer sending ZDATA forever used to grow memory until the process died).
+- trzsz: every decompressed message is limited (`#NAME`, `#CFG`, `#FAIL`, `#MD5`: 8 KiB or 64 bytes; file data: the server's announced buffer size, at most 16 MiB), so a few KB of zlib can no longer expand to gigabytes. Binary `#DATA:<n>` is rejected up front when `n` exceeds twice the buffer size (the escape worst case), data past the announced file size or an empty chunk is refused, and the line reader stops at 24 MiB.
+- Downloads (ZMODEM and trzsz) are written to a private `name.part` file (`create_new`, mode `0600` on Unix) and renamed to their final, never-existing name only after ZEOF at the right position or a matching trzsz MD5. Cancel, an error, the other side cancelling, a new ZFILE in the middle of a file, the task being dropped or a failed checksum delete the `.part` file; no truncated file under the real name any more.
+- Download names: Windows device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`9`, `LPT1`–`9`, with any extension, any case) get an underscore after the stem; Unicode format characters (bidi overrides and isolates, zero-width characters, BOM, soft hyphen, tag characters, line/paragraph separators) are removed; trailing dots and spaces go; names are limited to 200 bytes.
+- `unique_path` can no longer hand out a name that exists: files are created with `create_new` in a loop (no exists-then-create race, a dangling symbolic link is never followed), and running out of numbers is an error or a fresh name, never an existing file.
+- **Shortcuts no longer steal shell keys** (regression of this release's tab and zoom shortcuts). With a terminal focused, the app takes no key that the terminal sends to the shell. Tab jump is Ctrl+Alt+1…9 (⌘1…9 on macOS), zoom out is Ctrl+Alt+- (⌘-); Ctrl+2…8 and Ctrl+- are control characters (NUL, ESC, FS, GS, RS, US, DEL; Ctrl+- is readline's undo) and Alt+digit is readline's numeric argument and tmux's `M-1`. Ctrl+= and Ctrl+0 never mapped to anything and stay. Plain Ctrl+1…9 and Ctrl+- still work outside terminals (host list, file browser). `Ctrl+Alt+digit/-` and `Ctrl+Shift+letter` are now reserved for the app and not sent to the shell; Ctrl+Tab is the tab switch and no longer sends Tab. Text typed with Ctrl+Alt (AltGr layouts) is never taken. A test walks every key with every modifier combination and fails when an app shortcut shares a key with the terminal encoder (Ctrl+F6, which leaves a terminal without the mouse, and Alt+arrows between split panes are the two documented exceptions).
+- Paste into a broadcast group asks when any receiving terminal is a production host (not only the source), names them in the dialog, and applies the *Confirm multi-line paste* setting to the whole group. Text with control characters other than tab and line breaks is confirmed as well.
+- Dropping files on a terminal always shows *Upload N items (size) to user@host* with the folder editable, and the default for existing files is *Skip* (*Keep both* and *Overwrite* are offered). An OSC 7 folder whose host does not match the session (or the host the shell first reported) is ignored, and one that cannot be tied to the host is flagged as unchecked.
+- A pending ZMODEM/trzsz offer (or a running transfer) is dropped when the session ends or reconnects, so it no longer swallows keys; Enter reconnects again. Results of an older session's transfer are ignored.
+- Clickable links: only `http`, `https`, `ftp` and `ftps` go to the operating system; `file:` (this computer only) is shown in the file manager after a confirmation, never opened; `ssh:` and `sftp:` fill in quick connect from a strictly checked `user@host:port`; everything else can only be copied.
+- *Command finished* notifications from the operating system never contain the command; the in-app toast shows a short, cleaned copy.
+- Image preview checks the declared size from the header (PNG, JPEG, GIF, WebP, SVG width/height/viewBox) before decoding: at most 16 384 pixels a side and 64 million pixels; SVGs with entity declarations are not decoded. Otherwise the file details are shown.
+- The status bar's latency and metrics probes time out after 10 s (connection lookup included) and always clear their busy flag, so one unresponsive server no longer freezes the figures.
 
 ## 0.3.0
 

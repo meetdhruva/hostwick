@@ -302,8 +302,11 @@ A new pane opens the same host over the same SSH connection. Broadcast input
 reaches every pane.
 
 **Tabs and windows.**
-- Ctrl+1 … Ctrl+8 (⌘1 … ⌘8) jump to that tab, Ctrl+9 to the last one; it works
-  while the terminal has focus. Middle-click closes a tab. Drag a tab to
+- Ctrl+Alt+1 … Ctrl+Alt+8 (⌘1 … ⌘8) jump to that tab, Ctrl+Alt+9 (⌘9) to the
+  last one; it works while the terminal has focus. (Plain Ctrl+1 … Ctrl+9 also
+  work outside terminals, in the host list and file browser; in a terminal
+  Ctrl+2 … Ctrl+8 are control characters for the shell and Alt+digit is
+  readline's numeric argument, so neither is taken.) Middle-click closes a tab. Drag a tab to
   reorder it (a bar shows where it lands); Ctrl+Shift+←/→ moves the focused
   tab from the keyboard. Double-click the empty part of the tab bar for the
   command palette. When there are more tabs than fit, the bar scrolls (mouse
@@ -321,8 +324,9 @@ reaches every pane.
   connections and transfer queue; closing the last window quits. Window
   positions, sizes and which tab lives in which window are remembered.
   A file browser that moves to another window reconnects there.
-- **Zoom**: Ctrl+= / Ctrl++ zoom in, Ctrl+- zoom out, Ctrl+0 reset (⌘ on
-  macOS), or Ctrl+wheel over a terminal; each tab keeps its own size (a brief
+- **Zoom**: Ctrl+= / Ctrl++ zoom in, Ctrl+Alt+- zoom out, Ctrl+0 reset (⌘=,
+  ⌘-, ⌘0 on macOS; plain Ctrl+- also outside terminals, but in a terminal it is
+  the shell's own, readline undo), or Ctrl+wheel over a terminal; each tab keeps its own size (a brief
   "120 %" shows the level) and it is restored with the tab. *Settings →
   Appearance → Interface size* (90–150 %) scales the whole interface for this
   computer.
@@ -404,12 +408,17 @@ Menu items show their shortcut on the right.
   here*, following the terminal, dropping files) there is an **Enable now**
   button: it turns the setting on for that host (saved with the profile) and
   sets the hook up in the running shell, no reconnect.
-- **Drop files onto a terminal to upload them** (SSH). They go to the shell's
-  current folder (OSC 7); folders are sent recursively, through the normal
+- **Drop files onto a terminal to upload them** (SSH). A dialog first says
+  *Upload N items (size) to user@host* with the folder (the shell's current
+  folder from OSC 7, editable; the home folder when none was reported) and
+  what to do with files that already exist: *Skip it* (default), *Keep both*
+  (the new one is renamed `name (1).ext`) or *Overwrite*. A folder reported
+  with a host name that is not this session's is ignored, and one that cannot
+  be tied to the host is marked as unchecked: anything printed to the terminal
+  can send an OSC 7. Folders are sent recursively, through the normal
   transfer engine and panel (resume, parallel, speed shown). While files
-  are dragged over the terminal it is outlined and says where they will go.
-  When the folder is not known a small dialog asks (*Upload to:*, prefilled
-  with the home folder) and offers *Enable now*. Telnet and serial sessions
+  are dragged over the terminal it is outlined. The dialog offers *Enable
+  now* when no folder was reported. Telnet and serial sessions
   explain that there is nothing to upload to. (Dragging rows out of the
   built-in file pane onto a terminal is not supported.)
 - **ZMODEM and trzsz in the terminal.** `sz`/`rz` (lrzsz) and `tsz`/`trz`
@@ -418,12 +427,22 @@ Menu items show their shortcut on the right.
   upload opens a file picker, a progress card shows speed and size, and
   normal output resumes afterwards. Esc, Ctrl+C or *Cancel* stop it (as does
   the remote side with five CANs); a cancelled ZMODEM transfer does not leave
-  binary noise on screen. Files are never overwritten (`name (1).ext`), names
-  from the remote are sanitised, and the remote side is held back by flow
-  control instead of buffering a file in memory. Limits: ZMODEM positions are
+  binary noise on screen. Files are never overwritten (`name (1).ext`) and
+  are written to a private `name.part` file that gets its real name only when
+  the transfer ended cleanly (a cancelled or failed one leaves nothing behind;
+  trzsz checks the MD5 first); names from the remote are sanitised (control and
+  bidi characters, Windows device names such as `CON` or `NUL.txt`, trailing
+  dots and spaces); the remote side is held back by flow control instead of
+  buffering a file in memory, and nothing it sends can make Hostwick
+  allocate without limit (ZMODEM subpackets are capped at 16 KiB, trzsz
+  messages are decompressed up to the announced buffer size only). Limits: ZMODEM positions are
   32 bits (files under 4 GB), and trzsz directory transfers (`trz -d`) are
   declined.
-- **Clickable output.** URLs, absolute paths, `~/…` and `./relative` paths
+- **Clickable output.** Only `http`, `https`, `ftp` and `ftps` links are
+  handed to the operating system. `file:` links on this computer ask first and
+  are shown in the file manager, never opened; `ssh:`/`sftp:` links fill in
+  quick connect (checked: no options, no password); anything else can only be
+  copied. URLs, absolute paths, `~/…` and `./relative` paths
   (resolved against the shell's folder), IPv4/IPv6 addresses and host names
   are recognised under the pointer. URLs are underlined on hover and open
   with Ctrl/⌘+click; the other kinds are underlined while Ctrl/⌘ is held.
@@ -442,15 +461,21 @@ Menu items show their shortcut on the right.
   more than 8 KB) shows a dialog with the first lines, the target host and
   *Paste* / *Paste as single line* / *Cancel*; bracketed paste is still used.
   *Settings → Terminal → Confirm multi-line paste*: *Always* (default),
-  *Production hosts only* or *Never*. Production hosts always ask. With
-  broadcast on, the dialog says how many other terminals receive the paste.
+  *Production hosts only* or *Never*. Production hosts always ask, and with
+  broadcast on so does a paste into any host when any receiving terminal is a
+  production host (the dialog names them). Text with control characters (other
+  than tab and line breaks) is confirmed too, since those arrive as keystrokes.
+  With broadcast on, the dialog says how many other terminals receive the paste.
 - **Bell and command-finished alerts.** A bell (BEL) in a tab or pane you are
   not looking at, or while the window is in the background, puts a bell on
   the tab. With shell integration, a command that takes longer than N seconds
   (default 10) raises a notification such as "web01: make build finished
   (exit 0, 2m 13s)"; clicking it focuses that tab. It is an operating system
   notification when the window is not in front and an in-app toast with a
-  *Show* button otherwise. *Settings → Terminal*: on/off and the threshold.
+  *Show* button otherwise. The operating system's notification never contains
+  the command (it is kept in notification history and shows on lock screens,
+  and commands hold secrets): it says "Command finished on web01 (exit 0,
+  2m 13s)"; the in-app toast shows a short, cleaned copy of the command. *Settings → Terminal*: on/off and the threshold.
 - **Status bar** under every terminal (*Settings → Terminal*, on by
   default): `user@host:port`, protocol, current folder, session log
   indicator, connection time and latency. Latency is an SSH keepalive round
@@ -588,8 +613,13 @@ the log level stay per computer; everything else syncs.
 - *App log*: daily-rotated `hostwick.YYYY-MM-DD.log` (14 kept) in the log
   folder, level set in Settings (`HOSTWICK_LOG` overrides it).
 
-**Shortcuts** (`⌘` instead of `Ctrl+Shift` on macOS — plain `Ctrl+letter` keys
-always go to the shell):
+**Shortcuts** (`⌘` instead of `Ctrl+Shift` on macOS). The rule: **with a
+terminal focused, Hostwick never takes a key the terminal sends to the shell**
+(plain `Ctrl+letter`, Ctrl+2 … 8, Ctrl+-, Alt+digit, …); a test walks every key
+and modifier to keep it that way. `Ctrl+Shift+letter`, `Ctrl+Alt+digit` and
+`Ctrl+Alt+-` are reserved for the app and are not sent. Ctrl+F6 (leave the
+terminal without the mouse) and Alt+arrows (between split panes, only when
+there is a pane that way) are the two deliberate exceptions.
 
 | Keys | Action |
 |---|---|
@@ -598,9 +628,9 @@ always go to the shell):
 | Ctrl+Shift+N | New host |
 | Ctrl+Shift+T (⌘⇧T) | Reopen the last closed tab |
 | Ctrl+Shift+U (⌘T) | Duplicate current tab |
-| Ctrl+1 … 8, Ctrl+9 (⌘1 … 9) | Go to tab 1–8 / the last tab |
+| Ctrl+Alt+1 … 8, Ctrl+Alt+9 (⌘1 … 9) | Go to tab 1–8 / the last tab |
 | Ctrl+Shift+← / → | Move the tab on the tab bar |
-| Ctrl+= / Ctrl+- / Ctrl+0 (⌘) | Zoom the terminal text in / out / reset (also Ctrl+wheel) |
+| Ctrl+= / Ctrl+Alt+- / Ctrl+0 (⌘= / ⌘- / ⌘0) | Zoom the terminal text in / out / reset (also Ctrl+wheel) |
 | Ctrl+Shift+D / Ctrl+Shift+E (⌘D / ⌘⇧D) | Split the terminal right / down |
 | Alt+←→↑↓ | Move between split panes |
 | Ctrl+Shift+W | Close the focused pane, then the tab |
@@ -721,6 +751,12 @@ a language, copy `en.ftl`, translate it, and add one line to `LANGUAGES` in
   which is checked and swapped for the real one locally, but forwarded X
   clients get full access to your display (they can read keystrokes and take
   screenshots), so only forward X11 to servers you trust.
+- Terminal output is untrusted. ZMODEM/trzsz input is size-limited and
+  downloads go to a private `.part` file; OSC 7 folders are checked against the
+  host; links never reach the operating system's opener unless they are web or
+  FTP addresses; broadcast and control-character pastes are confirmed;
+  OS notifications carry no command text; image previews check the declared
+  size (at most 16 384 px a side and 64 million pixels) before decoding.
 - `russh` ≥ 0.62.5 is required (CVE-2026-73429 and a second fix); this tree
   uses 0.65. Run `cargo deny check` in CI.
 
