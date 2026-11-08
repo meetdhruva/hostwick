@@ -72,11 +72,7 @@ pub fn find_magic(buf: &[u8]) -> Option<(usize, usize, Magic)> {
     };
     let version = parts.next()?.to_owned();
     let id = parts.next().unwrap_or_default().to_owned();
-    Some((
-        at,
-        at + MAGIC.len() + nl + 1,
-        Magic { mode, version, id },
-    ))
+    Some((at, at + MAGIC.len() + nl + 1, Magic { mode, version, id }))
 }
 
 /// Bytes at the end of `buf` that may begin a magic line (the prefix of
@@ -252,7 +248,9 @@ impl<'a> Wire<'a> {
             None => &raw[..],
         };
         let Some(rest) = l.strip_prefix('#') else {
-            return Err(XferError::Protocol(format!("unexpected text from the server: {raw:?}")));
+            return Err(XferError::Protocol(format!(
+                "unexpected text from the server: {raw:?}"
+            )));
         };
         let (k, payload) = rest.split_once(':').unwrap_or((rest, ""));
         if k == kind {
@@ -320,8 +318,11 @@ fn action(confirm: bool, version: &str) -> String {
 
 /// Answer a transfer the person does not want ("Cancelled" on the server).
 pub async fn decline(link: &mut Link, version: &str) -> Result<(), XferError> {
-    link.send(line("ACT", &encode_buffer(action(false, version).as_bytes())))
-        .await
+    link.send(line(
+        "ACT",
+        &encode_buffer(action(false, version).as_bytes()),
+    ))
+    .await
 }
 
 async fn handshake(w: &mut Wire<'_>, version: &str) -> Result<Config, XferError> {
@@ -343,7 +344,10 @@ async fn handshake(w: &mut Wire<'_>, version: &str) -> Result<Config, XferError>
             .get("bufsize")
             .and_then(|x| x.as_u64())
             .map_or(10 * 1024 * 1024, |n| n as usize),
-        directory: v.get("directory").and_then(|x| x.as_bool()).unwrap_or(false),
+        directory: v
+            .get("directory")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false),
     })
 }
 
@@ -353,7 +357,11 @@ async fn finish<T>(w: Wire<'_>, res: Result<T, XferError>) -> Result<T, XferErro
     match &res {
         Err(XferError::Cancelled) => w.fail("Cancelled").await,
         Err(XferError::Timeout | XferError::Protocol(_) | XferError::Io(_)) => {
-            let msg = res.as_ref().err().map(ToString::to_string).unwrap_or_default();
+            let msg = res
+                .as_ref()
+                .err()
+                .map(ToString::to_string)
+                .unwrap_or_default();
             w.fail(&msg).await;
         }
         _ => {}
@@ -436,7 +444,9 @@ async fn download_inner(
         let digest = md5.finalize().to_vec();
         let theirs = w.expect_binary("MD5").await?;
         if theirs != digest {
-            return Err(XferError::Protocol(format!("{local}: the MD5 check failed")));
+            return Err(XferError::Protocol(format!(
+                "{local}: the MD5 check failed"
+            )));
         }
         w.say("SUCC", &encode_buffer(&digest)).await?;
         out.files.push(path);
@@ -479,7 +489,9 @@ async fn upload_inner(
     w.say("NUM", &files.len().to_string()).await?;
     let acked = w.expect_int("SUCC").await?;
     if acked != files.len() as u64 {
-        return Err(XferError::Protocol("the server counted a different number of files".into()));
+        return Err(XferError::Protocol(
+            "the server counted a different number of files".into(),
+        ));
     }
     let max_chunk = cfg.bufsize.clamp(1024, 2 * 1024 * 1024);
     let mut chunk = (64 * 1024usize).min(max_chunk);
@@ -492,7 +504,9 @@ async fn upload_inner(
         w.say("SIZE", &size.to_string()).await?;
         let echoed = w.expect_int("SUCC").await?;
         if echoed != size {
-            return Err(XferError::Protocol("the server saw a different file size".into()));
+            return Err(XferError::Protocol(
+                "the server saw a different file size".into(),
+            ));
         }
         let mut md5 = Md5::new();
         let mut done = 0u64;
@@ -533,7 +547,9 @@ async fn upload_inner(
             }
             let ok = w.expect_int("SUCC").await?;
             if ok != n as u64 {
-                return Err(XferError::Protocol("the server acknowledged a different amount".into()));
+                return Err(XferError::Protocol(
+                    "the server acknowledged a different amount".into(),
+                ));
             }
             done += n as u64;
             report(progress, done);
@@ -549,7 +565,10 @@ async fn upload_inner(
         w.say("MD5", &encode_buffer(&digest)).await?;
         let theirs = w.expect_binary("SUCC").await?;
         if theirs != digest {
-            return Err(XferError::Protocol(format!("{}: the MD5 check failed", f.name)));
+            return Err(XferError::Protocol(format!(
+                "{}: the MD5 check failed",
+                f.name
+            )));
         }
         out.files.push(f.path.clone());
         out.bytes += size;
@@ -606,7 +625,11 @@ mod tests {
 
     #[test]
     fn binary_escapes() {
-        let v = serde_json::json!([["\u{ee}", "\u{ee}\u{ee}"], ["~", "\u{ee}1"], ["\u{2}", "\u{ee}A"]]);
+        let v = serde_json::json!([
+            ["\u{ee}", "\u{ee}\u{ee}"],
+            ["~", "\u{ee}1"],
+            ["\u{2}", "\u{ee}A"]
+        ]);
         let e = Escapes::from_json(&v);
         let data: Vec<u8> = (0..=255u8).chain([0xee, 0x31, 0xee, 0xee, b'~']).collect();
         let esc = e.escape(&data);
@@ -630,7 +653,11 @@ mod tests {
         (0..n)
             .map(|i| {
                 x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                if i % 5 == 0 { (i % 256) as u8 } else { (x >> 24) as u8 }
+                if i % 5 == 0 {
+                    (i % 256) as u8
+                } else {
+                    (x >> 24) as u8
+                }
             })
             .collect()
     }
@@ -668,7 +695,8 @@ mod tests {
         let work = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
         let big = sample(700_000);
         std::fs::write(work.path().join("big.bin"), &big).unwrap_or_else(|e| panic!("{e}"));
-        std::fs::write(work.path().join("small.txt"), b"hello trzsz\n").unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(work.path().join("small.txt"), b"hello trzsz\n")
+            .unwrap_or_else(|e| panic!("{e}"));
         std::fs::write(work.path().join("empty"), b"").unwrap_or_else(|e| panic!("{e}"));
         for flags in [&[][..], &["-b"][..], &["-b", "-e"][..]] {
             let out = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
@@ -680,18 +708,33 @@ mod tests {
             assert_eq!(magic.mode, Mode::Download);
             let cancel = CancellationToken::new();
             let mut last = 0;
-            let got = download(&mut link, &rest, "0.4.0", out.path(), "Received", &cancel, &mut |p| {
-                last = p.done;
-            })
+            let got = download(
+                &mut link,
+                &rest,
+                "0.4.0",
+                out.path(),
+                "Received",
+                &cancel,
+                &mut |p| {
+                    last = p.done;
+                },
+            )
             .await
             .unwrap_or_else(|e| panic!("download {flags:?}: {e}"));
             assert_eq!(got.files.len(), 3, "{flags:?}");
-            assert_eq!(std::fs::read(out.path().join("big.bin")).unwrap_or_default(), big, "{flags:?}");
+            assert_eq!(
+                std::fs::read(out.path().join("big.bin")).unwrap_or_default(),
+                big,
+                "{flags:?}"
+            );
             assert_eq!(
                 std::fs::read(out.path().join("small.txt")).unwrap_or_default(),
                 b"hello trzsz\n"
             );
-            assert_eq!(std::fs::read(out.path().join("empty")).unwrap_or_default(), b"");
+            assert_eq!(
+                std::fs::read(out.path().join("empty")).unwrap_or_default(),
+                b""
+            );
             let _ = last;
             let _ = child.wait().await;
         }
@@ -722,17 +765,32 @@ mod tests {
             let (magic, rest) = wait_magic(&mut link).await;
             assert_eq!(magic.mode, Mode::Upload);
             let cancel = CancellationToken::new();
-            let sent = upload(&mut link, &rest, "0.4.0", &files, "Sent", &cancel, &mut |_| {})
-                .await
-                .unwrap_or_else(|e| panic!("upload {flags:?}: {e}"));
+            let sent = upload(
+                &mut link,
+                &rest,
+                "0.4.0",
+                &files,
+                "Sent",
+                &cancel,
+                &mut |_| {},
+            )
+            .await
+            .unwrap_or_else(|e| panic!("upload {flags:?}: {e}"));
             assert_eq!(sent.files.len(), 3);
             let _ = child.wait().await;
-            assert_eq!(std::fs::read(dest.path().join("up.bin")).unwrap_or_default(), big, "{flags:?}");
+            assert_eq!(
+                std::fs::read(dest.path().join("up.bin")).unwrap_or_default(),
+                big,
+                "{flags:?}"
+            );
             assert_eq!(
                 std::fs::read_to_string(dest.path().join("note.txt")).unwrap_or_default(),
                 "grüße ✓\n"
             );
-            assert_eq!(std::fs::read(dest.path().join("zero")).unwrap_or_default(), b"");
+            assert_eq!(
+                std::fs::read(dest.path().join("zero")).unwrap_or_default(),
+                b""
+            );
         }
     }
 
@@ -748,11 +806,11 @@ mod tests {
         let (mut link, mut child) = pty_link(&["trz", &dest_s], dest.path()).await;
         let (_, _rest) = wait_magic(&mut link).await;
         tokio::time::sleep(Duration::from_millis(150)).await;
-        decline(&mut link, "0.4.0").await.unwrap_or_else(|e| panic!("{e}"));
+        decline(&mut link, "0.4.0")
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
         let mut seen = String::new();
-        while let Ok(Some(c)) =
-            tokio::time::timeout(Duration::from_secs(5), link.rx.recv()).await
-        {
+        while let Ok(Some(c)) = tokio::time::timeout(Duration::from_secs(5), link.rx.recv()).await {
             seen.push_str(&String::from_utf8_lossy(&c));
         }
         assert!(seen.contains("Cancelled"), "{seen:?}");
@@ -761,8 +819,10 @@ mod tests {
 
         // Cancel half way through an upload.
         let src = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
-        std::fs::write(src.path().join("big.bin"), sample(40_000_000)).unwrap_or_else(|e| panic!("{e}"));
-        let files = [SendFile::from_path(&src.path().join("big.bin")).unwrap_or_else(|| panic!("n"))];
+        std::fs::write(src.path().join("big.bin"), sample(40_000_000))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let files =
+            [SendFile::from_path(&src.path().join("big.bin")).unwrap_or_else(|| panic!("n"))];
         let (mut link, mut child) = pty_link(&["trz", "-y", &dest_s], dest.path()).await;
         let (_, rest) = wait_magic(&mut link).await;
         let cancel = CancellationToken::new();
@@ -771,13 +831,20 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(600)).await;
             c2.cancel();
         });
-        let r = upload(&mut link, &rest, "0.4.0", &files, "Sent", &cancel, &mut |_| {}).await;
+        let r = upload(
+            &mut link,
+            &rest,
+            "0.4.0",
+            &files,
+            "Sent",
+            &cancel,
+            &mut |_| {},
+        )
+        .await;
         let _ = stopper.await;
         assert_eq!(r.err(), Some(XferError::Cancelled));
         let mut seen = String::new();
-        while let Ok(Some(c)) =
-            tokio::time::timeout(Duration::from_secs(5), link.rx.recv()).await
-        {
+        while let Ok(Some(c)) = tokio::time::timeout(Duration::from_secs(5), link.rx.recv()).await {
             seen.push_str(&String::from_utf8_lossy(&c));
         }
         assert!(seen.contains("Cancelled"), "server did not stop: {seen:?}");

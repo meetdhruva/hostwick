@@ -32,6 +32,7 @@ pub struct Metrics {
 }
 
 impl Metrics {
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
     }
@@ -56,10 +57,10 @@ impl Sampler {
         };
         match os {
             "Linux" => {
-                if let Some(now) = parse_proc_stat(get("stat")) {
-                    if let Some(prev) = self.prev_cpu.replace(now) {
-                        m.cpu = cpu_percent(prev, now);
-                    }
+                if let Some(now) = parse_proc_stat(get("stat"))
+                    && let Some(prev) = self.prev_cpu.replace(now)
+                {
+                    m.cpu = cpu_percent(prev, now);
                 }
                 m.mem = parse_meminfo(get("mem"));
                 m.load = parse_loadavg(get("load"));
@@ -105,7 +106,8 @@ fn sections(output: &str) -> HashMap<&str, &str> {
         let t = line.trim_end();
         if let Some(n) = t.strip_prefix('@')
             && !n.is_empty()
-            && n.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+            && n.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
         {
             if let Some(prev) = name {
                 map.insert(prev, &output[start..pos]);
@@ -176,7 +178,9 @@ pub fn parse_meminfo(text: &str) -> Option<(u64, u64)> {
 
 /// `0.52 0.58 0.59 1/467 12345`.
 pub fn parse_loadavg(text: &str) -> Option<[f32; 3]> {
-    let mut it = text.split_whitespace().filter_map(|x| x.parse::<f32>().ok());
+    let mut it = text
+        .split_whitespace()
+        .filter_map(|x| x.parse::<f32>().ok());
     Some([it.next()?, it.next()?, it.next()?])
 }
 
@@ -268,6 +272,7 @@ impl Smoother {
         v
     }
 
+    #[cfg(test)]
     pub fn get(&self) -> Option<f32> {
         self.value
     }
@@ -344,7 +349,10 @@ mod tests {
         let out = "@os\nDarwin\n@ncpu\n8\n@cpups\n120.5\n@memsize\n17179869184\n@vmstat\nMach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                               20000.\nPages active:                            300000.\nPages inactive:                          280000.\nPages speculative:                         5000.\nPages wired down:                        150000.\nPages occupied by compressor:             50000.\n@load\n{ 2.10 1.90 1.50 }\n@df\n/dev/disk3s1s1 488245288 15000000 300000000 5% /\n";
         let m = Sampler::default().sample(out);
         assert!((m.cpu.unwrap_or(0.0) - 15.0625).abs() < 0.01);
-        assert_eq!(m.mem, Some(((300_000 + 150_000 + 50_000) * 16384, 17_179_869_184)));
+        assert_eq!(
+            m.mem,
+            Some(((300_000 + 150_000 + 50_000) * 16384, 17_179_869_184))
+        );
         assert_eq!(m.load, Some([2.10, 1.90, 1.50]));
         assert_eq!(m.disk_pct, Some(5));
     }

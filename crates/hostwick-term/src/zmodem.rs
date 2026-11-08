@@ -79,7 +79,11 @@ const fn crc16_table() -> [u16; 256] {
         let mut c = (i as u16) << 8;
         let mut k = 0;
         while k < 8 {
-            c = if c & 0x8000 != 0 { (c << 1) ^ 0x1021 } else { c << 1 };
+            c = if c & 0x8000 != 0 {
+                (c << 1) ^ 0x1021
+            } else {
+                c << 1
+            };
             k += 1;
         }
         t[i] = c;
@@ -95,7 +99,11 @@ const fn crc32_table() -> [u32; 256] {
         let mut c = i as u32;
         let mut k = 0;
         while k < 8 {
-            c = if c & 1 != 0 { (c >> 1) ^ 0xEDB8_8320 } else { c >> 1 };
+            c = if c & 1 != 0 {
+                (c >> 1) ^ 0xEDB8_8320
+            } else {
+                c >> 1
+            };
             k += 1;
         }
         t[i] = c;
@@ -268,7 +276,10 @@ impl Header {
 pub enum Item {
     Header(Header),
     /// A data subpacket whose CRC matched; `end` is its terminator.
-    Data { data: Vec<u8>, end: u8 },
+    Data {
+        data: Vec<u8>,
+        end: u8,
+    },
     /// A data subpacket that was damaged.
     DataError,
     /// Five CANs in a row: the other side cancelled.
@@ -281,9 +292,23 @@ enum St {
     Pad,
     Zdle,
     Hex(Vec<u8>),
-    Bin { crc32: bool, buf: Vec<u8>, esc: bool },
-    Data { crc32: bool, buf: Vec<u8>, esc: bool },
-    DataCrc { crc32: bool, data: Vec<u8>, end: u8, crc: Vec<u8>, esc: bool },
+    Bin {
+        crc32: bool,
+        buf: Vec<u8>,
+        esc: bool,
+    },
+    Data {
+        crc32: bool,
+        buf: Vec<u8>,
+        esc: bool,
+    },
+    DataCrc {
+        crc32: bool,
+        data: Vec<u8>,
+        end: u8,
+        crc: Vec<u8>,
+        esc: bool,
+    },
 }
 
 /// Incremental parser for the receiving side of a ZMODEM link.
@@ -360,7 +385,10 @@ impl Decoder {
     }
 
     fn hunt_noise(&mut self, b: u8) {
-        if (b == b'\n' || b == b'\r' || (0x20..0x7f).contains(&b)) && self.noise.len() < 4096 {
+        // Everything but the flow-control and cancel bytes is kept: it is
+        // terminal output (error text, and after "OO" the next prompt with
+        // its escape sequences and UTF-8).
+        if !matches!(b, CAN | XON | 0x13 | 0x91 | 0x93) && self.noise.len() < 64 * 1024 {
             self.noise.push(b);
         }
     }
@@ -428,22 +456,38 @@ impl Decoder {
                     St::Hunt
                 }
             }
-            St::Bin { crc32, mut buf, esc } => {
+            St::Bin {
+                crc32,
+                mut buf,
+                esc,
+            } => {
                 if esc {
                     match unescape(b) {
                         Unesc::Byte(v) => buf.push(v),
                         _ => return St::Hunt,
                     }
                 } else if b == ZDLE {
-                    return St::Bin { crc32, buf, esc: true };
+                    return St::Bin {
+                        crc32,
+                        buf,
+                        esc: true,
+                    };
                 } else if flow {
-                    return St::Bin { crc32, buf, esc: false };
+                    return St::Bin {
+                        crc32,
+                        buf,
+                        esc: false,
+                    };
                 } else {
                     buf.push(b);
                 }
                 let want = if crc32 { 9 } else { 7 };
                 if buf.len() < want {
-                    return St::Bin { crc32, buf, esc: false };
+                    return St::Bin {
+                        crc32,
+                        buf,
+                        esc: false,
+                    };
                 }
                 let ok = if crc32 {
                     let crc = u32::from_le_bytes([buf[5], buf[6], buf[7], buf[8]]);
@@ -461,12 +505,20 @@ impl Decoder {
                 };
                 self.after_header(h, out)
             }
-            St::Data { crc32, mut buf, esc } => {
+            St::Data {
+                crc32,
+                mut buf,
+                esc,
+            } => {
                 if esc {
                     match unescape(b) {
                         Unesc::Byte(v) => {
                             buf.push(v);
-                            St::Data { crc32, buf, esc: false }
+                            St::Data {
+                                crc32,
+                                buf,
+                                esc: false,
+                            }
                         }
                         Unesc::End(end) => St::DataCrc {
                             crc32,
@@ -481,12 +533,24 @@ impl Decoder {
                         }
                     }
                 } else if b == ZDLE {
-                    St::Data { crc32, buf, esc: true }
+                    St::Data {
+                        crc32,
+                        buf,
+                        esc: true,
+                    }
                 } else if flow {
-                    St::Data { crc32, buf, esc: false }
+                    St::Data {
+                        crc32,
+                        buf,
+                        esc: false,
+                    }
                 } else {
                     buf.push(b);
-                    St::Data { crc32, buf, esc: false }
+                    St::Data {
+                        crc32,
+                        buf,
+                        esc: false,
+                    }
                 }
             }
             St::DataCrc {
@@ -505,15 +569,33 @@ impl Decoder {
                         }
                     }
                 } else if b == ZDLE {
-                    return St::DataCrc { crc32, data, end, crc, esc: true };
+                    return St::DataCrc {
+                        crc32,
+                        data,
+                        end,
+                        crc,
+                        esc: true,
+                    };
                 } else if flow {
-                    return St::DataCrc { crc32, data, end, crc, esc: false };
+                    return St::DataCrc {
+                        crc32,
+                        data,
+                        end,
+                        crc,
+                        esc: false,
+                    };
                 } else {
                     crc.push(b);
                 }
                 let need = if crc32 { 4 } else { 2 };
                 if crc.len() < need {
-                    return St::DataCrc { crc32, data, end, crc, esc: false };
+                    return St::DataCrc {
+                        crc32,
+                        data,
+                        end,
+                        crc,
+                        esc: false,
+                    };
                 }
                 let ok = if crc32 {
                     let got = u32::from_le_bytes([crc[0], crc[1], crc[2], crc[3]]);
@@ -529,7 +611,11 @@ impl Decoder {
                 let more = matches!(end, ZCRCG | ZCRCQ);
                 out.push_back(Item::Data { data, end });
                 if more {
-                    St::Data { crc32, buf: Vec::new(), esc: false }
+                    St::Data {
+                        crc32,
+                        buf: Vec::new(),
+                        esc: false,
+                    }
                 } else {
                     St::Hunt
                 }
@@ -903,7 +989,11 @@ async fn receive_inner(
                     }
                 }
                 let noise = z.dec.take_noise();
-                let rest = noise.strip_prefix(b"OO").unwrap_or(&noise);
+                // What follows "OO" is the shell's next output, raw.
+                let rest = match noise.windows(2).position(|w| w == b"OO") {
+                    Some(i) => &noise[i + 2..],
+                    None => &noise[..],
+                };
                 z.link.spare = rest.to_vec();
                 return Ok(out);
             }
@@ -1152,7 +1242,7 @@ async fn stream(
         count += 1;
         let end = if last {
             ZCRCE
-        } else if count % ACK_EVERY == 0 {
+        } else if count.is_multiple_of(ACK_EVERY) {
             ZCRCQ
         } else {
             ZCRCG
@@ -1210,7 +1300,11 @@ mod tests {
         (0..n)
             .map(|i| {
                 x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                if i % 7 == 0 { (i % 256) as u8 } else { (x >> 24) as u8 }
+                if i % 7 == 0 {
+                    (i % 256) as u8
+                } else {
+                    (x >> 24) as u8
+                }
             })
             .collect()
     }
@@ -1241,19 +1335,31 @@ mod tests {
 
     #[test]
     fn headers_round_trip_in_every_form() {
-        let args = [[1, 2, 3, 4], [0x18, 0x11, 0x13, 0x90], [0xff, 0x7f, 0x0d, 0x40]];
+        let args = [
+            [1, 2, 3, 4],
+            [0x18, 0x11, 0x13, 0x90],
+            [0xff, 0x7f, 0x0d, 0x40],
+        ];
         for arg in args {
             let items = decode_all(&hex_header(ZRPOS, arg));
             assert_eq!(
                 items,
-                vec![Item::Header(Header { kind: ZRPOS, arg, crc32: false })]
+                vec![Item::Header(Header {
+                    kind: ZRPOS,
+                    arg,
+                    crc32: false
+                })]
             );
             for crc32_mode in [false, true] {
                 for esc in [false, true] {
                     let items = decode_all(&bin_header(ZEOF, arg, crc32_mode, esc));
                     assert_eq!(
                         items,
-                        vec![Item::Header(Header { kind: ZEOF, arg, crc32: crc32_mode })],
+                        vec![Item::Header(Header {
+                            kind: ZEOF,
+                            arg,
+                            crc32: crc32_mode
+                        })],
                         "crc32={crc32_mode} esc={esc} arg={arg:?}"
                     );
                 }
@@ -1284,18 +1390,30 @@ mod tests {
                     assert_eq!(items.len(), 2, "crc32={crc32_mode} esc={esc} end={end}");
                     assert_eq!(
                         items[1],
-                        Item::Data { data: data.clone(), end },
+                        Item::Data {
+                            data: data.clone(),
+                            end
+                        },
                         "crc32={crc32_mode} esc={esc} end={end}"
                     );
                 }
             }
         }
         // Escaping keeps the dangerous bytes off the wire.
-        let wire = data_subpacket(&[0x18, 0x11, 0x13, 0x91, 0x93, 0x90, 0x10], ZCRCE, true, false);
+        let wire = data_subpacket(
+            &[0x18, 0x11, 0x13, 0x91, 0x93, 0x90, 0x10],
+            ZCRCE,
+            true,
+            false,
+        );
         assert!(!wire.windows(2).any(|w| w == [ZDLE, ZDLE]));
         assert!(!wire[..wire.len() - 8].contains(&XON));
         let ctl = data_subpacket(&[0, 1, 2, 0x80, 0x7f, 0xff], ZCRCE, false, true);
-        assert!(ctl[..ctl.len() - 5].iter().all(|b| b & 0x60 != 0 || *b == ZDLE));
+        assert!(
+            ctl[..ctl.len() - 5]
+                .iter()
+                .all(|b| b & 0x60 != 0 || *b == ZDLE)
+        );
     }
 
     #[test]
@@ -1308,8 +1426,20 @@ mod tests {
         wire.extend(bin_header(ZEOF, pos_arg(1310), true, false));
         let items = decode_all(&wire);
         assert_eq!(items.len(), 4);
-        assert_eq!(items[1], Item::Data { data: a, end: ZCRCG });
-        assert_eq!(items[2], Item::Data { data: b, end: ZCRCE });
+        assert_eq!(
+            items[1],
+            Item::Data {
+                data: a,
+                end: ZCRCG
+            }
+        );
+        assert_eq!(
+            items[2],
+            Item::Data {
+                data: b,
+                end: ZCRCE
+            }
+        );
         assert!(matches!(&items[3], Item::Header(h) if h.kind == ZEOF && h.pos() == 1310));
     }
 
@@ -1333,7 +1463,12 @@ mod tests {
         let mut wire = b"junk rz\r".to_vec();
         wire.extend(hex_header(ZRQINIT, [0; 4]));
         wire.extend(bin_header(ZFILE, [0, 0, 0, 1], true, true));
-        wire.extend(data_subpacket(b"a.bin\0 5 0 100644 0 1 5\0", ZCRCW, true, true));
+        wire.extend(data_subpacket(
+            b"a.bin\0 5 0 100644 0 1 5\0",
+            ZCRCW,
+            true,
+            true,
+        ));
         let whole = decode_all(&wire);
         assert_eq!(whole.len(), 3);
         // One byte at a time gives the same result.
@@ -1347,6 +1482,15 @@ mod tests {
         let mut d = Decoder::new();
         d.push(&wire, &mut VecDeque::new());
         assert!(String::from_utf8_lossy(&d.take_noise()).contains("junk rz"));
+    }
+
+    #[test]
+    fn output_after_the_transfer_keeps_escapes_and_utf8() {
+        // The shell prompt that follows "OO" must reach the terminal intact.
+        let prompt = "OO\x1b[?2004h\x1b]0;a\u{7}\x1b[32m\u{20ac}\x1b[0m$ ";
+        let mut d = Decoder::new();
+        d.push(prompt.as_bytes(), &mut VecDeque::new());
+        assert_eq!(d.take_noise(), prompt.as_bytes());
     }
 
     #[test]
@@ -1436,16 +1580,31 @@ mod tests {
         let dest = dst.path().to_owned();
         let c2 = cancel.clone();
         let rx = tokio::spawn(async move {
-            receive(&mut a, &hex_header(ZRQINIT, [0; 4]), &dest, &c2, &mut |_| {}).await
+            receive(
+                &mut a,
+                &hex_header(ZRQINIT, [0; 4]),
+                &dest,
+                &c2,
+                &mut |_| {},
+            )
+            .await
         });
         let first = b.rx.recv().await.unwrap_or_default();
         let list = [SendFile::from_path(&p).unwrap_or_else(|| panic!("name"))];
         send(&mut b, &first, &list, &cancel, &mut |_| {})
             .await
             .unwrap_or_else(|e| panic!("{e}"));
-        rx.await.unwrap_or_else(|e| panic!("{e}")).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(std::fs::read(dst.path().join("f.txt")).unwrap_or_default(), b"old");
-        assert_eq!(std::fs::read(dst.path().join("f (1).txt")).unwrap_or_default(), b"new");
+        rx.await
+            .unwrap_or_else(|e| panic!("{e}"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            std::fs::read(dst.path().join("f.txt")).unwrap_or_default(),
+            b"old"
+        );
+        assert_eq!(
+            std::fs::read(dst.path().join("f (1).txt")).unwrap_or_default(),
+            b"new"
+        );
     }
 
     #[tokio::test]
@@ -1471,7 +1630,9 @@ mod tests {
             wire.extend_from_slice(&c);
         }
         assert!(!wire.is_empty());
-        a.send(hex_header(ZRPOS, [0; 4])).await.unwrap_or_else(|e| panic!("{e}"));
+        a.send(hex_header(ZRPOS, [0; 4]))
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
         tokio::time::sleep(Duration::from_millis(300)).await;
         cancel.cancel();
         let (r, _b) = job.await.unwrap_or_else(|e| panic!("{e}"));
@@ -1490,7 +1651,14 @@ mod tests {
         let cancel = CancellationToken::new();
         let dest = dst.path().to_owned();
         let job = tokio::spawn(async move {
-            receive(&mut a, &hex_header(ZRQINIT, [0; 4]), &dest, &cancel, &mut |_| {}).await
+            receive(
+                &mut a,
+                &hex_header(ZRQINIT, [0; 4]),
+                &dest,
+                &cancel,
+                &mut |_| {},
+            )
+            .await
         });
         tokio::time::sleep(Duration::from_millis(100)).await;
         b.send(vec![CAN; 5]).await.unwrap_or_else(|e| panic!("{e}"));
@@ -1503,7 +1671,11 @@ mod tests {
     /// installed.
     #[tokio::test]
     async fn against_lrzsz() {
-        if std::process::Command::new("sz").arg("--version").output().is_err() {
+        if std::process::Command::new("sz")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
             eprintln!("lrzsz not installed; skipping");
             return;
         }
@@ -1535,8 +1707,14 @@ mod tests {
                 .await
                 .unwrap_or_else(|e| panic!("receive from sz {escape_flag:?}: {e}"));
             assert_eq!(got.files.len(), 2);
-            assert_eq!(std::fs::read(out.path().join("big.bin")).unwrap_or_default(), big);
-            assert_eq!(std::fs::read(out.path().join("tricky.bin")).unwrap_or_default(), tricky);
+            assert_eq!(
+                std::fs::read(out.path().join("big.bin")).unwrap_or_default(),
+                big
+            );
+            assert_eq!(
+                std::fs::read(out.path().join("tricky.bin")).unwrap_or_default(),
+                tricky
+            );
             let _ = child.wait().await;
         }
         // Upload: us -> rz.
@@ -1562,7 +1740,13 @@ mod tests {
             .unwrap_or_else(|e| panic!("send to rz: {e}"));
         assert_eq!(sent.files.len(), 2);
         let _ = child.wait().await;
-        assert_eq!(std::fs::read(out.path().join("big.bin")).unwrap_or_default(), big);
-        assert_eq!(std::fs::read(out.path().join("tricky.bin")).unwrap_or_default(), tricky);
+        assert_eq!(
+            std::fs::read(out.path().join("big.bin")).unwrap_or_default(),
+            big
+        );
+        assert_eq!(
+            std::fs::read(out.path().join("tricky.bin")).unwrap_or_default(),
+            tricky
+        );
     }
 }

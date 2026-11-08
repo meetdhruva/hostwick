@@ -161,36 +161,37 @@ pub struct Finished {
 #[derive(Debug, Default)]
 pub struct CommandTracker {
     running: Option<Running>,
+    /// A mark has arrived: the shell reports prompts, so the Enter key is
+    /// worth timing. Without it, the first `D` after the integration is
+    /// injected would report a command that started long ago.
+    active: bool,
 }
 
 #[derive(Debug)]
 struct Running {
     since: Instant,
     command: Option<String>,
-    /// Started by `C` (exact) rather than by the Enter key.
-    exact: bool,
 }
 
 impl CommandTracker {
     /// The user pressed Enter.
     pub fn entered(&mut self, now: Instant) {
-        if self.running.is_none() {
+        if self.active && self.running.is_none() {
             self.running = Some(Running {
                 since: now,
                 command: None,
-                exact: false,
             });
         }
     }
 
     /// A mark arrived. Returns the command when this mark ended one.
     pub fn mark(&mut self, mark: Mark, now: Instant) -> Option<Finished> {
+        self.active = true;
         match mark {
             Mark::CommandStart { command } => {
                 self.running = Some(Running {
                     since: now,
                     command,
-                    exact: true,
                 });
                 None
             }
@@ -206,6 +207,7 @@ impl CommandTracker {
         }
     }
 
+    #[cfg(test)]
     pub fn is_running(&self) -> bool {
         self.running.is_some()
     }
@@ -349,9 +351,25 @@ mod tests {
     fn tracker_without_c_times_from_enter() {
         let t0 = Instant::now();
         let mut t = CommandTracker::default();
+        // Before the shell has sent any mark, Enter is not timed.
         t.entered(t0);
-        let f = t.mark(Mark::CommandEnd { exit: Some(0) }, t0 + Duration::from_secs(12));
-        assert_eq!(f.map(|f| (f.command, f.took)), Some((None, Duration::from_secs(12))));
+        assert_eq!(
+            t.mark(
+                Mark::CommandEnd { exit: Some(0) },
+                t0 + Duration::from_secs(5)
+            ),
+            None
+        );
+        t.mark(Mark::PromptStart, t0);
+        t.entered(t0);
+        let f = t.mark(
+            Mark::CommandEnd { exit: Some(0) },
+            t0 + Duration::from_secs(12),
+        );
+        assert_eq!(
+            f.map(|f| (f.command, f.took)),
+            Some((None, Duration::from_secs(12)))
+        );
     }
 
     #[test]

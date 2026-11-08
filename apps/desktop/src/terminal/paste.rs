@@ -24,8 +24,10 @@ pub enum PasteConfirm {
 }
 
 impl PasteConfirm {
+    #[cfg(test)]
     pub const ALL: [PasteConfirm; 3] = [Self::Always, Self::ProdOnly, Self::Never];
 
+    #[cfg(test)]
     pub fn key(self) -> &'static str {
         match self {
             Self::Always => "always",
@@ -142,7 +144,10 @@ mod tests {
     #[test]
     fn single_line_joins() {
         assert_eq!(single_line("a\nb\r\n\n  c  \n"), "a b c");
-        assert_eq!(single_line("apt update \\\n && apt upgrade"), "apt update && apt upgrade");
+        assert_eq!(
+            single_line("apt update \\\n && apt upgrade"),
+            "apt update && apt upgrade"
+        );
         assert_eq!(single_line("one"), "one");
         assert_eq!(single_line("\n\n"), "");
         assert!(!has_newline(&single_line("a\nb\n")));

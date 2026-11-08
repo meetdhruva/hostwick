@@ -95,6 +95,24 @@ pub fn human_time(secs: u64) -> String {
     )
 }
 
+/// The colour of a host environment (tab stripe, ribbon).
+pub fn environment_color(e: &hostwick_core::Environment) -> Option<gpui_kit::Hsla> {
+    let (r, g, b) = e.rgb()?;
+    Some(gpui_kit::rgb((u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)).into())
+}
+
+/// Spoken name of an environment (none for "no environment" and custom
+/// colours, which have no name).
+pub fn environment_name(e: &hostwick_core::Environment) -> Option<SharedString> {
+    use hostwick_core::Environment;
+    match e {
+        Environment::Dev => Some(t!("tx-env-dev")),
+        Environment::Staging => Some(t!("tx-env-staging")),
+        Environment::Prod => Some(t!("tx-env-prod")),
+        Environment::None | Environment::Custom(_) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

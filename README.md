@@ -372,7 +372,74 @@ Menu items show their shortcut on the right.
   with a space (out of history with `HISTCONTROL=ignorespace` or zsh's
   `HIST_IGNORE_SPACE`) and is erased from the screen. Shells that already
   send OSC 7 (fish, many distro configs) need nothing. Right-click → *Copy
-  current folder*.
+  current folder*. The same hook also reports where each command starts and
+  ends (OSC 133, bash and zsh), which powers the *command finished* alerts;
+  anywhere the app says the terminal has not reported its folder (*Open files
+  here*, following the terminal, dropping files) there is an **Enable now**
+  button: it turns the setting on for that host (saved with the profile) and
+  sets the hook up in the running shell, no reconnect.
+- **Drop files onto a terminal to upload them** (SSH). They go to the shell's
+  current folder (OSC 7); folders are sent recursively, through the normal
+  transfer engine and panel (resume, parallel, speed shown). While files
+  are dragged over the terminal it is outlined and says where they will go.
+  When the folder is not known a small dialog asks (*Upload to:*, prefilled
+  with the home folder) and offers *Enable now*. Telnet and serial sessions
+  explain that there is nothing to upload to. (Dragging rows out of the
+  built-in file pane onto a terminal is not supported.)
+- **ZMODEM and trzsz in the terminal.** `sz`/`rz` (lrzsz) and `tsz`/`trz`
+  (trzsz) are detected from their start sequences: a download asks where to
+  save (the Downloads folder by default, *Change…* to pick another), an
+  upload opens a file picker, a progress card shows speed and size, and
+  normal output resumes afterwards. Esc, Ctrl+C or *Cancel* stop it (as does
+  the remote side with five CANs); a cancelled ZMODEM transfer does not leave
+  binary noise on screen. Files are never overwritten (`name (1).ext`), names
+  from the remote are sanitised, and the remote side is held back by flow
+  control instead of buffering a file in memory. Limits: ZMODEM positions are
+  32 bits (files under 4 GB), and trzsz directory transfers (`trz -d`) are
+  declined.
+- **Clickable output.** URLs, absolute paths, `~/…` and `./relative` paths
+  (resolved against the shell's folder), IPv4/IPv6 addresses and host names
+  are recognised under the pointer. URLs are underlined on hover and open
+  with Ctrl/⌘+click; the other kinds are underlined while Ctrl/⌘ is held.
+  Right-click adds entries on top of the usual menu: *Open link* / *Copy
+  link*; *Open in file browser* (reveals the file in a files tab) /
+  *Download…* / *Copy path*; *Connect to …* (fills quick connect) / *Copy
+  address*. Detection runs for the line under the pointer only when it moves
+  to another cell, selection, search and keyword highlighting are unchanged,
+  and with mouse reporting on (htop, vim) hold Shift. *Settings → Terminal →
+  Clickable links…* turns it off.
+- **Production safety.** *Edit host → General → Environment*: none, development
+  (green), staging (amber), production (red) or a custom `#rrggbb` colour. The
+  colour shows as a stripe on the tab, a bar at the pane header and a 3 px
+  line above the terminal; production hosts add a red ribbon *PRODUCTION –
+  host* that stays visible. **Paste protection:** pasting several lines (or
+  more than 8 KB) shows a dialog with the first lines, the target host and
+  *Paste* / *Paste as single line* / *Cancel*; bracketed paste is still used.
+  *Settings → Terminal → Confirm multi-line paste*: *Always* (default),
+  *Production hosts only* or *Never*. Production hosts always ask. With
+  broadcast on, the dialog says how many other terminals receive the paste.
+- **Bell and command-finished alerts.** A bell (BEL) in a tab or pane you are
+  not looking at, or while the window is in the background, puts a bell on
+  the tab. With shell integration, a command that takes longer than N seconds
+  (default 10) raises a notification such as "web01: make build finished
+  (exit 0, 2m 13s)"; clicking it focuses that tab. It is an operating system
+  notification when the window is not in front and an in-app toast with a
+  *Show* button otherwise. *Settings → Terminal*: on/off and the threshold.
+- **Status bar** under every terminal (*Settings → Terminal*, on by
+  default): `user@host:port`, protocol, current folder, session log
+  indicator, connection time and latency. Latency is an SSH keepalive round
+  trip (a timed `true` every 30 s on servers that do not answer keepalives);
+  both are measured only while the terminal is visible. Optional **server
+  load** (off by default) adds CPU, memory, root disk and load average every
+  5 s from one small read-only command over the same connection (Linux
+  `/proc`; macOS `vm_stat`/`sysctl`; elsewhere shown as n/a). Nothing is ever
+  run on telnet or serial. Narrow split panes drop the least important
+  items first.
+- **Terminal font.** JetBrains Mono (SIL Open Font License 1.1, regular, bold
+  and italic, embedded; the licence is in `apps/desktop/assets/fonts/OFL.txt`)
+  is the default on every system, without ligatures. Settings → *Terminal
+  font* overrides it; CJK and Devanagari come from the system's fallback
+  fonts.
 - **Login scripts** (host editor): run after the session opens — one command
   per line, `@wait text` (or `@wait 5000 text`) waits for output,
   `@sleep 500` pauses, `#` comments. A wait that times out shows a notice in
@@ -492,6 +559,8 @@ always go to the shell):
 | Enter / Shift+Enter, F3 / Shift+F3 | Previous (older) / next match while finding |
 | Esc (in the find bar) | Close find |
 | Shift+click / drag | Select text even when a program has the mouse |
+| Ctrl+click (⌘+click) | Open the URL or path under the pointer |
+| Esc or Ctrl+C during a ZMODEM/trzsz transfer | Cancel it |
 | Ctrl+Break | Send break (telnet, serial) |
 | Enter on an ended session | Reconnect (or reconnect now while waiting) |
 | Alt+Shift+←→↑↓ | Resize the focused split pane |

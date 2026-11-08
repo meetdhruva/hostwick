@@ -338,7 +338,7 @@ host-terminal-type = टर्मिनल प्रकार
 host-login-script = लॉगिन स्क्रिप्ट
 host-login-script-hint = हर पंक्ति में एक कमांड, लॉग इन के बाद लिखी जाती है। @wait TEXT आउटपुट की प्रतीक्षा करता है (10 s), @wait 30000 TEXT अधिक देर, @sleep 500 रुकता है; # से टिप्पणी शुरू होती है।
 host-shell-integration = शेल इंटीग्रेशन (bash, zsh)
-host-shell-integration-hint = फ़ाइल ब्राउज़र को टर्मिनल के फ़ोल्डर का अनुसरण करने देता है (राइट-क्लिक → फ़ाइलें यहाँ खोलें)। शेल शुरू होने पर चुपचाप एक प्रॉम्प्ट हुक जोड़ता है; सर्वर पर कुछ भी इंस्टॉल नहीं होता।
+host-shell-integration-hint = फ़ाइल ब्राउज़र को टर्मिनल के फ़ोल्डर का अनुसरण करने देता है (राइट-क्लिक → फ़ाइलें यहाँ खोलें), और फ़ाइलें छोड़कर अपलोड, कमांड पूरा होने की सूचना और क्लिक करने योग्य सापेक्ष पथ चालू करता है। शेल शुरू होने पर चुपचाप एक प्रॉम्प्ट हुक जोड़ता है; सर्वर पर कुछ भी इंस्टॉल नहीं होता।
 host-snippets-title = इस होस्ट के स्निपेट
 host-session-log = सत्र लॉग
 host-session-log-hint = टोकन: &S सत्र, &H होस्ट, &P पोर्ट, &U उपयोगकर्ता, &Y&M&D तारीख, &T समय। सापेक्ष पाथ लॉग फ़ोल्डर में जाते हैं।
@@ -377,7 +377,7 @@ settings-theme-dark = गहरी
 settings-theme-light = हल्की
 settings-terminal-font = टर्मिनल फ़ॉन्ट
 settings-font-size = फ़ॉन्ट आकार
-settings-font-placeholder = खाली = सिस्टम मोनोस्पेस
+settings-font-placeholder = खाली = साथ में आने वाला JetBrains Mono
 settings-font-hint = सहेजने पर फ़ॉन्ट के बदलाव खुले टर्मिनलों पर भी लागू होते हैं।
 settings-editor-placeholder = खाली = सिस्टम का डिफ़ॉल्ट ऐप (जैसे code -w { "{file}" })
 settings-auto-lock-placeholder = 0 = Hostwick बंद होने तक अनलॉक रखें
@@ -1082,3 +1082,114 @@ welcome-note = आप यह कभी भी फिर कर सकते ह�
 welcome-import = चुने हुए आयात करें
 welcome-skip = छोड़ें
 welcome-continue = जारी रखें
+
+## Terminal: transfers, links, production safety, status bar, alerts
+
+tx-xfer-no-dirs = फ़ोल्डर ट्रांसफ़र (trz -d) यहाँ समर्थित नहीं है, इसलिए ट्रांसफ़र अस्वीकार कर दिया गया।
+tx-xfer-offer-download = { $protocol }: सर्वर फ़ाइलें भेजना चाहता है
+tx-xfer-offer-upload = { $protocol }: सर्वर फ़ाइलों की प्रतीक्षा कर रहा है
+tx-xfer-pick-prompt = भेजने के लिए फ़ाइलें चुनें
+tx-xfer-folder-prompt = सहेजने के लिए फ़ोल्डर चुनें
+tx-xfer-cancelled = ट्रांसफ़र रद्द किया गया
+tx-xfer-received = { $protocol }: { $count ->
+    [one] 1 फ़ाइल प्राप्त हुई
+   *[other] { $count } फ़ाइलें प्राप्त हुईं
+} ({ $size })
+tx-xfer-sent = { $protocol }: { $count ->
+    [one] 1 फ़ाइल भेजी गई
+   *[other] { $count } फ़ाइलें भेजी गईं
+} ({ $size })
+tx-xfer-remote-cancelled = दूसरी ओर से ट्रांसफ़र रद्द कर दिया गया
+tx-xfer-closed = ट्रांसफ़र के दौरान कनेक्शन बंद हो गया
+tx-xfer-timeout = ट्रांसफ़र का समय समाप्त हो गया
+tx-xfer-failed = { $protocol } विफल: { $error }
+tx-xfer-save-to = यहाँ सहेजें
+tx-xfer-change = बदलें…
+tx-xfer-receive = प्राप्त करें
+tx-xfer-receiving = प्राप्त हो रहा है ({ $protocol })
+tx-xfer-sending = भेजा जा रहा है ({ $protocol })
+tx-xfer-waiting = दूसरी ओर की प्रतीक्षा…
+tx-xfer-cancel-hint = ट्रांसफ़र रद्द करें (Esc या Ctrl+C)
+tx-xfer-open-folder = फ़ोल्डर खोलें
+tx-status-latency = विलंबता { $ms } ms
+tx-status-host = { $host } से जुड़ा है
+tx-status-protocol = प्रोटोकॉल { $protocol }
+tx-status-folder = वर्तमान फ़ोल्डर { $folder }
+tx-status-logging = इस सत्र को फ़ाइल में लॉग किया जा रहा है
+tx-status-connected = { $time } से जुड़ा है
+tx-status-metrics = CPU { $cpu }, मेमोरी { $mem }, डिस्क { $disk }, लोड { $load }
+tx-status-cpu = CPU
+tx-status-mem = मेमोरी
+tx-status-disk = डिस्क
+tx-status-load = लोड
+tx-finished = { $host }: `{ $command }` पूरा हुआ (निकास { $exit }, { $time })
+tx-finished-nocmd = { $host }: कमांड पूरा हुआ (निकास { $exit }, { $time })
+tx-finished-show = दिखाएँ
+tx-tab-bell = घंटी बजी
+tx-paste-title = { $lines ->
+    [one] { $host } में 1 पंक्ति चिपकाएँ?
+   *[other] { $host } में { $lines } पंक्तियाँ चिपकाएँ?
+}
+tx-paste-title-large = { $host } में { $size } चिपकाएँ?
+tx-paste-prod = प्रोडक्शन – { $host }
+tx-paste-target = लक्ष्य: { $address } · { $size }
+tx-paste-broadcast = { $count ->
+    [one] ब्रॉडकास्ट: 1 और टर्मिनल को भी यह चिपकाया गया पाठ मिलेगा।
+   *[other] ब्रॉडकास्ट: { $count } और टर्मिनलों को भी यह चिपकाया गया पाठ मिलेगा।
+}
+tx-paste-more = { $count ->
+    [one] … और 1 पंक्ति
+   *[other] … और { $count } पंक्तियाँ
+}
+tx-paste-single = एक पंक्ति के रूप में चिपकाएँ
+tx-paste-go = चिपकाएँ
+tx-drop-ssh-only = छोड़ी गई फ़ाइलें SSH से अपलोड होती हैं। यह { $protocol } सत्र है, इसलिए अपलोड करने की कोई जगह नहीं है।
+tx-drop-started = { $count ->
+    [one] { $folder } में 1 आइटम अपलोड हो रहा है
+   *[other] { $folder } में { $count } आइटम अपलोड हो रहे हैं
+}
+tx-drop-title = { $count ->
+    [one] 1 आइटम अपलोड करें
+   *[other] { $count } आइटम अपलोड करें
+}
+tx-drop-to = यहाँ अपलोड करें:
+tx-drop-hint = इस टर्मिनल ने अपना वर्तमान फ़ोल्डर नहीं बताया। जहाँ आप हैं वहीं सीधे अपलोड करने के लिए शेल इंटीग्रेशन चालू करें।
+tx-drop-upload = अपलोड करें
+tx-drop-label = { $folder } में अपलोड करने के लिए यहाँ छोड़ें
+tx-drop-label-unknown = अपलोड करने के लिए यहाँ छोड़ें
+tx-enable-now = अभी चालू करें
+tx-enable-integration = शेल इंटीग्रेशन अभी चालू करें
+tx-open-missing = सर्वर पर नहीं मिला
+tx-download-started = डाउनलोड शुरू हुआ – ट्रांसफ़र पैनल देखें
+tx-integration-enabled = इस होस्ट के लिए शेल इंटीग्रेशन अब चालू है
+tx-integration-later = इस होस्ट के लिए सहेजा गया। यह अगले कनेक्शन पर शुरू होगा (अभी एक फ़ुल-स्क्रीन प्रोग्राम चल रहा है)।
+tx-link-open = लिंक खोलें
+tx-link-copy = लिंक कॉपी करें
+tx-link-copy-path = पथ कॉपी करें
+tx-link-reveal = फ़ाइल ब्राउज़र में खोलें
+tx-link-download = डाउनलोड करें…
+tx-link-connect = { $target } से कनेक्ट करें
+tx-env-label = परिवेश
+tx-env-none = कोई नहीं
+tx-env-dev = डेवलपमेंट
+tx-env-staging = स्टेजिंग
+tx-env-prod = प्रोडक्शन
+tx-env-custom = अपना रंग
+tx-env-color = रंग (#rrggbb)
+tx-env-hint = इस होस्ट के टैब और टर्मिनल को एक रंग से चिह्नित करता है। प्रोडक्शन में लाल रिबन भी दिखता है और कई पंक्तियाँ चिपकाने से पहले हमेशा पूछा जाता है।
+tx-env-error-color = रंग #rrggbb रूप में लिखें, जैसे #8a5cf6।
+tx-env-prod-ribbon = प्रोडक्शन – { $host }
+tx-settings-status-bar = हर टर्मिनल के नीचे स्टेटस बार दिखाएँ
+tx-settings-metrics = स्टेटस बार में सर्वर लोड दिखाएँ (CPU, मेमोरी, डिस्क)
+tx-settings-metrics-hint = टर्मिनल दिखाई देने तक हर 5 सेकंड में सर्वर पर एक छोटा रीड-ओनली कमांड चलाता है। केवल SSH सत्र।
+tx-settings-links = टर्मिनल आउटपुट में क्लिक करने योग्य लिंक और पथ
+tx-settings-links-hint = Ctrl+क्लिक (macOS पर ⌘+क्लिक) लिंक खोलता है; और विकल्पों के लिए राइट-क्लिक करें। जब कोई प्रोग्राम माउस इस्तेमाल करे, Shift दबाए रखें।
+tx-settings-confirm-paste = कई पंक्तियाँ चिपकाने की पुष्टि
+tx-settings-paste-always = हमेशा
+tx-settings-paste-prod = केवल प्रोडक्शन होस्ट
+tx-settings-paste-never = कभी नहीं
+tx-settings-paste-hint = प्रोडक्शन होस्ट हमेशा पूछते हैं। ब्रैकेटेड पेस्ट हर हाल में इस्तेमाल होता है, इसलिए शेल टेक्स्ट को इनपुट मानता है और तुरंत नहीं चलाता।
+tx-settings-notify = लंबा कमांड पूरा होने पर सूचित करें
+tx-settings-notify-after = इतने सेकंड के बाद लंबा माना जाए
+tx-settings-notify-hint = शेल इंटीग्रेशन ज़रूरी है (होस्ट की सेटिंग में चालू करें)। टैब बैकग्राउंड में हो या विंडो फ़ोकस में न हो, तब सूचना मिलती है।
+tx-settings-error-seconds = सेकंड 1 से 86400 के बीच पूर्ण संख्या में लिखें।

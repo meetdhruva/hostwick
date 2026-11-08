@@ -98,7 +98,10 @@ mod tests {
                 eprintln!("{shell} not installed; skipping");
                 continue;
             };
-            let script = format!("{prior}\n{cmd}\n{cmd}\nfalse\ncd '{}'\nexit\n", sub.display());
+            let script = format!(
+                "{prior}\n{cmd}\n{cmd}\nfalse\ncd '{}'\nexit\n",
+                sub.display()
+            );
             if let Some(mut stdin) = child.stdin.take() {
                 use std::io::Write as _;
                 let _ = stdin.write_all(script.as_bytes());
@@ -116,8 +119,14 @@ mod tests {
             );
             // OSC 133: the failed command's exit status, the prompt mark and
             // the start of the command with its text.
-            assert!(all.contains("\x1b]133;D;1\x07"), "{shell}: no exit status: {all:?}");
-            assert!(all.contains("\x1b]133;A\x07"), "{shell}: no prompt mark: {all:?}");
+            assert!(
+                all.contains("\x1b]133;D;1\x07"),
+                "{shell}: no exit status: {all:?}"
+            );
+            assert!(
+                all.contains("\x1b]133;A\x07"),
+                "{shell}: no prompt mark: {all:?}"
+            );
             assert!(
                 all.contains("\x1b]133;C;cmd=false\x07"),
                 "{shell}: no command start: {all:?}"

@@ -16,14 +16,14 @@ use tokio_util::sync::CancellationToken;
 
 /// The remote program's output (in) and its input (out).
 pub struct Link {
-    pub rx: mpsc::UnboundedReceiver<Bytes>,
+    pub rx: mpsc::Receiver<Bytes>,
     pub tx: mpsc::Sender<ShellCommand>,
     /// Bytes read from `rx` that the protocol has not consumed yet.
     pub(crate) spare: Vec<u8>,
 }
 
 impl Link {
-    pub fn new(rx: mpsc::UnboundedReceiver<Bytes>, tx: mpsc::Sender<ShellCommand>) -> Self {
+    pub fn new(rx: mpsc::Receiver<Bytes>, tx: mpsc::Sender<ShellCommand>) -> Self {
         Self {
             rx,
             tx,
@@ -153,7 +153,13 @@ pub fn safe_file_name(raw: &str) -> Option<String> {
     // Windows drive prefixes and reserved characters.
     let cleaned: String = cleaned
         .chars()
-        .map(|c| if matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c })
+        .map(|c| {
+            if matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     (!cleaned.is_empty()).then_some(cleaned)
 }
@@ -184,8 +190,14 @@ mod tests {
     #[test]
     fn names_are_made_safe() {
         assert_eq!(safe_file_name("a.txt").as_deref(), Some("a.txt"));
-        assert_eq!(safe_file_name("../../etc/passwd").as_deref(), Some("passwd"));
-        assert_eq!(safe_file_name("C:\\Windows\\x.exe").as_deref(), Some("x.exe"));
+        assert_eq!(
+            safe_file_name("../../etc/passwd").as_deref(),
+            Some("passwd")
+        );
+        assert_eq!(
+            safe_file_name("C:\\Windows\\x.exe").as_deref(),
+            Some("x.exe")
+        );
         assert_eq!(safe_file_name("..").as_deref(), None);
         assert_eq!(safe_file_name("").as_deref(), None);
         assert_eq!(safe_file_name("dir/").as_deref(), None);
@@ -314,7 +326,10 @@ mod detector_tests {
         let mut wire = b"rz\r".to_vec();
         wire.extend(hex_header(ZRQINIT, [0; 4]));
         match d.scan(&wire) {
-            Scan::Split { pass, start: Some((Detected::Zmodem(Start::Download), rest)) } => {
+            Scan::Split {
+                pass,
+                start: Some((Detected::Zmodem(Start::Download), rest)),
+            } => {
                 assert_eq!(pass, b"rz\r");
                 assert!(rest.starts_with(b"**\x18B00"));
             }
@@ -323,7 +338,10 @@ mod detector_tests {
         let up = hex_header(ZRINIT, [0, 0, 0, 0x23]);
         assert!(matches!(
             d.scan(&up),
-            Scan::Split { start: Some((Detected::Zmodem(Start::Upload), _)), .. }
+            Scan::Split {
+                start: Some((Detected::Zmodem(Start::Upload), _)),
+                ..
+            }
         ));
     }
 
@@ -358,7 +376,10 @@ mod detector_tests {
         let mut d = Detector::default();
         let wire = b"\x1b7::TRZSZ:TRANSFER:R:1.1.7:1234567890123:9\r\nmore";
         match d.scan(wire) {
-            Scan::Split { pass, start: Some((Detected::Trzsz(m), rest)) } => {
+            Scan::Split {
+                pass,
+                start: Some((Detected::Trzsz(m), rest)),
+            } => {
                 assert_eq!(pass, b"\x1b7");
                 assert_eq!(rest, b"more");
                 assert_eq!(m.mode, crate::trzsz::Mode::Upload);
@@ -373,7 +394,10 @@ mod detector_tests {
         ));
         assert!(matches!(
             d.scan(b".7:123\r\n"),
-            Scan::Split { start: Some((Detected::Trzsz(_), _)), .. }
+            Scan::Split {
+                start: Some((Detected::Trzsz(_), _)),
+                ..
+            }
         ));
     }
 
@@ -400,19 +424,19 @@ pub(crate) mod testutil {
     pub fn loopback() -> (Link, Link) {
         let (a_out, mut a_out_rx) = mpsc::channel::<ShellCommand>(256);
         let (b_out, mut b_out_rx) = mpsc::channel::<ShellCommand>(256);
-        let (to_a, a_in) = mpsc::unbounded_channel::<Bytes>();
-        let (to_b, b_in) = mpsc::unbounded_channel::<Bytes>();
+        let (to_a, a_in) = mpsc::channel::<Bytes>(256);
+        let (to_b, b_in) = mpsc::channel::<Bytes>(256);
         tokio::spawn(async move {
             while let Some(c) = a_out_rx.recv().await {
                 if let ShellCommand::Data(d) = c {
-                    let _ = to_b.send(d);
+                    let _ = to_b.send(d).await;
                 }
             }
         });
         tokio::spawn(async move {
             while let Some(c) = b_out_rx.recv().await {
                 if let ShellCommand::Data(d) = c {
-                    let _ = to_a.send(d);
+                    let _ = to_a.send(d).await;
                 }
             }
         });
@@ -433,7 +457,7 @@ pub(crate) mod testutil {
         let mut stdin = child.stdin.take().unwrap_or_else(|| panic!("stdin"));
         let mut stdout = child.stdout.take().unwrap_or_else(|| panic!("stdout"));
         let (out, mut out_rx) = mpsc::channel::<ShellCommand>(256);
-        let (to_link, from_child) = mpsc::unbounded_channel::<Bytes>();
+        let (to_link, from_child) = mpsc::channel::<Bytes>(256);
         tokio::spawn(async move {
             while let Some(c) = out_rx.recv().await {
                 if let ShellCommand::Data(d) = c
@@ -449,7 +473,11 @@ pub(crate) mod testutil {
                 match stdout.read(&mut buf).await {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        if to_link.send(Bytes::copy_from_slice(&buf[..n])).is_err() {
+                        if to_link
+                            .send(Bytes::copy_from_slice(&buf[..n]))
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }

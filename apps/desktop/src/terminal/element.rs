@@ -195,6 +195,24 @@ impl TerminalElement {
             }
         }
 
+        // A link under the pointer: underlined (URLs always, other kinds
+        // while Ctrl/⌘ is held).
+        if view.link_active()
+            && let Some(h) = view.x.hover.as_ref()
+        {
+            for (line, cols) in &h.segments {
+                let r = line + offset;
+                if r < 0 || r as usize >= rows {
+                    continue;
+                }
+                for c in cols.clone() {
+                    if let Some(cell) = grid[r as usize].get_mut(c) {
+                        cell.style.underline = true;
+                    }
+                }
+            }
+        }
+
         // Keyword highlighting: foreground only, plain-background cells only.
         if !view.highlighter.is_empty() {
             let h = view.highlighter.clone();

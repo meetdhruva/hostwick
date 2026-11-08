@@ -16,20 +16,28 @@
 
 pub mod colors;
 mod element;
+mod ext;
+pub mod fonts;
 pub mod highlight;
 pub mod integration;
 pub mod keys;
 pub mod links;
+mod linkui;
 pub mod metrics;
 pub mod mouse;
 pub mod osc133;
 pub mod osc7;
+mod parser;
 pub mod paste;
 pub mod prefs;
 pub mod reconnect;
 pub mod script;
 mod search;
 mod sessionlog;
+mod settle;
+mod status;
+mod testseam;
+mod transfer;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -80,6 +88,9 @@ use crate::shortcuts::Sc;
 pub use sessionlog::SessionLogger;
 
 pub use element::TerminalElement;
+pub use ext::TermExt;
+pub use metrics::format_bytes;
+pub use osc133::format_duration;
 
 /// Grid size handed to Alacritty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,6 +127,16 @@ enum Note {
     ScriptDone,
     /// Background match count finished (generation, result).
     SearchCount(u64, search::Count),
+    /// OSC 133 marks seen in the output.
+    Marks(Vec<osc133::Mark>),
+    /// A ZMODEM or trzsz transfer started (generation, details).
+    Xfer(u64, Box<transfer::XferStart>),
+    XferProgress(hostwick_term::xfer::Progress),
+    XferEnded(transfer::Ended),
+    /// Latency measured, in milliseconds (`true`: by keepalive ping).
+    Latency(Option<u32>, bool),
+    /// Raw output of the metrics script.
+    Metrics(String),
 }
 
 /// Receives terminal-side events from the parser (answers to queries such as
@@ -175,6 +196,8 @@ pub enum TerminalEvent {
     /// Close this pane (the last pane closes the tab).
     Close,
     LoggingChanged,
+    /// Requests that need the app (alerts, drops, links, paste checks).
+    Ext(TermExt),
 }
 
 /// Geometry of the last paint, for mapping mouse positions to cells.
@@ -265,6 +288,8 @@ pub struct TerminalView {
     /// What was typed since the last announcement (the shell echoes it;
     /// the screen reader already spoke it).
     typed: String,
+    /// v0.4 additions: host info, transfers, links, status bar.
+    x: ext::Ext,
     _pump: Task<()>,
 }
 
@@ -291,17 +316,13 @@ impl Drop for TerminalView {
     }
 }
 
+/// The terminal font: `HOSTWICK_FONT` (testing), else the bundled
+/// JetBrains Mono.
 pub fn monospace_family() -> SharedString {
     if let Ok(f) = std::env::var("HOSTWICK_FONT") {
         return f.into();
     }
-    if cfg!(target_os = "windows") {
-        "Consolas".into()
-    } else if cfg!(target_os = "macos") {
-        "Menlo".into()
-    } else {
-        "DejaVu Sans Mono".into()
-    }
+    fonts::FAMILY.into()
 }
 
 /// Tab title for a host: its name, plus the protocol for telnet and the
@@ -386,6 +407,7 @@ impl TerminalView {
                 } else {
                     settings.font_family.clone().into()
                 },
+                features: fonts::features(),
                 ..Font::default()
             },
             font_size: px(settings.font_size),
@@ -402,6 +424,7 @@ impl TerminalView {
             highlighter: highlight::shared(&settings.highlight_rules),
             row_cache: highlight::RowCache::default(),
             mouse: MouseReport::default(),
+            x: ext::Ext::default(),
             _pump: pump,
         };
         view.start(session);
@@ -423,6 +446,7 @@ impl TerminalView {
         self.control = parts.control;
         self.transport = parts.kind;
         let kind = parts.kind;
+        let xfer_input = shell_in.clone();
 
         // Ordered input pump: UI queue → transport (with backpressure there).
         self.rt.spawn(async move {
@@ -436,9 +460,10 @@ impl TerminalView {
         // Parser: output → grid, off the UI thread.
         let parser_shared = self.shared.clone();
         let notes_tx = self.notes.clone();
+        let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<transfer::Done>();
+        let xfer_input = xfer_input;
         self.rt.spawn(async move {
-            let mut processor: Processor = Processor::new();
-            let mut osc7 = osc7::Osc7Scanner::default();
+            let mut parser = parser::Parser::new(done_tx, xfer_input);
             let mut exit: Option<String> = None;
             let mut end = reconnect::EndSeen::default();
             let wake = |s: &Shared| {
@@ -446,9 +471,43 @@ impl TerminalView {
                     let _ = notes_tx.unbounded_send(Note::Wakeup);
                 }
             };
-            'outer: while let Some(ev) = shell_out.recv().await {
+            // After a transfer: what the parser found, for the UI.
+            let report = |parser: &mut parser::Parser| {
+                if let Some(dir) = parser.cwd.take() {
+                    let _ = notes_tx.unbounded_send(Note::Cwd(dir));
+                }
+                if !parser.marks.is_empty() {
+                    let _ = notes_tx.unbounded_send(Note::Marks(std::mem::take(&mut parser.marks)));
+                }
+                if let Some(start) = parser.started.take() {
+                    let _ = notes_tx.unbounded_send(Note::Xfer(generation, Box::new(start)));
+                }
+            };
+            'outer: loop {
+                let ev = tokio::select! {
+                    ev = shell_out.recv() => match ev {
+                        Some(ev) => ev,
+                        None => break 'outer,
+                    },
+                    Some(done) = done_rx.recv() => {
+                        {
+                            let mut term = parser_shared.term.lock();
+                            parser.take_back(&parser_shared, &mut term, done);
+                        }
+                        report(&mut parser);
+                        wake(&parser_shared);
+                        continue 'outer;
+                    }
+                    () = tokio::time::sleep(Duration::from_millis(120)), if parser.is_holding() => {
+                        {
+                            let mut term = parser_shared.term.lock();
+                            parser.flush_held(&parser_shared, &mut term);
+                        }
+                        wake(&parser_shared);
+                        continue 'outer;
+                    }
+                };
                 let mut pending = Some(ev);
-                let mut cwd = None;
                 {
                     let mut term = parser_shared.term.lock();
                     // Drain everything already queued under one lock.
@@ -460,17 +519,10 @@ impl TerminalView {
                                 if kind != TransportKind::Ssh && b.starts_with(b"\r\n[") {
                                     end.failure = true;
                                 }
-                                if let Some(dir) = osc7.feed(&b) {
-                                    cwd = Some(dir);
-                                }
-                                processor.advance(&mut *term, &b);
-                                parser_shared.watch.push(&b);
-                                if let Ok(mut log) = parser_shared.log.lock()
-                                    && let Some(l) = log.as_mut()
-                                    && let Err(e) = l.write(&b)
-                                {
-                                    tracing::warn!(error = %e, "session log write failed; logging stopped");
-                                    *log = None;
+                                parser.output(&parser_shared, &mut term, b);
+                                // A transfer is behind: stop reading.
+                                if parser.is_blocked() {
+                                    break;
                                 }
                             }
                             ShellEvent::Exit(code) => {
@@ -479,17 +531,31 @@ impl TerminalView {
                             }
                             ShellEvent::ExitSignal(sig) => {
                                 end.exit_status = true;
-                                exit = Some(t!("term-exit-signal", signal = sig.to_string()).to_string())
+                                exit = Some(
+                                    t!("term-exit-signal", signal = sig.to_string()).to_string(),
+                                )
                             }
                             ShellEvent::Closed => break 'outer,
                         }
                         pending = shell_out.try_recv().ok();
                     }
                 }
-                if let Some(dir) = cwd {
-                    let _ = notes_tx.unbounded_send(Note::Cwd(dir));
-                }
+                report(&mut parser);
                 wake(&parser_shared);
+                if parser.is_blocked() {
+                    // Back pressure: the remote program is held back (its
+                    // SSH window fills) until the transfer has caught up.
+                    let ended = parser.wait_room(&mut done_rx).await;
+                    {
+                        let mut term = parser_shared.term.lock();
+                        if let Some(done) = ended {
+                            parser.take_back(&parser_shared, &mut term, done);
+                        }
+                        parser.unpark(&parser_shared, &mut term);
+                    }
+                    report(&mut parser);
+                    wake(&parser_shared);
+                }
             }
             parser_shared.watch.close();
             wake(&parser_shared);
@@ -527,6 +593,8 @@ impl TerminalView {
             }
         }
         self.shared.watch.reset();
+        self.x.tracker = Default::default();
+        self.reset_status();
         self.start(session);
         self.exited = None;
         self.dropped = false;
@@ -667,7 +735,7 @@ impl TerminalView {
                 cx.emit(TerminalEvent::TitleChanged);
                 cx.notify();
             }
-            Note::Bell => {}
+            Note::Bell => cx.emit(TerminalEvent::Ext(TermExt::Bell)),
             Note::Exited(generation, reason, dropped) => {
                 if generation != self.generation {
                     return;
@@ -690,6 +758,16 @@ impl TerminalView {
                 self.script = None;
                 cx.notify();
             }
+            Note::Marks(marks) => self.on_marks(marks, cx),
+            Note::Xfer(generation, start) => {
+                if generation == self.generation {
+                    self.begin_transfer(*start, cx);
+                }
+            }
+            Note::XferProgress(p) => self.on_xfer_progress(p, cx),
+            Note::XferEnded(e) => self.on_xfer_ended(e, cx),
+            Note::Latency(ms, ping) => self.on_latency(ms, ping, cx),
+            Note::Metrics(m) => self.on_metrics(m, cx),
             Note::SearchCount(generation, count) => {
                 if let Some(s) = self.search.as_mut()
                     && s.generation.load(Ordering::Acquire) == generation
@@ -991,6 +1069,13 @@ impl TerminalView {
 
     /// Send bytes typed by the user here; also emitted for broadcast.
     fn send_user(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        // A transfer owns the line: keystrokes would corrupt it.
+        if self.x.xfer.is_some() {
+            return;
+        }
+        if bytes.contains(&b'\r') {
+            self.x.tracker.entered(Instant::now());
+        }
         if self.typed.len() < 512 {
             self.typed.extend(
                 String::from_utf8_lossy(&bytes)
@@ -1005,7 +1090,7 @@ impl TerminalView {
 
     /// Send bytes without emitting (used when replaying broadcast input).
     pub fn write_raw(&self, bytes: &[u8]) {
-        if self.exited.is_none() {
+        if self.exited.is_none() && self.x.xfer.is_none() {
             let _ = self
                 .input
                 .unbounded_send(ShellCommand::Data(Bytes::copy_from_slice(bytes)));
@@ -1044,6 +1129,12 @@ impl TerminalView {
 
     fn paste(&mut self, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) {
+            let mode = Settings::get(cx).term.confirm_paste;
+            if paste::needs_confirm(&text, mode, self.x.info.env.is_prod()) {
+                // The app shows the confirmation (it knows about broadcast).
+                cx.emit(TerminalEvent::Ext(TermExt::ConfirmPaste { text }));
+                return;
+            }
             let bracketed = self.mode().contains(TermMode::BRACKETED_PASTE);
             self.send_user(keys::paste_bytes(&text, bracketed), cx);
         }
@@ -1383,6 +1474,13 @@ impl TerminalView {
             cx.propagate();
             return;
         }
+        if self.x.xfer.is_some() {
+            // Ctrl+C cancels a running transfer.
+            if key == "c" && ctrl {
+                self.cancel_transfer(cx);
+            }
+            return;
+        }
         if self.exited.is_some() {
             return;
         }
@@ -1443,6 +1541,22 @@ impl TerminalView {
         }
         if key == "f3" && self.search.is_some() && !m.control && !m.alt {
             self.step_search(!m.shift, cx);
+            cx.stop_propagation();
+            return;
+        }
+        if self.x.xfer.is_some() {
+            if key == "escape" || (m.control && key == "c") {
+                self.cancel_transfer(cx);
+                cx.stop_propagation();
+            } else if !(m.control || m.platform || m.alt) {
+                // Typing during a transfer is ignored.
+                cx.stop_propagation();
+            }
+            return;
+        }
+        if let Some(files) = testseam::drop_files(key, &m) {
+            // Test seam (HOSTWICK_TEST_DROP): same path as a real drop.
+            self.files_dropped(files, cx);
             cx.stop_propagation();
             return;
         }
@@ -1623,6 +1737,10 @@ impl TerminalView {
             cx.notify();
             return;
         }
+        // Ctrl/⌘+click on a link follows it instead of selecting.
+        if linkui::follow_modifier(&ev.modifiers) && ev.click_count == 1 && self.follow_link(cx) {
+            return;
+        }
         if let Some((point, side)) = self.grid_point(ev.position) {
             let kind = match ev.click_count {
                 2 => SelectionType::Semantic,
@@ -1647,6 +1765,7 @@ impl TerminalView {
     }
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.update_hover(ev, cx);
         if let Some(held) = self.mouse.pressed {
             // Released outside the window: finish the press.
             let still = ev.pressed_button.and_then(Self::mouse_button) == Some(held);
@@ -1916,9 +2035,21 @@ impl TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.x.painted = Some(Instant::now());
         let settings = Settings::get(cx);
         let menu_mode = settings.right_click == RightClick::Menu;
         let show_bar = settings.show_button_bar;
+        let show_status = settings.term.status_bar;
+        let env = self.x.info.env.clone();
+        let host_name = self.x.info.name.clone();
+        let link_active = self.link_active();
+        let hovered_link = self.x.hover.as_ref().map(|h| {
+            let path = (h.found.kind == links::LinkKind::Path)
+                .then(|| self.resolve_link_path(&h.found.text))
+                .flatten();
+            (h.found.clone(), path)
+        });
+        let can_enable = self.can_offer_integration();
         let exited = self.exited.clone();
         let logging = self.log_path().is_some();
         let alive = self.exited.is_none();
@@ -1968,7 +2099,23 @@ impl Render for TerminalView {
             .bg(colors::to_hsla(colors::BACKGROUND))
             .track_focus(&self.focus)
             .key_context("Terminal")
-            .cursor(CursorStyle::IBeam)
+            .cursor(if link_active {
+                CursorStyle::PointingHand
+            } else {
+                CursorStyle::IBeam
+            })
+            .on_hover(cx.listener(|v, hovered: &bool, _, cx| {
+                if !*hovered {
+                    v.clear_hover(cx);
+                }
+            }))
+            .on_modifiers_changed(cx.listener(|v, ev: &ModifiersChangedEvent, _, cx| {
+                v.modifiers_changed(&ev.modifiers, cx);
+            }))
+            .group("terminal-drop")
+            .on_drop(cx.listener(|v, paths: &ExternalPaths, _, cx| {
+                v.files_dropped(paths.paths().to_vec(), cx);
+            }))
             .on_action(
                 cx.listener(|v, _: &SendTab, w, cx| v.on_shell_key("tab", false, false, w, cx)),
             )
@@ -2003,6 +2150,34 @@ impl Render for TerminalView {
                     .size_0()
                     .overflow_hidden(),
             )
+            .child(
+                // Files being dragged over: tinted frame and a label.
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .border_2()
+                    .border_color(cx.theme().primary)
+                    .bg(hsla(0.58, 0.6, 0.5, 0.18))
+                    .invisible()
+                    .group_drag_over::<ExternalPaths>("terminal-drop", |s| s.visible())
+                    .child(
+                        div()
+                            .px(px(14.0))
+                            .py(px(8.0))
+                            .rounded(px(6.0))
+                            .bg(cx.theme().popover)
+                            .text_color(cx.theme().popover_foreground)
+                            .text_size(px(14.0))
+                            .child(match &cwd {
+                                Some(dir) => t!("tx-drop-label", folder = dir.clone()),
+                                None => t!("tx-drop-label-unknown"),
+                            }),
+                    ),
+            )
+            .children(self.render_transfer(cx))
             .when(logging, |d| {
                 d.child(
                     div()
@@ -2173,6 +2348,10 @@ impl Render for TerminalView {
                 };
                 let find_view = view.clone();
                 let text_view = view.clone();
+                let mut menu = menu;
+                if let Some((found, path)) = hovered_link.clone() {
+                    menu = linkui::link_menu(menu, found, path, is_ssh, &view);
+                }
                 let mut menu = menu
                     .item(
                         crate::shortcuts::menu_item(t!("term-menu-copy"), Some(Sc::Copy)).on_click(
@@ -2233,6 +2412,11 @@ impl Render for TerminalView {
                             sub
                         },
                     );
+                }
+                if can_enable {
+                    menu = menu.item(PopupMenuItem::new(t!("tx-enable-integration")).on_click(
+                        act(|_, cx| cx.emit(TerminalEvent::Ext(TermExt::EnableIntegration))),
+                    ));
                 }
                 if let Some(dir) = cwd.clone() {
                     menu = menu.item(PopupMenuItem::new(t!("term-menu-copy-folder")).on_click(
@@ -2315,11 +2499,14 @@ impl Render for TerminalView {
         };
         let search_bar = self.render_search_bar(logging, cx);
         let bar = (show_bar && !snippets.is_empty()).then(|| self.render_button_bar(&snippets, cx));
+        let ribbon = self.render_ribbon(&env, &host_name);
+        let status = show_status.then(|| self.render_status_bar(logging, cx));
         div()
             .id("terminal-root")
             .size_full()
             .flex()
             .flex_col()
+            .children(ribbon)
             .children(bar)
             .child(
                 div()
@@ -2329,6 +2516,7 @@ impl Render for TerminalView {
                     .child(body)
                     .children(search_bar),
             )
+            .children(status)
     }
 }
 

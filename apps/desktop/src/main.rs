@@ -85,6 +85,7 @@ fn main() {
         .with_assets(AppAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            terminal::fonts::register(cx);
             settings::apply_theme(settings.theme, cx);
             cx.set_global(settings);
             cx.on_window_closed(|cx, _| {

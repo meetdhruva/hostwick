@@ -195,6 +195,29 @@ impl Section {
     }
 }
 
+/// The environment picker's choices (a custom colour has its own field).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnvChoice {
+    None,
+    Dev,
+    Staging,
+    Prod,
+    Custom,
+}
+
+impl EnvChoice {
+    fn of(e: &hostwick_core::Environment) -> Self {
+        use hostwick_core::Environment as E;
+        match e {
+            E::None => Self::None,
+            E::Dev => Self::Dev,
+            E::Staging => Self::Staging,
+            E::Prod => Self::Prod,
+            E::Custom(_) => Self::Custom,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProtoChoice {
     Ssh,
@@ -224,6 +247,8 @@ pub struct HostForm {
     port: Entity<InputState>,
     user: Entity<InputState>,
     notes: Entity<TextareaState>,
+    env: EnvChoice,
+    env_color: Entity<InputState>,
     proto: ProtoChoice,
     // Serial
     baud: Entity<InputState>,
@@ -331,6 +356,16 @@ impl HostForm {
                 let n = base.notes.clone();
                 cx.new(|cx| TextareaState::new(window, cx).rows(3).default_value(n))
             },
+            env: EnvChoice::of(&base.environment),
+            env_color: mk(
+                match &base.environment {
+                    hostwick_core::Environment::Custom(c) => c.clone(),
+                    _ => String::new(),
+                },
+                "#8a5cf6".into(),
+                window,
+                cx,
+            ),
             proto: match base.protocol {
                 Protocol::Ssh => ProtoChoice::Ssh,
                 Protocol::Telnet => ProtoChoice::Telnet,
@@ -551,6 +586,19 @@ impl HostForm {
         p.folder = v(&self.folder).trim_matches('/').to_owned();
         p.host = host;
         p.notes = self.notes.read(cx).value().trim_end().to_owned();
+        p.environment = match self.env {
+            EnvChoice::None => hostwick_core::Environment::None,
+            EnvChoice::Dev => hostwick_core::Environment::Dev,
+            EnvChoice::Staging => hostwick_core::Environment::Staging,
+            EnvChoice::Prod => hostwick_core::Environment::Prod,
+            EnvChoice::Custom => {
+                let c = v(&self.env_color);
+                if hostwick_core::parse_hex_color(&c).is_none() {
+                    return Err((General, t!("tx-env-error-color").into()));
+                }
+                hostwick_core::Environment::Custom(c)
+            }
+        };
         p.protocol = match self.proto {
             ProtoChoice::Ssh => Protocol::Ssh,
             ProtoChoice::Telnet => Protocol::Telnet,
@@ -1020,6 +1068,33 @@ impl HostForm {
             })
         };
         body.child(Self::row(
+            t!("tx-env-label"),
+            Self::choice(
+                "env",
+                self.env,
+                &[
+                    (EnvChoice::None, t!("tx-env-none")),
+                    (EnvChoice::Dev, t!("tx-env-dev")),
+                    (EnvChoice::Staging, t!("tx-env-staging")),
+                    (EnvChoice::Prod, t!("tx-env-prod")),
+                    (EnvChoice::Custom, t!("tx-env-custom")),
+                ],
+                cx,
+                |f, v, _, _| f.env = v,
+            ),
+        ))
+        .when(self.env == EnvChoice::Custom, |d| {
+            d.child(Self::row(
+                t!("tx-env-color"),
+                div().w(px(160.0)).child(
+                    Input::new(&self.env_color)
+                        .small()
+                        .aria_label(t!("tx-env-color")),
+                ),
+            ))
+        })
+        .child(Self::hint(t!("tx-env-hint"), cx))
+        .child(Self::row(
             t!("host-notes"),
             Textarea::new(&self.notes)
                 .small()

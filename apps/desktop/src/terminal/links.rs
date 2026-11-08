@@ -80,11 +80,66 @@ fn host_re() -> &'static Regex {
 /// Top-level domains that look like host names rather than file
 /// extensions (`.rs`, `.py`, `.md`, `.sh`, `.pl`, `.so` are left out).
 const TLDS: &[&str] = &[
-    "com", "net", "org", "edu", "gov", "mil", "int", "io", "dev", "app", "cloud", "local", "lan",
-    "internal", "intranet", "corp", "home", "localdomain", "example", "test", "uk", "de", "fr",
-    "es", "it", "nl", "be", "ch", "at", "se", "no", "dk", "fi", "pt", "ie", "jp", "kr", "cn", "tw",
-    "hk", "sg", "au", "nz", "ca", "us", "br", "mx", "za", "ru", "ua", "eu", "info", "biz", "xyz",
-    "online", "site", "tech", "ai", "me", "tv",
+    "com",
+    "net",
+    "org",
+    "edu",
+    "gov",
+    "mil",
+    "int",
+    "io",
+    "dev",
+    "app",
+    "cloud",
+    "local",
+    "lan",
+    "internal",
+    "intranet",
+    "corp",
+    "home",
+    "localdomain",
+    "example",
+    "test",
+    "uk",
+    "de",
+    "fr",
+    "es",
+    "it",
+    "nl",
+    "be",
+    "ch",
+    "at",
+    "se",
+    "no",
+    "dk",
+    "fi",
+    "pt",
+    "ie",
+    "jp",
+    "kr",
+    "cn",
+    "tw",
+    "hk",
+    "sg",
+    "au",
+    "nz",
+    "ca",
+    "us",
+    "br",
+    "mx",
+    "za",
+    "ru",
+    "ua",
+    "eu",
+    "info",
+    "biz",
+    "xyz",
+    "online",
+    "site",
+    "tech",
+    "ai",
+    "me",
+    "tv",
 ];
 
 fn char_range(text: &str, byte: Range<usize>) -> Range<usize> {
@@ -151,8 +206,7 @@ fn candidates(line: &str) -> Vec<(u8, Found)> {
         let before = line[..m.start()].chars().last();
         let after = line[m.end()..].chars().next();
         let glued = before == Some('.')
-            || after == Some('.')
-                && line[m.end() + 1..].starts_with(|d: char| d.is_ascii_digit());
+            || after == Some('.') && line[m.end() + 1..].starts_with(|d: char| d.is_ascii_digit());
         if host.parse::<Ipv4Addr>().is_ok() && port_ok && !glued {
             push(2, LinkKind::Ip, m.range(), m.as_str());
         }
@@ -196,7 +250,10 @@ pub fn detect(line: &str) -> Vec<Found> {
     });
     let mut out: Vec<Found> = Vec::new();
     for (_, f) in all {
-        if out.iter().any(|o| f.range.start < o.range.end && o.range.start < f.range.end) {
+        if out
+            .iter()
+            .any(|o| f.range.start < o.range.end && o.range.start < f.range.end)
+        {
             continue;
         }
         out.push(f);
@@ -303,7 +360,10 @@ mod tests {
         );
         assert_eq!(
             kinds("https://en.wikipedia.org/wiki/Rust_(language)"),
-            vec![(LinkKind::Url, "https://en.wikipedia.org/wiki/Rust_(language)".into())]
+            vec![(
+                LinkKind::Url,
+                "https://en.wikipedia.org/wiki/Rust_(language)".into()
+            )]
         );
         assert_eq!(kinds("www.example.com")[0].0, LinkKind::Url);
         assert_eq!(url_to_open("www.example.com"), "https://www.example.com");
@@ -374,7 +434,10 @@ mod tests {
 
     #[test]
     fn path_resolution() {
-        assert_eq!(resolve_path("/etc/hosts", None, None).as_deref(), Some("/etc/hosts"));
+        assert_eq!(
+            resolve_path("/etc/hosts", None, None).as_deref(),
+            Some("/etc/hosts")
+        );
         assert_eq!(
             resolve_path("./build/x", Some("/srv/app"), None).as_deref(),
             Some("/srv/app/build/x")
@@ -388,8 +451,14 @@ mod tests {
             resolve_path("~/notes", Some("/home/ann/src"), Some("bob")).as_deref(),
             Some("/home/ann/notes")
         );
-        assert_eq!(resolve_path("~/n", None, Some("bob")).as_deref(), Some("/home/bob/n"));
-        assert_eq!(resolve_path("~/n", None, Some("root")).as_deref(), Some("/root/n"));
+        assert_eq!(
+            resolve_path("~/n", None, Some("bob")).as_deref(),
+            Some("/home/bob/n")
+        );
+        assert_eq!(
+            resolve_path("~/n", None, Some("root")).as_deref(),
+            Some("/root/n")
+        );
         assert_eq!(resolve_path("~/n", None, None), None);
         assert_eq!(resolve_path("~other/n", Some("/home/a"), None), None);
         assert_eq!(normalize("/a/./b/../c//d/"), "/a/c/d/");

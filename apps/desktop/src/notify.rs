@@ -28,12 +28,30 @@ pub enum Level {
     Error,
 }
 
+/// A button on a notification ("Show", "Enable now").
+#[derive(Clone)]
+struct Action {
+    label: SharedString,
+    run: ActionFn,
+}
+
+type ActionFn = std::rc::Rc<dyn Fn(&mut Window, &mut App)>;
+
+impl std::fmt::Debug for Action {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Action")
+            .field("label", &self.label)
+            .finish()
+    }
+}
+
 /// A notification to show.
 #[derive(Debug, Clone)]
 pub struct Toast {
     level: Level,
     title: Option<SharedString>,
     text: SharedString,
+    action: Option<Action>,
 }
 
 impl Toast {
@@ -55,7 +73,22 @@ impl Toast {
             level,
             title: None,
             text: text.into(),
+            action: None,
         }
+    }
+
+    /// A button that runs `run` (and closes the notification). Notifications
+    /// with a button stay a little longer.
+    pub fn action(
+        mut self,
+        label: impl Into<SharedString>,
+        run: impl Fn(&mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.action = Some(Action {
+            label: label.into(),
+            run: std::rc::Rc::new(run),
+        });
+        self
     }
 
     pub fn title(mut self, title: impl Into<SharedString>) -> Self {
@@ -71,7 +104,8 @@ impl Toast {
         };
         // Long texts take longer to read (and to be read out).
         let extra = (self.text.chars().count() / 40).min(10);
-        Duration::from_secs(base + extra as u64)
+        let button = if self.action.is_some() { 6 } else { 0 };
+        Duration::from_secs(base + extra as u64 + button)
     }
 }
 
@@ -151,6 +185,7 @@ pub fn layer(window: &Window, cx: &App) -> Option<AnyElement> {
             };
             let title = s.toast.title.clone();
             let text = s.toast.text.clone();
+            let action = s.toast.action.clone();
             let spoken = match &title {
                 Some(t) => format!("{kind}: {t}. {text}"),
                 None => format!("{kind}: {text}"),
@@ -192,7 +227,22 @@ pub fn layer(window: &Window, cx: &App) -> Option<AnyElement> {
                         .when_some(title, |d, t| {
                             d.child(div().font_weight(FontWeight::SEMIBOLD).child(t))
                         })
-                        .child(div().whitespace_normal().child(text)),
+                        .child(div().whitespace_normal().child(text))
+                        .when_some(action, |d, a| {
+                            let run = a.run.clone();
+                            d.child(
+                                div().pt(px(4.0)).child(
+                                    Button::new(("toast-action", id))
+                                        .small()
+                                        .primary()
+                                        .label(a.label.clone())
+                                        .on_click(move |_, window, cx| {
+                                            dismiss(id, cx);
+                                            run(window, cx);
+                                        }),
+                                ),
+                            )
+                        }),
                 )
                 .child(
                     Button::new(("toast-close", id))
