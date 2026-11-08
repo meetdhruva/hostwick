@@ -11,6 +11,7 @@ mod prompts;
 mod render;
 mod sidebar;
 mod sync;
+mod termx;
 mod welcome;
 
 use std::cell::RefCell;
@@ -157,6 +158,8 @@ pub struct HostwickApp {
     lang: &'static str,
     /// The tab layout last written, to skip writing the same again.
     saved_tabs: RefCell<String>,
+    /// Bell markers (terminal extras).
+    termx: termx::State,
     _tasks: Vec<Task<()>>,
     _subs: Vec<Subscription>,
 }
@@ -240,6 +243,9 @@ impl HostwickApp {
                 }
             }),
         ];
+        subs.push(cx.observe_window_activation(window, |this, window, cx| {
+            this.window_activated(window, cx)
+        }));
         // Quick connect: suggestions as you type (Enter is handled by the
         // sidebar, which knows the highlighted suggestion).
         subs.push(cx.subscribe_in(
@@ -395,6 +401,7 @@ impl HostwickApp {
             tab_anchor: Default::default(),
             lang: crate::i18n::current(),
             saved_tabs: RefCell::default(),
+            termx: Default::default(),
             _tasks: vec![prompt_task, transfer_task, tick_task],
             _subs: subs,
         };
@@ -552,6 +559,7 @@ impl HostwickApp {
                             Ok(Ok(session)) => view.update(cx, |v, cx| {
                                 v.reattach(session, cx);
                                 v.attach_profile(&profile, cx);
+                                v.set_host(&profile, app.backend.clone(), cx);
                             }),
                             Ok(Err(e)) => {
                                 let fatal = crate::backend::is_fatal(&e);
@@ -595,7 +603,10 @@ impl HostwickApp {
                                 let sub = cx.subscribe_in(&view, window, Self::on_terminal_event);
                                 app._subs.push(sub);
                                 app.auto_session_log(&profile, &view, cx);
-                                view.update(cx, |v, cx| v.attach_profile(&profile, cx));
+                                view.update(cx, |v, cx| {
+                                    v.attach_profile(&profile, cx);
+                                    v.set_host(&profile, app.backend.clone(), cx);
+                                });
                                 let focused = app
                                     .active
                                     .and_then(|i| app.tabs.get(i))
@@ -638,7 +649,7 @@ impl HostwickApp {
                                     let mut v =
                                         FilesView::new(session, profile, backend, window, cx);
                                     if let Some(dir) = start {
-                                        v.navigate_remote(dir, cx);
+                                        v.reveal_remote(dir, cx);
                                     }
                                     v.set_link(link, cx);
                                     v
@@ -859,6 +870,8 @@ impl HostwickApp {
             return;
         }
         self.active = Some(ix);
+        let seen = self.tabs[ix].id;
+        self.clear_bell(seen);
         // Restored tabs connect when first shown.
         let pending: Vec<u64> = self.tabs[ix]
             .panes()
@@ -880,9 +893,9 @@ impl HostwickApp {
         let Some((_, pane)) = self.locate(term_pane) else {
             return;
         };
-        let cwd = match &pane.body {
-            PaneBody::Terminal(v) => v.read(cx).cwd(),
-            _ => None,
+        let (cwd, term) = match &pane.body {
+            PaneBody::Terminal(v) => (v.read(cx).cwd(), Some(v.clone())),
+            _ => (None, None),
         };
         let mut files = Pane {
             id: 0,
@@ -894,7 +907,21 @@ impl HostwickApp {
         };
         files.id = self.next_id();
         if cwd.is_none() {
-            window.toast(Toast::info(t!("files-follow-no-folder")), cx);
+            let toast = Toast::info(t!("files-follow-no-folder"));
+            let toast = match term {
+                // One click turns the integration on, here and now.
+                Some(term) => {
+                    let me = cx.entity().downgrade();
+                    toast.action(t!("tx-enable-now"), move |window, cx| {
+                        let term = term.clone();
+                        let _ = me.update(cx, |app, cx| {
+                            app.enable_integration(&term, Some(term_pane), window, cx);
+                        });
+                    })
+                }
+                None => toast,
+            };
+            window.toast(toast, cx);
         }
         self.push_tab(files, TabKind::Files, window, cx);
     }
@@ -983,6 +1010,7 @@ impl HostwickApp {
                     self.close_pane(id, window, cx);
                 }
             }
+            TerminalEvent::Ext(x) => self.on_term_ext(source, pane_id, x, window, cx),
         }
     }
 

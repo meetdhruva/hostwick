@@ -338,7 +338,7 @@ host-terminal-type = Tipo de terminal
 host-login-script = Script de inicio de sesión
 host-login-script-hint = Un comando por línea, escrito tras iniciar sesión. @wait TEXTO espera esa salida (10 s), @wait 30000 TEXTO espera más, @sleep 500 hace una pausa; # inicia un comentario.
 host-shell-integration = Integración con el shell (bash, zsh)
-host-shell-integration-hint = Permite que el explorador de archivos siga la carpeta del terminal (clic derecho → Abrir archivos aquí). Añade discretamente un hook al prompt cuando se inicia el shell; no se instala nada en el servidor.
+host-shell-integration-hint = Permite que el explorador de archivos siga la carpeta del terminal (clic derecho → Abrir archivos aquí), y activa la subida arrastrando archivos, los avisos de comandos terminados y las rutas relativas en las que se puede hacer clic. Añade discretamente un hook al prompt cuando se inicia el shell; no se instala nada en el servidor.
 host-snippets-title = Fragmentos para este host
 host-session-log = Registro de sesión
 host-session-log-hint = Variables: &S sesión, &H host, &P puerto, &U usuario, &Y&M&D fecha, &T hora. Las rutas relativas van a la carpeta de registros.
@@ -377,7 +377,7 @@ settings-theme-dark = Oscuro
 settings-theme-light = Claro
 settings-terminal-font = Fuente del terminal
 settings-font-size = Tamaño de fuente
-settings-font-placeholder = vacío = fuente monoespaciada del sistema
+settings-font-placeholder = vacío = JetBrains Mono incluida
 settings-font-hint = Los cambios de fuente se aplican a los terminales abiertos al guardar.
 settings-editor-placeholder = vacío = aplicación predeterminada del sistema (p. ej. code -w { "{file}" })
 settings-auto-lock-placeholder = 0 = mantener desbloqueado hasta cerrar Hostwick
@@ -1085,3 +1085,114 @@ welcome-note = Puedes repetirlo cuando quieras: Importar… → Buscar en este e
 welcome-import = Importar lo seleccionado
 welcome-skip = Omitir
 welcome-continue = Continuar
+
+## Terminal: transfers, links, production safety, status bar, alerts
+
+tx-xfer-no-dirs = Las transferencias de carpetas (trz -d) no se admiten aquí; se rechazó la transferencia.
+tx-xfer-offer-download = { $protocol }: el servidor quiere enviar archivos
+tx-xfer-offer-upload = { $protocol }: el servidor espera archivos
+tx-xfer-pick-prompt = Elige los archivos que enviar
+tx-xfer-folder-prompt = Elige la carpeta donde guardar
+tx-xfer-cancelled = Transferencia cancelada
+tx-xfer-received = { $protocol }: { $count ->
+    [one] 1 archivo recibido
+   *[other] { $count } archivos recibidos
+} ({ $size })
+tx-xfer-sent = { $protocol }: { $count ->
+    [one] 1 archivo enviado
+   *[other] { $count } archivos enviados
+} ({ $size })
+tx-xfer-remote-cancelled = El otro extremo canceló la transferencia
+tx-xfer-closed = La conexión se cerró durante la transferencia
+tx-xfer-timeout = La transferencia superó el tiempo de espera
+tx-xfer-failed = { $protocol } falló: { $error }
+tx-xfer-save-to = Guardar en
+tx-xfer-change = Cambiar…
+tx-xfer-receive = Recibir
+tx-xfer-receiving = Recibiendo ({ $protocol })
+tx-xfer-sending = Enviando ({ $protocol })
+tx-xfer-waiting = Esperando al otro extremo…
+tx-xfer-cancel-hint = Cancelar la transferencia (Esc o Ctrl+C)
+tx-xfer-open-folder = Abrir carpeta
+tx-status-latency = Latencia { $ms } ms
+tx-status-host = Conectado a { $host }
+tx-status-protocol = Protocolo { $protocol }
+tx-status-folder = Carpeta actual { $folder }
+tx-status-logging = Esta sesión se está registrando en un archivo
+tx-status-connected = Conectado desde hace { $time }
+tx-status-metrics = CPU { $cpu }, memoria { $mem }, disco { $disk }, carga { $load }
+tx-status-cpu = CPU
+tx-status-mem = Mem
+tx-status-disk = Disco
+tx-status-load = Carga
+tx-finished = { $host }: `{ $command }` terminó (salida { $exit }, { $time })
+tx-finished-nocmd = { $host }: el comando terminó (salida { $exit }, { $time })
+tx-finished-show = Mostrar
+tx-tab-bell = sonó la campana
+tx-paste-title = { $lines ->
+    [one] ¿Pegar 1 línea en { $host }?
+   *[other] ¿Pegar { $lines } líneas en { $host }?
+}
+tx-paste-title-large = ¿Pegar { $size } en { $host }?
+tx-paste-prod = PRODUCCIÓN – { $host }
+tx-paste-target = Destino: { $address } · { $size }
+tx-paste-broadcast = { $count ->
+    [one] Difusión: otro terminal recibe también este pegado.
+   *[other] Difusión: otros { $count } terminales reciben también este pegado.
+}
+tx-paste-more = { $count ->
+    [one] … y 1 línea más
+   *[other] … y { $count } líneas más
+}
+tx-paste-single = Pegar en una sola línea
+tx-paste-go = Pegar
+tx-drop-ssh-only = Los archivos soltados se suben por SSH. Esta es una sesión { $protocol }, así que no hay dónde subirlos.
+tx-drop-started = { $count ->
+    [one] Subiendo 1 elemento a { $folder }
+   *[other] Subiendo { $count } elementos a { $folder }
+}
+tx-drop-title = { $count ->
+    [one] Subir 1 elemento
+   *[other] Subir { $count } elementos
+}
+tx-drop-to = Subir a:
+tx-drop-hint = Este terminal no ha informado de su carpeta actual. Activa la integración con el shell para subir directamente a donde estás.
+tx-drop-upload = Subir
+tx-drop-label = Suelta para subir a { $folder }
+tx-drop-label-unknown = Suelta para subir
+tx-enable-now = Activar ahora
+tx-enable-integration = Activar ahora la integración con el shell
+tx-open-missing = no se encontró en el servidor
+tx-download-started = Descarga iniciada: mira el panel de transferencias
+tx-integration-enabled = La integración con el shell ya está activa para este host
+tx-integration-later = Guardado para este host. Empezará en la próxima conexión (ahora hay un programa a pantalla completa).
+tx-link-open = Abrir enlace
+tx-link-copy = Copiar enlace
+tx-link-copy-path = Copiar ruta
+tx-link-reveal = Abrir en el explorador de archivos
+tx-link-download = Descargar…
+tx-link-connect = Conectar a { $target }
+tx-env-label = Entorno
+tx-env-none = Ninguno
+tx-env-dev = Desarrollo
+tx-env-staging = Preproducción
+tx-env-prod = Producción
+tx-env-custom = Color personalizado
+tx-env-color = Color (#rrggbb)
+tx-env-hint = Marca con un color las pestañas y terminales de este host. Producción muestra además una cinta roja y siempre pide confirmación al pegar varias líneas.
+tx-env-error-color = Introduce el color como #rrggbb, por ejemplo #8a5cf6.
+tx-env-prod-ribbon = PRODUCCIÓN – { $host }
+tx-settings-status-bar = Mostrar una barra de estado bajo cada terminal
+tx-settings-metrics = Mostrar la carga del servidor en la barra de estado (CPU, memoria, disco)
+tx-settings-metrics-hint = Ejecuta un pequeño comando de solo lectura en el servidor cada 5 segundos mientras el terminal es visible. Solo sesiones SSH.
+tx-settings-links = Enlaces y rutas en los que se puede hacer clic en la salida
+tx-settings-links-hint = Ctrl+clic (⌘+clic en macOS) abre un enlace; clic derecho para más opciones. Si un programa usa el ratón, mantén Mayús.
+tx-settings-confirm-paste = Confirmar pegado de varias líneas
+tx-settings-paste-always = Siempre
+tx-settings-paste-prod = Solo hosts de producción
+tx-settings-paste-never = Nunca
+tx-settings-paste-hint = Los hosts de producción siempre preguntan. El pegado entre corchetes se usa en cualquier caso, así que el shell trata el texto como entrada y no lo ejecuta de inmediato.
+tx-settings-notify = Avisar cuando termine un comando largo
+tx-settings-notify-after = Se considera largo a partir de (segundos)
+tx-settings-notify-hint = Requiere la integración con el shell (actívala en los ajustes del host). Se avisa cuando la pestaña está en segundo plano o la ventana no tiene el foco.
+tx-settings-error-seconds = Introduce los segundos como un número entero de 1 a 86400.

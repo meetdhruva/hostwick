@@ -97,6 +97,9 @@ pub struct SettingsForm {
     auto_reconnect: bool,
     restore_tabs: bool,
     sync_auto: bool,
+    /// Paste protection, finished-command alerts, status bar, links.
+    term: crate::terminal::prefs::TermPrefs,
+    finish_secs: Entity<InputState>,
     rules: Entity<RuleEditor>,
     snippets: Entity<SnippetEditor>,
     /// Saved credentials: (id, description); None while loading.
@@ -170,6 +173,13 @@ impl SettingsForm {
             auto_reconnect: s.auto_reconnect,
             restore_tabs: s.restore_tabs,
             sync_auto: s.sync_auto,
+            term: s.term.clone(),
+            finish_secs: mk(
+                s.term.finished_after_secs.to_string(),
+                "10".into(),
+                window,
+                cx,
+            ),
             rules: cx.new(|cx| RuleEditor::new(&s.highlight_rules, window, cx)),
             snippets: cx.new(|cx| {
                 SnippetEditor::new(&s.snippets, t!("settings-snippets-empty"), window, cx)
@@ -299,7 +309,17 @@ impl SettingsForm {
         if !folder.is_empty() && !std::path::Path::new(&folder).is_dir() {
             return Err(t!("settings-error-sync-folder", folder = folder).into());
         }
+        let finish = v(&self.finish_secs)
+            .parse::<u32>()
+            .ok()
+            .filter(|n| (1..=86_400).contains(n))
+            .ok_or_else(|| t!("tx-settings-error-seconds").to_string())?;
+        let term = crate::terminal::prefs::TermPrefs {
+            finished_after_secs: finish,
+            ..self.term.clone()
+        };
         Ok(Settings {
+            term,
             font_family: v(&self.font),
             font_size,
             theme: self.theme,
@@ -681,6 +701,69 @@ impl SettingsForm {
                     cx,
                     |f, v| f.button_bar = v,
                 ))
+                .child(Self::check(
+                    "status-bar",
+                    t!("tx-settings-status-bar"),
+                    self.term.status_bar,
+                    cx,
+                    |f, v| f.term.status_bar = v,
+                ))
+                .child(Self::check(
+                    "metrics",
+                    t!("tx-settings-metrics"),
+                    self.term.server_metrics,
+                    cx,
+                    |f, v| f.term.server_metrics = v,
+                ))
+                .child(Self::hint(t!("tx-settings-metrics-hint"), cx))
+                .child(Self::check(
+                    "links",
+                    t!("tx-settings-links"),
+                    self.term.clickable_output,
+                    cx,
+                    |f, v| f.term.clickable_output = v,
+                ))
+                .child(Self::hint(t!("tx-settings-links-hint"), cx))
+                .child(Self::row(
+                    t!("tx-settings-confirm-paste"),
+                    Self::choice(
+                        "paste-confirm",
+                        self.term.confirm_paste,
+                        &[
+                            (
+                                crate::terminal::paste::PasteConfirm::Always,
+                                t!("tx-settings-paste-always"),
+                            ),
+                            (
+                                crate::terminal::paste::PasteConfirm::ProdOnly,
+                                t!("tx-settings-paste-prod"),
+                            ),
+                            (
+                                crate::terminal::paste::PasteConfirm::Never,
+                                t!("tx-settings-paste-never"),
+                            ),
+                        ],
+                        cx,
+                        |f, v| f.term.confirm_paste = v,
+                    ),
+                ))
+                .child(Self::hint(t!("tx-settings-paste-hint"), cx))
+                .child(Self::check(
+                    "notify-finished",
+                    t!("tx-settings-notify"),
+                    self.term.notify_finished,
+                    cx,
+                    |f, v| f.term.notify_finished = v,
+                ))
+                .child(Self::row(
+                    t!("tx-settings-notify-after"),
+                    div().w(px(120.0)).child(
+                        Input::new(&self.finish_secs)
+                            .small()
+                            .aria_label(t!("tx-settings-notify-after")),
+                    ),
+                ))
+                .child(Self::hint(t!("tx-settings-notify-hint"), cx))
                 .child(
                     div()
                         .pt(px(6.0))

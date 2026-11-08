@@ -15,7 +15,12 @@ workspace = true
 hostwick-core.workspace = true
 hostwick-ssh.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 bytes.workspace = true
+base64.workspace = true
+flate2 = "1"
+md-5 = "0.10"
+serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 socket2 = { version = "0.6", features = ["all"] }
@@ -24,5 +29,6 @@ socket2 = { version = "0.6", features = ["all"] }
 serialport = { version = "4.10", default-features = false }
 
 [dev-dependencies]
+tempfile.workspace = true
 anyhow.workspace = true
 tokio = { workspace = true, features = ["process"] }

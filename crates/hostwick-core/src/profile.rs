@@ -263,6 +263,10 @@ pub struct HostProfile {
     pub shell_integration: bool,
     #[serde(default)]
     pub snippets: Vec<crate::Snippet>,
+    /// What the host is for (dev, staging, production, own colour): shown
+    /// as a stripe on tabs and terminals.
+    #[serde(default)]
+    pub environment: crate::Environment,
     /// Last change, Unix milliseconds; set by the store, used to merge
     /// settings sync.
     #[serde(default)]
@@ -314,6 +318,7 @@ impl HostProfile {
             login_script: String::new(),
             shell_integration: false,
             snippets: Vec::new(),
+            environment: crate::Environment::None,
             updated_ms: 0,
         }
     }

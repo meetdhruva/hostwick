@@ -13,6 +13,9 @@
 mod error;
 pub mod serial;
 pub mod telnet;
+pub mod trzsz;
+pub mod xfer;
+pub mod zmodem;
 
 use tokio::sync::mpsc;
 

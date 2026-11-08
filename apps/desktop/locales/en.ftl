@@ -339,7 +339,7 @@ host-terminal-type = Terminal type
 host-login-script = Login script
 host-login-script-hint = One line per command, typed after login. @wait TEXT waits for output (10 s), @wait 30000 TEXT for longer, @sleep 500 pauses; # starts a comment.
 host-shell-integration = Shell integration (bash, zsh)
-host-shell-integration-hint = Lets the file browser follow the terminal's folder (right-click → Open files here). Adds a prompt hook quietly when the shell starts; nothing is installed on the server.
+host-shell-integration-hint = Lets the file browser follow the terminal's folder (right-click → Open files here), and enables upload by dropping files, command-finished alerts and clickable relative paths. Adds a prompt hook quietly when the shell starts; nothing is installed on the server.
 host-snippets-title = Snippets for this host
 host-session-log = Session log
 host-session-log-hint = Tokens: &S session, &H host, &P port, &U user, &Y&M&D date, &T time. Relative paths go to the log folder.
@@ -378,7 +378,7 @@ settings-theme-dark = Dark
 settings-theme-light = Light
 settings-terminal-font = Terminal font
 settings-font-size = Font size
-settings-font-placeholder = empty = system monospace
+settings-font-placeholder = empty = bundled JetBrains Mono
 settings-font-hint = Font changes apply to open terminals when you save.
 settings-editor-placeholder = empty = the system's default app (e.g. code -w { "{file}" })
 settings-auto-lock-placeholder = 0 = keep unlocked until Hostwick quits
@@ -1083,3 +1083,114 @@ welcome-note = You can do this again at any time: Import… → Scan this comput
 welcome-import = Import selected
 welcome-skip = Skip
 welcome-continue = Continue
+
+## Terminal: transfers, links, production safety, status bar, alerts
+
+tx-xfer-no-dirs = Folder transfers (trz -d) are not supported here, so the transfer was declined.
+tx-xfer-offer-download = { $protocol }: the server wants to send files
+tx-xfer-offer-upload = { $protocol }: the server is waiting for files
+tx-xfer-pick-prompt = Choose files to send
+tx-xfer-folder-prompt = Choose the folder to save into
+tx-xfer-cancelled = Transfer cancelled
+tx-xfer-received = { $protocol }: received { $count ->
+    [one] 1 file
+   *[other] { $count } files
+} ({ $size })
+tx-xfer-sent = { $protocol }: sent { $count ->
+    [one] 1 file
+   *[other] { $count } files
+} ({ $size })
+tx-xfer-remote-cancelled = The other side cancelled the transfer
+tx-xfer-closed = The connection closed during the transfer
+tx-xfer-timeout = The transfer timed out
+tx-xfer-failed = { $protocol } failed: { $error }
+tx-xfer-save-to = Save to
+tx-xfer-change = Change…
+tx-xfer-receive = Receive
+tx-xfer-receiving = Receiving ({ $protocol })
+tx-xfer-sending = Sending ({ $protocol })
+tx-xfer-waiting = Waiting for the other side…
+tx-xfer-cancel-hint = Cancel the transfer (Esc or Ctrl+C)
+tx-xfer-open-folder = Open folder
+tx-status-latency = Latency { $ms } ms
+tx-status-host = Connected to { $host }
+tx-status-protocol = Protocol { $protocol }
+tx-status-folder = Current folder { $folder }
+tx-status-logging = This session is being logged to a file
+tx-status-connected = Connected for { $time }
+tx-status-metrics = CPU { $cpu }, memory { $mem }, disk { $disk }, load { $load }
+tx-status-cpu = CPU
+tx-status-mem = Mem
+tx-status-disk = Disk
+tx-status-load = Load
+tx-finished = { $host }: `{ $command }` finished (exit { $exit }, { $time })
+tx-finished-nocmd = { $host }: command finished (exit { $exit }, { $time })
+tx-finished-show = Show
+tx-tab-bell = bell rang
+tx-paste-title = { $lines ->
+    [one] Paste 1 line into { $host }?
+   *[other] Paste { $lines } lines into { $host }?
+}
+tx-paste-title-large = Paste { $size } into { $host }?
+tx-paste-prod = PRODUCTION – { $host }
+tx-paste-target = Target: { $address } · { $size }
+tx-paste-broadcast = { $count ->
+    [one] Broadcast: 1 other terminal receives this paste too.
+   *[other] Broadcast: { $count } other terminals receive this paste too.
+}
+tx-paste-more = { $count ->
+    [one] … and 1 more line
+   *[other] … and { $count } more lines
+}
+tx-paste-single = Paste as single line
+tx-paste-go = Paste
+tx-drop-ssh-only = Dropped files are uploaded over SSH. This is a { $protocol } session, so there is nowhere to upload to.
+tx-drop-started = { $count ->
+    [one] Uploading 1 item to { $folder }
+   *[other] Uploading { $count } items to { $folder }
+}
+tx-drop-title = { $count ->
+    [one] Upload 1 item
+   *[other] Upload { $count } items
+}
+tx-drop-to = Upload to:
+tx-drop-hint = This terminal has not reported its current folder. Enable shell integration to upload straight to where you are.
+tx-drop-upload = Upload
+tx-drop-label = Drop to upload to { $folder }
+tx-drop-label-unknown = Drop to upload
+tx-enable-now = Enable now
+tx-enable-integration = Enable shell integration now
+tx-open-missing = not found on the server
+tx-download-started = Download started – see the transfers panel
+tx-integration-enabled = Shell integration is now on for this host
+tx-integration-later = Saved for this host. It starts the next time you connect (a full-screen program is running now).
+tx-link-open = Open link
+tx-link-copy = Copy link
+tx-link-copy-path = Copy path
+tx-link-reveal = Open in file browser
+tx-link-download = Download…
+tx-link-connect = Connect to { $target }
+tx-env-label = Environment
+tx-env-none = None
+tx-env-dev = Development
+tx-env-staging = Staging
+tx-env-prod = Production
+tx-env-custom = Custom colour
+tx-env-color = Colour (#rrggbb)
+tx-env-hint = Marks this host’s tabs and terminals with a colour. Production also shows a red ribbon and always asks before multi-line pastes.
+tx-env-error-color = Enter the colour as #rrggbb, for example #8a5cf6.
+tx-env-prod-ribbon = PRODUCTION – { $host }
+tx-settings-status-bar = Show a status bar under each terminal
+tx-settings-metrics = Show server load in the status bar (CPU, memory, disk)
+tx-settings-metrics-hint = Runs a small read-only command on the server every 5 seconds while the terminal is visible. SSH sessions only.
+tx-settings-links = Clickable links and paths in terminal output
+tx-settings-links-hint = Ctrl+click (⌘+click on macOS) follows a link; right-click for more. While a program uses the mouse, hold Shift.
+tx-settings-confirm-paste = Confirm multi-line paste
+tx-settings-paste-always = Always
+tx-settings-paste-prod = Production hosts only
+tx-settings-paste-never = Never
+tx-settings-paste-hint = Production hosts always ask. Bracketed paste is used either way, so shells treat the text as typed input, not commands.
+tx-settings-notify = Notify when a long command finishes
+tx-settings-notify-after = Counts as long after (seconds)
+tx-settings-notify-hint = Needs shell integration (turn it on in the host’s settings). You are told when the tab is in the background or the window is not focused.
+tx-settings-error-seconds = Enter the number of seconds as a whole number from 1 to 86400.

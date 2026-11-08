@@ -14,7 +14,20 @@
 - Palette action to switch between dark and light theme.
 - Host list keys changed to match the palette: Enter terminal, Ctrl/⌘+Enter files (was Shift+Enter), Shift+Enter new split, Alt+Enter edit, F2 rename (was edit).
 
+**Terminal**
+- Drop files onto an SSH terminal to upload them to the shell's current folder (folders recursively, through the transfer panel); a small dialog asks when the folder is unknown. The terminal is outlined while files are dragged over it.
+- ZMODEM (`sz`/`rz`) and trzsz (`tsz`/`trz`) in the terminal, implemented in `hostwick-term` and tested against real lrzsz and trzsz: download asks where to save, upload opens a file picker, progress card, Esc/Ctrl+C cancel, back-pressure instead of buffering, no overwriting, sanitised remote names, no binary noise after a cancel. trzsz directory transfers are declined; ZMODEM is limited to files under 4 GB.
+- Clickable output: URLs, absolute/`~`/`./relative` paths, IPv4/IPv6 and host names. Ctrl/⌘+click opens, right-click adds *Open link / Copy link*, *Open in file browser / Download… / Copy path*, *Connect to… / Copy address*. Needs Shift while a program uses the mouse. Setting: *Clickable links and paths*.
+- Production safety: a per-host *Environment* (none, development, staging, production, custom colour) shown as a coloured stripe on the tab and pane header and a line above the terminal, plus a red *PRODUCTION – host* ribbon for production. Multi-line or large pastes (over 8 KB) ask first with a preview, *Paste as single line* and, with broadcast on, the number of receiving terminals. Setting: *Confirm multi-line paste* (Always by default, Production hosts only, Never); production hosts always ask.
+- Bell marker on background tabs and a *command finished* notification for commands longer than N seconds (default 10, OSC 133 from the shell integration, which now also emits command start/end for bash and zsh); clicking it focuses the tab. Uses the operating system notification when the window is in the background.
+- Status bar under every terminal (setting, on by default): address, protocol, current folder, session log indicator, connection time, latency (SSH keepalive round trip), and optional server load (CPU, memory, disk, load average every 5 s; Linux and macOS; never on telnet/serial; only while visible).
+- *Enable now* wherever the app says the terminal has not reported its folder (*Open files here*, drop upload, the terminal menu): turns shell integration on for the host and sets it up in the running shell without reconnecting.
+- JetBrains Mono (OFL 1.1) regular, bold and italic is bundled and is the default terminal font on every system (about 830 KB; licence in `apps/desktop/assets/fonts/OFL.txt`).
+- Host editor: *Environment* row. Settings → Terminal: status bar, server load, clickable links, paste confirmation, finished-command alerts and their threshold.
+- The shell-integration hint in the host editor now lists what it enables.
+
 **SSH**
+- `Connection::ping()` measures the SSH keepalive round trip.
 - `hostwick_ssh::agent_key_names()` lists the running agent's keys (with a timeout).
 
 ## 0.3.0

@@ -262,6 +262,24 @@ impl FilesView {
         self.navigate(Side::Remote, path, cx);
     }
 
+    /// Show `path` in the remote pane: a folder itself, a file's folder.
+    pub fn reveal_remote(&mut self, path: String, cx: &mut Context<Self>) {
+        let fs = self.remote.fs.clone();
+        let job = self.backend.rt.spawn(async move {
+            let abs = fs.canonicalize(&path).await.unwrap_or(path);
+            match fs.stat(&abs).await {
+                Ok(Some(e)) if !e.is_dir() => parent_dir(&abs).unwrap_or(abs),
+                _ => abs,
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(dir) = job.await {
+                let _ = this.update(cx, |v, cx| v.navigate_remote(dir, cx));
+            }
+        })
+        .detach();
+    }
+
     /// The folder the remote pane shows (absolute once loaded).
     #[allow(dead_code)] // API for the app (terminal ↔ browser folder sync)
     pub fn remote_cwd(&self) -> &str {

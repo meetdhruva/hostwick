@@ -114,15 +114,25 @@ impl HostwickApp {
                             t!("tab-state-disconnected")
                         };
                         let close_label = t!("tab-close", title = title.clone());
-                        let spoken = t!(
+                        let env = super::termx::tab_env(t);
+                        let bell = self.tab_has_bell(t.id, window);
+                        let mut spoken = t!(
                             "tab-spoken",
                             title = title.clone(),
                             state = state,
                             index = ix + 1,
                             count = count
-                        );
+                        )
+                        .to_string();
+                        if let Some(name) = crate::util::environment_name(&env) {
+                            spoken = format!("{spoken}, {name}");
+                        }
+                        if bell {
+                            spoken = format!("{spoken}, {}", t!("tx-tab-bell"));
+                        }
                         div()
                             .id(("tab", t.id))
+                            .relative()
                             .role(Role::Tab)
                             .aria_label(spoken)
                             .aria_selected(is_active)
@@ -151,6 +161,27 @@ impl HostwickApp {
                                     app.activate_tab(ix, window, cx);
                                 }
                             }))
+                            .when_some(crate::util::environment_color(&env), |d, color| {
+                                // The environment's colour along the top.
+                                d.child(
+                                    div()
+                                        .absolute()
+                                        .top_0()
+                                        .left_0()
+                                        .right_0()
+                                        .h(px(3.0))
+                                        .bg(color),
+                                )
+                            })
+                            .when(bell, |d| {
+                                d.child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(px(12.0))
+                                        .text_color(theme.warning)
+                                        .child("🔔"),
+                                )
+                            })
                             .child(
                                 div()
                                     .flex_none()
@@ -366,6 +397,7 @@ impl HostwickApp {
                 _ => pane.profile.name.clone().into(),
             };
             let is_terminal = matches!(pane.body, PaneBody::Terminal(_));
+            let env_color = crate::util::environment_color(&pane.profile.environment);
             div()
                 .flex_none()
                 .h(px(24.0))
@@ -373,6 +405,18 @@ impl HostwickApp {
                 .flex()
                 .items_center()
                 .gap(px(2.0))
+                .relative()
+                .when_some(env_color, |d, color| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left_0()
+                            .w(px(4.0))
+                            .bg(color),
+                    )
+                })
                 .bg(if focused {
                     theme.tab_active
                 } else {
